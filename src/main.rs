@@ -3,11 +3,17 @@
 //! Publishes a unified "what is this machine playing" presence on the session bus
 //! by collecting fragments from multiple sources (GameMode, Discord IPC, Steam)
 //! and correlating them by pid.
+//!
+//! Source events flow through the Enricher middleware, which probes
+//! `/proc/<pid>/environ` for Steam appids and manages the Steam partial
+//! lifecycle (tied to last non-Steam source).
 
 mod cache;
 mod correlator;
 mod dbus;
+mod enricher;
 mod error;
+mod naming;
 mod sources;
 
 use crate::cache::CachedRecord;
@@ -70,8 +76,11 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
 
-    // Daemon core state.
+    // Daemon core state. The Enricher starts without a naming database;
+    // it's loaded after sources spawn so the 12MB JSON parse doesn't delay
+    // the Discord listener or GameMode watcher.
     let mut correlator = Correlator::new();
+    let mut enricher = enricher::Enricher::new();
 
     // Re-adopt cache-restored records BEFORE sources start, so the
     // sources' re-derived records merge into them (rather than racing them).
@@ -94,6 +103,10 @@ async fn main() -> Result<()> {
     tokio::spawn(discord::listen(tx));
     info!("Discord IPC source listener started");
 
+    // Load the naming database now that sources are running.
+    // Blocking (~100ms for 12MB JSON), but the listeners are already up.
+    enricher.load_naming();
+
     info!("Service ready. Waiting for activity...");
 
     // Daemon core: consume source events, enrich, correlate by pid, maintain the bus.
@@ -101,7 +114,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = rx.recv() => {
                 let raw_events = match event {
-                    Some(e) => vec![e],
+                    Some(e) => enricher.process(e),
                     None => {
                         // All source watchers have exited; nothing left to do.
                         warn!("All activity sources exited; shutting down core loop");

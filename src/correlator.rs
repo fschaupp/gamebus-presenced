@@ -340,12 +340,7 @@ mod tests {
     }
 
     fn steam(pid: u32) -> Activity {
-        let mut a = Activity::new(format!("steam_{pid}"));
-        a.sources = vec![Source::Steam];
-        a.kind = Kind::Game;
-        a.process_id = pid;
-        a.app_ids.insert("steam".to_string(), "480".to_string());
-        a
+        Activity::from_steam(pid as i32, "480")
     }
 
     fn discord(pid: u32) -> Activity {

@@ -20,7 +20,7 @@ pub const VERSION: u64 = 1;
 
 /// Source of an activity record.
 /// Indicates which integration provided the information.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// Discord Rich Presence via IPC socket
@@ -263,6 +263,24 @@ impl Activity {
         }
     }
 
+    /// Build an activity from a Steam appid found in `/proc/<pid>/environ`.
+    ///
+    /// Steam knows only the appid; everything else stays empty. The
+    /// correlator's merge rule gives Steam ownership of `app_ids["steam"]`.
+    pub fn from_steam(pid: i32, appid: &str) -> Self {
+        let mut app_ids = HashMap::new();
+        app_ids.insert("steam".to_string(), appid.to_string());
+
+        Self {
+            id: format!("steam_{pid}"),
+            sources: vec![Source::Steam],
+            kind: Kind::Game,
+            process_id: pid.max(0) as u32,
+            app_ids,
+            ..Self::new("")
+        }
+    }
+
     /// Generate the D-Bus object path for an activity ID.
     pub fn path_for_id(id: &str) -> String {
         format!("{}/Activity/{}", ROOT_PATH, id)
@@ -364,6 +382,23 @@ mod tests {
             activity.object_path(),
             "/org/gamebus/Presence/v1/Activity/pid_999"
         );
+    }
+
+    #[test]
+    fn test_from_steam_maps_fields() {
+        let activity = Activity::from_steam(42, "480");
+        assert_eq!(activity.id, "steam_42");
+        assert_eq!(activity.sources, vec![Source::Steam]);
+        assert_eq!(activity.kind, Kind::Game);
+        assert_eq!(activity.process_id, 42);
+        assert_eq!(activity.app_ids.get("steam").unwrap(), "480");
+        // Steam knows only the appid; everything else stays empty.
+        assert_eq!(activity.name, "");
+        assert_eq!(activity.details, "");
+        assert_eq!(activity.state, "");
+        assert_eq!(activity.executable, "");
+        assert_eq!(activity.since, 0);
+        assert_eq!(activity.until, 0);
     }
 
     #[test]

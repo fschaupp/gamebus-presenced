@@ -7,6 +7,10 @@ description = "D-Bus presence daemon for Linux desktop - publishes unified game/
 license = "Apache-2.0"
 readme = "README.md"
 
+[[bin]]
+name = "gamebus-presenced"
+path = "src/main.rs"
+
 [dependencies]
 zbus = { version = "4", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
@@ -17,6 +21,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 rsrpc = { git = "https://github.com/SpikeHD/rsRPC", rev = "062e0fd9fe34a475640a822facfee68296ba22e3" }
+ureq = { version = "2", features = ["json"] }
+
+[build-dependencies]
+ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
 discord-rich-presence = "1"
