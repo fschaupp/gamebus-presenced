@@ -5,6 +5,7 @@
 //! Sources are independent and individually optional: a missing source
 //! degrades the record, never the daemon.
 
+pub mod discord;
 pub mod gamemode;
 
 use crate::dbus::types::{Activity, Source};

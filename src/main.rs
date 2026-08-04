@@ -16,7 +16,7 @@ use crate::dbus::connection::Connection;
 use crate::dbus::manager::{Manager, ManagerInterface};
 use crate::dbus::types::{Activity, Source, BUS_NAME, ROOT_PATH, VERSION};
 use crate::error::Result;
-use crate::sources::{gamemode, SourceEvent};
+use crate::sources::{discord, gamemode, SourceEvent};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -58,8 +58,10 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<SourceEvent>(64);
 
     // Spawn the GameMode source watcher on its own connection handle.
-    tokio::spawn(gamemode::watch(conn.inner().clone(), tx));
+    tokio::spawn(gamemode::watch(conn.inner().clone(), tx.clone()));
     info!("GameMode source watcher started");
+    tokio::spawn(discord::listen(tx));
+    info!("Discord IPC source listener started");
 
     // Signal context for Manager signals (ActivityAdded/Removed) and the
     // HasActivity property change notification.
