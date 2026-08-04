@@ -1,0 +1,36 @@
+{
+  "rustc": {
+    "source": "discover"
+  },
+  "cargo": {
+    "buildScripts": {
+      "enable": true
+    },
+    "features": "all"
+  },
+  "procMacro": {
+    "enable": true
+  },
+  "files": {
+    "exclude": [
+      "**/.git/*",
+      "**/target/*",
+      "**/.second-brain/*"
+    ]
+  },
+  "diagnostics": {
+    "enable": true,
+    "experimental": {
+      "enable": true
+    }
+  },
+  "completion": {
+    "callable": {
+      "snippets": true
+    }
+  },
+  "hover": {
+    "documentation": true,
+    "linksInHover": true
+  }
+}
