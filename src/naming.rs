@@ -41,8 +41,16 @@ struct DetectableSku {
 
 /// Naming database with pre-built lookup indexes.
 pub struct NamingDb {
-    /// executable filename (lowercase, no path) → game name
-    by_executable: HashMap<String, String>,
+    /// executable basename (lowercase) → [(entry name, game name)].
+    ///
+    /// detectable.json entries come in two forms: plain (`eldenring.exe`)
+    /// and path-prefixed (`amnesia the bunker/amnesiathebunker.exe`) — the
+    /// prefixed form is the majority (~83% of entries). Both are bucketed by
+    /// basename; path-prefixed entries additionally match by path suffix at
+    /// lookup time (mirroring Discord's own scanner), which disambiguates
+    /// basename collisions like `amnesia/amnesia.exe` vs
+    /// `amnesia the dark descent/amnesia.exe`.
+    by_executable: HashMap<String, Vec<(String, String)>>,
     /// steam appid → game name
     by_steam_appid: HashMap<String, String>,
 }
@@ -59,15 +67,20 @@ impl NamingDb {
     /// Parse from a JSON string (for testing).
     pub fn parse(json: &str) -> Option<Self> {
         let entries: Vec<DetectableEntry> = serde_json::from_str(json).ok()?;
-        let mut by_executable = HashMap::new();
+        let mut by_executable: HashMap<String, Vec<(String, String)>> = HashMap::new();
         let mut by_steam_appid = HashMap::new();
 
         for entry in entries {
             for exe in &entry.executables {
-                let key = exe.name.to_lowercase();
-                by_executable
-                    .entry(key)
-                    .or_insert_with(|| entry.name.clone());
+                let full = exe.name.to_lowercase();
+                let basename = full
+                    .rsplit_once('/')
+                    .map(|(_, b)| b.to_string())
+                    .unwrap_or_else(|| full.clone());
+                let bucket = by_executable.entry(basename).or_default();
+                if !bucket.iter().any(|(e, _)| e == &full) {
+                    bucket.push((full, entry.name.clone()));
+                }
             }
             for sku in &entry.third_party_skus {
                 if sku.distributor == "steam" {
@@ -88,13 +101,35 @@ impl NamingDb {
 
     /// Look up a game name by executable path or filename.
     ///
-    /// The lookup is case-insensitive and matches on the filename component
-    /// only (path is stripped). Returns `None` if not found.
+    /// Matching order per basename bucket:
+    /// 1. **Path-suffix match** — a path-prefixed entry whose full name is a
+    ///    suffix of the lowercased input path
+    ///    (`amnesia the bunker/amnesiathebunker.exe` matches
+    ///    `.../Amnesia The Bunker/AmnesiaTheBunker.exe`). Most specific.
+    /// 2. **Plain entry** — an entry with no path component (`eldenring.exe`).
+    /// 3. **First entry in bucket** — deterministic fallback for ambiguous
+    ///    basenames.
     pub fn lookup_by_executable(&self, executable: &str) -> Option<&str> {
-        let filename = std::path::Path::new(executable)
-            .file_name()
-            .map(|f| f.to_string_lossy().to_lowercase())?;
-        self.by_executable.get(&filename).map(|s| s.as_str())
+        // Normalise Windows path separators: Wine process cmdlines carry
+        // `S:\Spiele\game\game.exe`, detectable.json uses `/`.
+        let lower = executable.replace('\\', "/").to_lowercase();
+        let basename = lower.rsplit_once('/').map(|(_, b)| b).unwrap_or(&lower);
+        let bucket = self.by_executable.get(basename)?;
+
+        // 1. Path-suffix match (most specific).
+        for (entry, name) in bucket {
+            if entry.contains('/') && lower.ends_with(entry.as_str()) {
+                return Some(name.as_str());
+            }
+        }
+        // 2. Plain entry (no path component).
+        for (entry, name) in bucket {
+            if !entry.contains('/') {
+                return Some(name.as_str());
+            }
+        }
+        // 3. Deterministic fallback.
+        bucket.first().map(|(_, name)| name.as_str())
     }
 
     /// Look up a game name by Steam appid.
@@ -205,5 +240,67 @@ mod tests {
         ]"#;
         let db = NamingDb::parse(json).unwrap();
         assert_eq!(db.lookup_by_executable("game.exe"), Some("First"));
+    }
+
+    #[test]
+    fn path_prefixed_entry_matches_by_suffix() {
+        // The Amnesia case: detectable.json stores the exe path-prefixed.
+        let json = r#"[
+            {"name": "Amnesia: The Bunker", "executables": [{"name": "amnesia the bunker/amnesiathebunker.exe"}], "third_party_skus": []}
+        ]"#;
+        let db = NamingDb::parse(json).unwrap();
+        // Full path suffix match (case-insensitive).
+        assert_eq!(
+            db.lookup_by_executable(
+                "/media/Data/Spiele/Amnesia The Bunker/Amnesia The Bunker/AmnesiaTheBunker.exe"
+            ),
+            Some("Amnesia: The Bunker")
+        );
+        // Exact entry name also matches.
+        assert_eq!(
+            db.lookup_by_executable("amnesia the bunker/amnesiathebunker.exe"),
+            Some("Amnesia: The Bunker")
+        );
+    }
+
+    #[test]
+    fn basename_collision_resolved_by_suffix() {
+        // Two games share the same exe basename; the path suffix picks right.
+        let json = r#"[
+            {"name": "Amnesia: Memories", "executables": [{"name": "amnesia/amnesia.exe"}], "third_party_skus": []},
+            {"name": "Amnesia: The Dark Descent", "executables": [{"name": "amnesia the dark descent/amnesia.exe"}], "third_party_skus": []}
+        ]"#;
+        let db = NamingDb::parse(json).unwrap();
+        assert_eq!(
+            db.lookup_by_executable("/games/Amnesia The Dark Descent/Amnesia.exe"),
+            Some("Amnesia: The Dark Descent")
+        );
+        // No suffix match: deterministic fallback (first in bucket).
+        assert_eq!(
+            db.lookup_by_executable("amnesia.exe"),
+            Some("Amnesia: Memories")
+        );
+    }
+
+    #[test]
+    fn plain_and_prefixed_coexist() {
+        // BlackOps Cold War has BOTH a plain and a path-prefixed entry.
+        let json = r#"[
+            {"name": "Call of Duty: Black Ops Cold War", "executables": [
+                {"name": "call of duty black ops cold war/blackopscoldwar.exe"},
+                {"name": "blackopscoldwar.exe"}
+            ], "third_party_skus": []}
+        ]"#;
+        let db = NamingDb::parse(json).unwrap();
+        assert_eq!(
+            db.lookup_by_executable("blackopscoldwar.exe"),
+            Some("Call of Duty: Black Ops Cold War")
+        );
+        assert_eq!(
+            db.lookup_by_executable(
+                "S:/Spiele/Call of Duty Black Ops Cold War/BlackOpsColdWar.exe"
+            ),
+            Some("Call of Duty: Black Ops Cold War")
+        );
     }
 }

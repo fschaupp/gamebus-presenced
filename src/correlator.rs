@@ -167,10 +167,22 @@ impl Correlator {
     }
 
     /// Drop one partial and recompute the pid's published record.
+    ///
+    /// Cache-adopted records have no partial — they're published directly
+    /// via `adopt()`. If the pid has no partial entry but IS published,
+    /// the removal targets the adopted record itself.
     fn drop_partial(&mut self, pid: u32, source: Source) -> Vec<Effect> {
-        let Some(partials) = self.partials.get_mut(&pid) else {
+        // Fast path: no partial entry at all.
+        if !self.partials.contains_key(&pid) {
+            // Check if this is a cache-adopted record (published but no partials).
+            if let Some(old_id) = self.published.remove(&pid) {
+                self.id_index.retain(|_, p| *p != pid);
+                return vec![Effect::Remove(old_id)];
+            }
             return Vec::new();
-        };
+        }
+
+        let partials = self.partials.get_mut(&pid).unwrap();
         match partials.slot(source) {
             Some(slot) => *slot = None,
             None => return Vec::new(),
@@ -226,10 +238,11 @@ impl Correlator {
 
 /// Derive the published record from a pid's partials.
 ///
-/// Field precedence (ADR-007): Discord's human-facing fields win (name,
-/// details/state, timestamps, artwork, party) because they are the point of
-/// the Discord source; GameMode owns the machine-facing fields (executable);
-/// Steam owns `app_ids["steam"]` and contributes nothing else.
+/// Field precedence (ADR-007, S4b naming): Discord's human-facing fields win
+/// (name, details/state, timestamps, artwork, party) because they are the
+/// point of the Discord source; Steam's detectable.json-enriched name beats
+/// GameMode's executable stem (a curated database outranks a filename);
+/// GameMode owns the machine-facing fields (executable).
 /// `since` prefers Discord's game-reported timestamp, falling back to
 /// GameMode's registration time. Exactly one partial may be `None`.
 fn merge(
@@ -279,13 +292,13 @@ fn merge(
         .map(|d| d.name.clone())
         .filter(|n| !n.is_empty())
         .or_else(|| {
-            gm.as_ref()
-                .map(|g| g.name.clone())
+            st.as_ref()
+                .map(|s| s.name.clone())
                 .filter(|n| !n.is_empty())
         })
         .or_else(|| {
-            st.as_ref()
-                .map(|s| s.name.clone())
+            gm.as_ref()
+                .map(|g| g.name.clone())
                 .filter(|n| !n.is_empty())
         })
         .unwrap_or_default();
@@ -529,6 +542,40 @@ mod tests {
         c.on_updated(steam(80));
         let effects = c.on_removed("steam_80", Source::Steam);
         assert_eq!(effects, vec![Effect::Remove("steam_80".to_string())]);
+    }
+
+    #[test]
+    fn steam_name_beats_gamemode_executable_stem() {
+        // Wrapper-process case: GameMode registers a bash wrapper,
+        // Steam enrichment finds the real game name via detectable.json.
+        let mut c = Correlator::new();
+        c.on_updated(gamemode(60)); // name = "eldenring" (executable stem)
+
+        let mut steam_named = steam(60);
+        steam_named.name = "Elden Ring".to_string(); // detectable.json enriched
+
+        let effects = c.on_updated(steam_named);
+        let [Effect::UpdateInPlace(merged)] = effects.as_slice() else {
+            panic!("expected in-place merge, got {effects:?}");
+        };
+        assert_eq!(merged.id, "pid_60");
+        assert_eq!(merged.name, "Elden Ring"); // Steam's curated name wins
+        assert_eq!(merged.executable, "/games/eldenring.exe"); // GameMode still owns executable
+    }
+
+    #[test]
+    fn steam_name_falls_back_to_gamemode_when_empty() {
+        // Steam has no detectable.json match (name = ""): GameMode's
+        // executable stem is the fallback.
+        let mut c = Correlator::new();
+        c.on_updated(gamemode(61));
+        c.on_updated(steam(61)); // name = "" (from_steam)
+
+        let effects = c.on_updated(steam(61)); // re-update to trigger merge
+        let [Effect::UpdateInPlace(merged)] = effects.as_slice() else {
+            panic!("expected in-place merge, got {effects:?}");
+        };
+        assert_eq!(merged.name, "eldenring"); // GameMode's stem is the fallback
     }
 
     #[test]
