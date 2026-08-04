@@ -6,7 +6,9 @@
 //! that a second SET_ACTIVITY updates it in place, and that clearing the
 //! activity removes it.
 //!
-//! Skips gracefully when there is no session bus.
+//! Skips gracefully when there is no session bus, and when a real Discord
+//! client is running (the proxy would forward the test's invalid client_id
+//! to the upstream, which rejects it).
 
 use discord_rich_presence::activity::{
     Activity as ClientActivity, ActivityType, Assets, Party, Timestamps,
@@ -138,6 +140,22 @@ async fn discord_set_activity_appears_on_bus() {
             return;
         }
     };
+
+    // Skip when a real Discord client is running: the proxy would forward
+    // the test's invalid client_id to the upstream, which rejects it.
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    for n in 1..=9 {
+        let candidate = runtime_dir.join(format!("discord-ipc-{n}"));
+        if candidate.exists() && std::os::unix::net::UnixStream::connect(&candidate).is_ok() {
+            eprintln!(
+                "SKIP: real Discord client running on {}; proxy would reject test client_id",
+                candidate.display()
+            );
+            return;
+        }
+    }
 
     // Start the daemon under test. Tracing writes to stdout; capture both.
     let daemon_log = std::env::temp_dir().join("gamebus-presenced-test-discord.log");

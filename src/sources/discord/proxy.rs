@@ -33,6 +33,7 @@ pub async fn find_upstream() -> Option<UnixStream> {
     for n in 1..=MAX_UPSTREAM_INDEX {
         let candidate: PathBuf = dir.join(format!("discord-ipc-{n}"));
         if !candidate.exists() {
+            debug!(path = %candidate.display(), "Upstream candidate does not exist");
             continue;
         }
         match UnixStream::connect(&candidate).await {
@@ -45,6 +46,7 @@ pub async fn find_upstream() -> Option<UnixStream> {
             }
         }
     }
+    debug!("No Discord upstream found; standalone mode");
     None
 }
 

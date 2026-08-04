@@ -9,7 +9,9 @@
 //! unregistering from GameMode removes the record - it dies with the last
 //! source.
 //!
-//! Skips gracefully when there is no session bus or no gamemoded.
+//! Skips gracefully when there is no session bus or no gamemoded, and when
+//! a real Discord client is running (the proxy would forward the test's
+//! invalid client_id to the upstream, which rejects it).
 
 use discord_rich_presence::activity::{Activity as ClientActivity, ActivityType};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
@@ -142,6 +144,22 @@ async fn gamemode_and_discord_join_by_pid() {
         },
         Err(e) => {
             eprintln!("SKIP: gamemoded not available: {e}");
+            return;
+        }
+    }
+
+    // Skip when a real Discord client is running: the proxy would forward
+    // the test's invalid client_id to the upstream, which rejects it.
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    for n in 1..=9 {
+        let candidate = runtime_dir.join(format!("discord-ipc-{n}"));
+        if candidate.exists() && std::os::unix::net::UnixStream::connect(&candidate).is_ok() {
+            eprintln!(
+                "SKIP: real Discord client running on {}; proxy would reject test client_id",
+                candidate.display()
+            );
             return;
         }
     }
