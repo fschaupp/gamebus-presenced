@@ -14,7 +14,7 @@ ai-first: true
 
 ## For future Claude
 
-`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source) and S2 (Discord IPC listener) are now COMPLETE; S3 (proxy + correlator) is next. This note tracks the project's status, decisions, and recent activity.
+`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), and S4c (packaging: CLI + systemd) are now COMPLETE. S4d (ancestor-walk join) is a candidate, trigger-only. This note tracks the project's status, decisions, and recent activity.
 
 ## Overview
 
@@ -44,14 +44,18 @@ Steam probe → registry.vdf + /proc environ
 
 ## Status
 
-**S0, S1 and S2 implementation completed. S3 (proxy + correlator) next.**
+**S0, S1, S2, S3, S4a, S4b, and S4c implementation completed. S4d (ancestor-walk candidate) is trigger-only.**
 
 - Repo created: 2026-08-03
 - Design doc: `docs/design/gamebus-presence.md` (complete)
-- Roadmap: `PLAN.md` (S0-S2 done, S3-S4 planned)
+- Roadmap: `PLAN.md` (S0-S4c done, S4d candidate)
 - S0: D-Bus surface foundation implemented and verified on session bus (2026-08-04)
 - S1: GameMode source implemented and verified end-to-end on session bus (2026-08-04)
 - S2: Discord IPC listener implemented and verified with a genuine discord-rich-presence client (2026-08-04)
+- S3: proxy + correlator + restart cache implemented and verified (byte-identity vs fixture, same-pid join, SIGKILL/respawn re-adoption) (2026-08-04)
+- S4a: Steam enrichment via Enricher middleware (reactive /proc/<pid>/environ probe, tied to last non-Steam source) (2026-08-04)
+- S4b: naming enrichment via detectable.json (enrichment-only fallback, never overrides more authoritative source) (2026-08-04)
+- S4c: packaging (gamebus-presence CLI with monitor + fetch-detectable, systemd user unit, D-Bus activation) (2026-08-04)
 
 ## Slices (from PLAN.md)
 
@@ -64,11 +68,23 @@ The `org.gamebus.Presence.v1` surface fed by the GameMode watcher: `GameRegister
 ### S2 — Discord IPC listener, no upstream (COMPLETE)
 Standalone Discord Rich Presence listener on `discord-ipc-0` (stale-socket unlink, live-owner degrade). Handshake/READY, lock-step echo, `SET_ACTIVITY` parsed with the pinned `rsrpc` crate's `rsrpc::cmd` model (+ its `fix()` normalisation) and published as activity objects at `.../Activity/discord_<pid>`; pid from `SO_PEERCRED`, never client-supplied. `ActivityInterface` is now mutable (`PropertiesChanged` in place for mid-session updates); sources unified under one `SourceEvent` channel. Verified with a genuine discord-rich-presence client.
 
-### S3 — Proxy + correlator (PLANNED)
-Forward frames verbatim to a real Discord (which will have taken `ipc-1`) so this works alongside a running Discord. Plus the correlator: pid join across sources, merge and split rules, and the pid + `/proc/<pid>/stat` start-time runtime cache that re-adopts records across a daemon restart.
+### S3 — Proxy + correlator (COMPLETE)
+Transparent proxy to a real Discord on `ipc-1..9`: frames forwarded whole (byte-identity verified against a fixture), `SET_ACTIVITY` tapped passively, upstream loss closes the client connection (reconnect lands in standalone mode). Correlator in `src/correlator.rs`: per-source partials keyed by exact pid, published activity is a derived view; `pid_<pid>` absorbs `discord_<pid>` on a join; Discord's human-facing fields win, GameMode owns executable; degrade-in-place, die with last source. Restart cache at `$XDG_RUNTIME_DIR/gamebus-presenced/cache.json` keyed pid + `/proc/<pid>/stat` start-time; startup re-adoption before sources spawn. umu/Proton wrapper-tree join is a documented miss (S4 candidate: bounded ancestor-walk). See [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]].
 
-### S4 — Enrichment and packaging (PLANNED)
-Steam appid from `/proc/<pid>/environ`, `detectable.json` naming (Discord's `applications/detectable`, ~1834 entries), a `gamebus-presence monitor` CLI, systemd user unit and D-Bus activation file.
+### S4 — Enrichment and packaging (COMPLETE 2026-08-04)
+
+Brainstormed via 6-question Socratic interview — see [[wiki/concepts/2026-08-04 - Brainstorm - S4 Enrichment and Packaging]].
+
+**S4a — Steam source (reactive via Enricher middleware)** ✅
+New `src/enricher.rs`: `Enricher` struct sits between sources and correlator (`sources → Enricher → Vec<SourceEvent> → Correlator`). On `SourceEvent::Updated` with a pid, probes `/proc/<pid>/environ` for `SteamAppId`/`SteamGameId`/`UMU_ID`/`STORE`; if found, emits `SourceEvent::Updated(Source::Steam)`. Steam partial removal tied to last non-Steam source (pid-reuse safe — Enricher tracks `{pid: Set<Source>}`). `Activity::from_steam(pid, appid)` maps to `app_ids["steam"]`. Correlator gains `steam` slot. `tracing::debug!` on join-miss for ancestor-walk decision. Integration test: `sleep` spawned with `SteamAppId=480`, registered via `RegisterGameByPID`, merged record carries `app_ids["steam"]`.
+
+**S4b — Naming enrichment (enrichment-only fallback)** ✅
+`build.rs` fetches `detectable.json` from Discord's `applications/detectable` endpoint (23858 entries, 12.3MB); ships as installation data file (`$PREFIX/share/gamebus-presenced/detectable.json`, not binary-embedded). `gamebus-presence fetch-detectable` CLI refreshes to `$XDG_CACHE_HOME`. Naming precedence: Discord name > detectable.json lookup > executable stem. Anti-goal: never overrides a more authoritative source. Naming DB loaded after sources spawn to avoid blocking the Discord listener.
+
+**S4c — Packaging** ✅
+`gamebus-presence` CLI binary (`src/bin/gamebus-presence.rs`): `monitor` pretty-prints bus state (activities, sources, names, appids); `fetch-detectable` downloads Discord's detectable.json to `$XDG_CACHE_HOME`. systemd user unit (`data/gamebus-presenced.service`) and D-Bus activation file (`data/org.gamebus.Presence.v1.service`) for session-start activation.
+
+**S4d (candidate, trigger-only)** — bounded ancestor-walk join (ppid chain, start-time validated), only if S4a's join-miss logs justify it.
 
 ## Key Decisions
 
@@ -126,12 +142,15 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 
 ## Recent Activity
 
+- 2026-08-04: Dead-code cleanup (owner-confirmed): `Manager::remove_by_source` (superseded by the correlator) and the unused S0 error variants `NameAcquisition`/`Config`/`Internal` removed; `cargo clippy --all-targets` is now fully clean, zero warnings. The test-removal exchange produced the workflow preference [[wiki/concepts/test-deletion-visibility]].
+- 2026-08-04: S3 implementation completed - proxy (byte-identical forwarding, tap, upstream-loss close), correlator (`pid_<pid>` absorbs `discord_<pid>`, degrade-in-place, die-with-last-source, exact-pid join), restart cache (pid + start-time, re-adopted before sources spawn). 31 unit + 5 integration tests green. See [[wiki/logs/2026-08-04 - gamebus-presenced S3]] and [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]].
+- 2026-08-04: S3 planned with owner - landing order proxy -> correlator -> cache; absorption and upstream-loss-close decisions confirmed; umu research: launcher assigns identity via env vars (no runtime detection to reuse), `UMU_ID` enrichment deferred to S4, wrapper-tree join deferred to S4.
 - 2026-08-04: S2 implementation completed - standalone Discord IPC listener. `discord-ipc-0` bound with stale-socket handling, handshake/READY, lock-step echo, `SET_ACTIVITY` via pinned `rsrpc` crate payload model, `SO_PEERCRED` pid, `discord_<pid>` objects, mutable `ActivityInterface` with `PropertiesChanged`. See [[wiki/logs/2026-08-04 - gamebus-presenced S2]] and [[wiki/decisions/adr-006-rsrpc-crate-dependency]].
 - 2026-08-04: S1 implementation completed - GameMode source feeding the D-Bus surface. Watcher with `NameOwnerChanged` availability tracking, per-activity objects at `.../Activity/pid_<pid>`, `ActivityAdded`/`ActivityRemoved` signals, `HasActivity` change emission, `ListActivities` as `ao`. Two live discoveries recorded in [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]]. Verified by integration test + busctl acceptance. See [[wiki/logs/2026-08-04 - gamebus-presenced S1]] for details.
 - 2026-08-04: S0 implementation completed - D-Bus interface foundation (`org.gamebus.Presence.v1.Manager` with `ListActivities`, `HasActivity`, `Version` properties; `Activity` type; zbus v4 bindings; service verified on session bus). See [[wiki/logs/2026-08-04 - gamebus-presenced S0]] for details.
-- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]]
+- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]], [[wiki/logs/2026-08-04 - gamebus-presenced S3]]
 - Kanban board: [[boards/gamebus-presenced]]
-- ADRs: [[wiki/decisions/adr-001-zbus-v4-tokio-runtime]], [[wiki/decisions/adr-002-simplified-activity-type]], [[wiki/decisions/adr-003-d-bus-service-naming]], [[wiki/decisions/adr-004-manager-and-activity-interfaces]], [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]], [[wiki/decisions/adr-006-rsrpc-crate-dependency]]
+- ADRs: [[wiki/decisions/adr-001-zbus-v4-tokio-runtime]], [[wiki/decisions/adr-002-simplified-activity-type]], [[wiki/decisions/adr-003-d-bus-service-naming]], [[wiki/decisions/adr-004-manager-and-activity-interfaces]], [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]], [[wiki/decisions/adr-006-rsrpc-crate-dependency]], [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]]
 
 ## Dependencies
 

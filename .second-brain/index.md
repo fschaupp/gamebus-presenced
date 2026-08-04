@@ -18,7 +18,7 @@ This index is a complete catalog of all pages in the vault, organized by categor
 ---
 
 ## Boards
-- [[boards/gamebus-presenced]] - Kanban board for gamebus-presenced project (S0+S1+S2 tasks done)
+- [[boards/gamebus-presenced]] - Kanban board for gamebus-presenced project (S0-S3 tasks done, S4 backlog)
 
 ---
 
@@ -35,13 +35,13 @@ This index is a complete catalog of all pages in the vault, organized by categor
 ## Wiki
 
 ### wiki/daily/
-- [[wiki/daily/2026-08-04]] - S0+S1+S2 implementation for gamebus-presenced
+- [[wiki/daily/2026-08-04]] - S0-S3 implementation for gamebus-presenced
 
 ### wiki/projects/
-- [[wiki/projects/gamebus-presenced]] - D-Bus presence daemon for Linux desktop (S0+S1+S2 complete, S3 next)
+- [[wiki/projects/gamebus-presenced]] - D-Bus presence daemon for Linux desktop (S0-S4c complete, S4d candidate)
 
 ### wiki/entities/
-*No entity notes yet - create with `/obsidian-person`*
+- [[wiki/entities/Florian]] - Vault owner, developer of gamebus-presenced
 
 ### wiki/tasks/
 *No task notes yet - create with `/obsidian-task`*
@@ -50,9 +50,13 @@ This index is a complete catalog of all pages in the vault, organized by categor
 - [[wiki/logs/2026-08-04 - gamebus-presenced S0]] - D-Bus surface foundation implementation (S0)
 - [[wiki/logs/2026-08-04 - gamebus-presenced S1]] - GameMode source implementation (S1)
 - [[wiki/logs/2026-08-04 - gamebus-presenced S2]] - Discord IPC listener implementation (S2)
+- [[wiki/logs/2026-08-04 - gamebus-presenced S3]] - Proxy, correlator and restart cache implementation (S3)
+- [[wiki/logs/2026-08-04 - gamebus-presenced S4]] - Steam enrichment, naming, packaging (S4a/S4b/S4c)
 
 ### wiki/concepts/
-*No concept notes yet - create with `/obsidian-connect` or `/obsidian-synthesize`*
+- [[wiki/concepts/test-deletion-visibility]] - Owner preference: flag test deletions visibly with rationale
+- [[wiki/concepts/2026-08-04 - Learnings Review]] - First learnings review: 7 active, 4 superseded, 1 promotion candidate
+- [[wiki/concepts/2026-08-04 - Brainstorm - S4 Enrichment and Packaging]] - S4 brainstorm: Enricher middleware, reactive Steam, detectable.json data file, instrument-first ancestor-walk
 
 ### wiki/reviews/
 *No review notes yet - create with `/obsidian-review`*
@@ -64,6 +68,7 @@ This index is a complete catalog of all pages in the vault, organized by categor
 - [[wiki/decisions/adr-004-manager-and-activity-interfaces]] - Manager and Activity D-Bus interface design
 - [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]] - pid_<pid> activity IDs; GameMode per-game object API
 - [[wiki/decisions/adr-006-rsrpc-crate-dependency]] - rsrpc crate for Discord payload model; discord_<pid> IDs; SO_PEERCRED
+- [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]] - Correlator merge/split rules; pid_<pid> absorbs; proxy degradation; restart cache
 
 ### wiki/meetings/
 *No meeting notes yet*

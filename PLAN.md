@@ -4,14 +4,17 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0, S1, and S2 done. S3 next.
+## Status: S0, S1, S2, S3, S4a, S4b, and S4c done. S4d (candidate) next.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
 on the bus before any source existed. S0 and S1 both landed 2026-08-04,
 verified against the real session bus and a real gamemoded. S2 landed the
 same day, verified with a genuine `discord-rich-presence` client against the
-daemon's own `discord-ipc-0`.
+daemon's own `discord-ipc-0`. S3 landed the same day: proxy verified
+byte-identical against a fixture upstream, correlator verified by a same-pid
+join of a real RPC client and `RegisterGameByPID`, restart cache verified by
+SIGKILL + respawn re-adoption.
 
 ## Slices
 
@@ -56,20 +59,74 @@ ours: tokio `UnixListener`, per-connection tasks, `libc::getsockopt` for
 `discord-rich-presence` client → handshake → SET_ACTIVITY → property
 assertions → in-place update → clear → removal.
 
-### S3 — Proxy + correlator (PLANNED)
+### S3 — Proxy + correlator (DONE 2026-08-04)
 
-Forward frames verbatim to a real Discord (which will have taken `ipc-1`, since
-the client walks the range for the first free socket) so this works alongside a
-running Discord. Plus the correlator: pid join across sources, merge and split
-rules, and the pid + `/proc/<pid>/stat` start-time runtime cache that re-adopts
-records across a daemon restart.
+Transparent proxy: with a real Discord running (it takes `ipc-1` since we
+bound `ipc-0`), every client connection is pumped through verbatim — frames
+forwarded whole, responses from upstream, `SET_ACTIVITY` tapped passively for
+our own records. Upstream loss mid-connection closes the client connection;
+reconnect lands in standalone (S2) mode. Verified byte-identical against a
+fixture upstream, no real Discord needed.
+
+Correlator: per-source partial records keyed by pid in `src/correlator.rs`;
+the published activity is a derived view. `pid_<pid>` absorbs `discord_<pid>`
+on a join (stable identity from the more reliable source), Discord's
+human-facing fields win, GameMode owns executable, records degrade in place
+when a source leaves and die with the last source. Join is exact-pid; the
+umu/Proton wrapper-tree case (GameMode sees the wrapper, Discord connects
+from a child) is a documented miss. Verified by a same-pid join of a genuine
+RPC client + `RegisterGameByPID`.
+
+Restart cache: published records written through to
+`$XDG_RUNTIME_DIR/gamebus-presenced/cache.json` on every change, keyed by
+pid + `/proc/<pid>/stat` start-time. Startup re-adopts records whose process
+is still alive with a matching start-time (pid-reuse guard). Verified by
+SIGKILL + respawn re-adoption test.
 
 ### S4 — Enrichment and packaging (PLANNED)
 
-Steam appid from `/proc/<pid>/environ`, `detectable.json` naming (Discord's
-`applications/detectable`, ~1834 entries, cached on disk and entirely
-optional), a `gamebus-presence monitor` CLI, systemd user unit and D-Bus
-activation file.
+Brainstormed 2026-08-04 (6-question Socratic interview, see
+`.second-brain/wiki/concepts/2026-08-04 - Brainstorm - S4 Enrichment and Packaging.md`).
+
+#### S4a — Steam source (reactive via Enricher middleware) (DONE 2026-08-04)
+
+New `src/enricher.rs`: `Enricher` struct sits between sources and correlator
+(`sources → Enricher → Vec<SourceEvent> → Correlator`). On
+`SourceEvent::Updated` with a pid, probes `/proc/<pid>/environ` for
+`SteamAppId`/`SteamGameId`/`UMU_ID`/`STORE`; if found, emits
+`SourceEvent::Updated(Source::Steam)`. Steam partial removal tied to last
+non-Steam source (Enricher tracks `{pid: Set<Source>}` — pid-reuse safe).
+`Activity::from_steam(pid, appid)` maps to `app_ids["steam"]`; correlator
+gains a `steam` slot. `tracing::debug!` on Discord-pid join-miss for the
+ancestor-walk decision. Integration test: `sleep` spawned with
+`SteamAppId=480`, registered via `RegisterGameByPID`, merged record carries
+`app_ids["steam"]`.
+
+#### S4b — Naming enrichment (enrichment-only fallback) (DONE 2026-08-04)
+
+`build.rs` fetches `detectable.json` from Discord's `applications/detectable`
+endpoint (23858 entries, 12.3MB); ships as an installation data file
+(`$PREFIX/share/gamebus-presenced/detectable.json`, not binary-embedded).
+`gamebus-presence fetch-detectable` CLI refreshes to `$XDG_CACHE_HOME`.
+Naming precedence: Discord name > detectable.json lookup (by appid or
+executable) > executable stem. Anti-goal: never overrides a more
+authoritative source. umu-database as cached secondary (protonfixes-scoped,
+GPL-3.0, query-only). Naming DB loaded after sources spawn to avoid blocking
+the Discord listener.
+
+#### S4c — Packaging (DONE 2026-08-04)
+
+`gamebus-presence` CLI binary (`src/bin/gamebus-presence.rs`): `monitor`
+pretty-prints bus state (activities, sources, names, appids);
+`fetch-detectable` downloads Discord's detectable.json to `$XDG_CACHE_HOME`.
+systemd user unit (`data/gamebus-presenced.service`) and D-Bus activation
+file (`data/org.gamebus.Presence.v1.service`) for session-start activation.
+
+#### S4d — Ancestor-walk join (CANDIDATE, trigger-only)
+
+Bounded ancestor-walk (ppid chain, start-time validated) for the
+umu/Proton wrapper-tree case. Only built if S4a's join-miss logs justify
+it. Instrumented in S4a; decision deferred to real-world data.
 
 ## Open decisions
 - **MPRIS as a source** — deliberately deferred. It is already a good standard

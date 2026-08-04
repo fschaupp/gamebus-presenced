@@ -81,7 +81,7 @@ This is a general operating principle, not vault-specific. Keep it in `_CLAUDE.m
 > Update this section at the start of each major project or focus period.
 
 **Current top priority:** gamebus-presenced - D-Bus presence daemon for Linux desktop
-**Current project:** gamebus-presenced (S0+S1+S2 complete, S3 next)
+**Current project:** gamebus-presenced (S0-S4c complete, S4d candidate)
 **Key technologies:** D-Bus, Discord IPC, GameMode, Rust, zbus, tokio, rsrpc
 
 ---
@@ -171,7 +171,7 @@ Completed:
 
 > Keep this list current. Claude uses it to route context correctly.
 
-- `[[wiki/projects/gamebus-presenced]]` - D-Bus presence daemon for Linux desktop (S0+S1+S2 complete, S3 next)
+- `[[wiki/projects/gamebus-presenced]]` - D-Bus presence daemon for Linux desktop (S0-S4c complete, S4d candidate)
 
 ---
 

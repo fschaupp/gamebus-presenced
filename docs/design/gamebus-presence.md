@@ -1,7 +1,8 @@
 # gamebus-presenced — one bus for "what is this machine playing"
 
-Status: **in implementation.** S0 (D-Bus surface), S1 (GameMode source) and
-S2 (Discord IPC listener) landed 2026-08-04 and are verified on the session
+Status: **in implementation.** S0 (D-Bus surface), S1 (GameMode source),
+S2 (Discord IPC listener) and S3 (proxy + correlator + restart cache) landed
+2026-08-04 and are verified on the session
 bus; S3-S4 follow the design below.
 
 ## The problem
@@ -225,7 +226,7 @@ can replace arRPC outright for Vesktop users; an MPRIS source so "watching" and
 | **S0** | D-Bus surface foundation, extracted from the original S1: `zbus`, `ListActivities` + signals skeleton. **Done 2026-08-04.** | Yes — interface verified on the bus. |
 | **S1** | GameMode source feeding the surface: `GameRegistered`/`GameUnregistered`, `ListGames` seed, per-activity objects. **Done 2026-08-04.** | Yes — pid/executable presence, zero Discord involvement. This alone is what the epaper pet needs. |
 | **S2** | Discord IPC listener with **no** upstream (the Discord-not-running case): handshake, frame codec, `SET_ACTIVITY` → activity objects, `SO_PEERCRED` pid. Payload model from the pinned [rsRPC] crate. **Done 2026-08-04.** | Yes — full rich presence on a machine without a Discord client. |
-| **S3** | Transparent proxy to a running Discord, plus the correlator: pid join across sources, merge and split rules, and the pid+start-time runtime cache that survives a restart. | Yes — works alongside a real Discord client. |
+| **S3** | Transparent proxy to a running Discord, plus the correlator: pid join across sources, merge and split rules, and the pid+start-time runtime cache that survives a restart. **Done 2026-08-04.** | Yes — works alongside a real Discord client. |
 | **S4** | Steam appid enrichment, `detectable.json` naming, a `gamebus-presence monitor` CLI, systemd user unit + D-Bus activation file. | Polish. |
 
 S1 and S2 are independent; either can land first.
