@@ -39,6 +39,14 @@ This is a general operating principle, not vault-specific. Keep it in `_CLAUDE.m
 
 ---
 
+## Section 0.6 - Integration-Test Against the Real Thing
+
+Integration tests exercise the real wire: genuine client libraries, real daemons (gamemoded), or recording fixtures that capture bytes — never hand-written mocks of the protocol under test. Tests must skip gracefully when the session bus, gamemoded, or a real Discord client is unavailable. When a design can only be verified against a real game (wrapper trees, process identification), run the daemon against a live game and assert the bus state.
+
+This rule was promoted from a learnings-review candidate after 4 occurrences (S1-S4) caught 11 bugs that unit tests missed.
+
+---
+
 ## Vault Identity
 
 - **Owner:** Florian
@@ -81,7 +89,7 @@ This is a general operating principle, not vault-specific. Keep it in `_CLAUDE.m
 > Update this section at the start of each major project or focus period.
 
 **Current top priority:** gamebus-presenced - D-Bus presence daemon for Linux desktop
-**Current project:** gamebus-presenced (S0-S4c complete, S4d candidate)
+**Current project:** gamebus-presenced (S0-S4 complete, all slices done)
 **Key technologies:** D-Bus, Discord IPC, GameMode, Rust, zbus, tokio, rsrpc
 
 ---
@@ -171,7 +179,7 @@ Completed:
 
 > Keep this list current. Claude uses it to route context correctly.
 
-- `[[wiki/projects/gamebus-presenced]]` - D-Bus presence daemon for Linux desktop (S0-S4c complete, S4d candidate)
+- `[[wiki/projects/gamebus-presenced]]` - D-Bus presence daemon for Linux desktop (S0-S4 complete)
 
 ---
 
