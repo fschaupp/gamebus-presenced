@@ -1,0 +1,22 @@
+[package]
+name = "gamebus-presenced"
+version = "0.1.0"
+edition = "2021"
+authors = ["fschaupp <spritzwine.absently488@passinbox.com>"]
+description = "D-Bus presence daemon for Linux desktop - publishes unified game/app activity on session bus"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+zbus = { version = "4", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+rsrpc = { git = "https://github.com/SpikeHD/rsRPC", rev = "062e0fd9fe34a475640a822facfee68296ba22e3" }
+
+[dev-dependencies]
+discord-rich-presence = "1"
