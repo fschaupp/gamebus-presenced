@@ -1,0 +1,16 @@
+# Kanban Boards
+
+> **For future Claude**: This directory contains kanban board files. These are UI surfaces for the Kanban plugin.
+
+## Board Files
+Each board is a markdown file with `kanban-plugin: board` frontmatter.
+
+## Common Boards
+- `Work.md` - Work-related tasks
+- `Personal.md` - Personal tasks
+- `gamebus-presenced.md` - Project-specific board
+
+## Rules
+- Board files are exempt from the "For future Claude" preamble rule
+- Board files carry only `kanban-plugin: board` frontmatter
+- Notes ABOUT board items (task notes) follow the full AI-first rules

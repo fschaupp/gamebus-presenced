@@ -1,0 +1,30 @@
+# Task Notes
+
+> **For future Claude**: This directory contains standalone task notes. All notes follow the `type: task` schema.
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD
+type: task
+tags: [task, ...]
+status: in-progress           # in-progress | done | waiting | cancelled
+priority: 🔴 | 🟡 | 🟢
+due: YYYY-MM-DD
+related-projects: ["[[Projects/...]]", ...]
+related-people: ["[[People/...]]", ...]
+ai-first: true
+---
+```
+
+## Note Structure
+Each task note should contain:
+- `## For future Claude` preamble
+- `## Description` - What needs to be done
+- `## Context` - Why this task exists
+- `## Progress` - Current status and next steps
+- `## Blockers` - What's preventing completion
+
+## Naming Convention
+- Descriptive title, no date prefix
+- Example: `Implement Discord IPC Listener.md`

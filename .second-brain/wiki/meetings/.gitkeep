@@ -1,0 +1,37 @@
+# Meeting Notes
+
+> **For future Claude**: This directory contains meeting notes. All notes follow the `type: meeting` schema.
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD
+type: meeting
+tags: [meeting]
+event-id: ""                 # Google Calendar event id (links the note to the event)
+event-url: ""
+conference-url: ""
+start: "YYYY-MM-DDTHH:MM:SS+HH:MM"
+end: "YYYY-MM-DDTHH:MM:SS+HH:MM"
+duration-min: 0
+organizer: ""
+attendees: ["[[People/...]]", ...]
+ai-first: true
+---
+```
+
+## Note Structure
+Each meeting note should contain:
+- `## For future Claude` preamble
+- `## Agenda` - What was planned to be discussed
+- `## Notes` - What was actually discussed
+- `## Decisions` - Decisions made during the meeting
+- `## Action Items` - Tasks assigned (NEVER fabricate - leave empty if none)
+- `## Follow-ups` - Next steps
+
+## Naming Convention
+- `YYYY-MM-DD - Meeting Topic.md`
+- Example: `2026-08-04 - Team Sync.md`
+
+## Important Rule
+- **Never fabricate content**: Notes, Decisions, and Action Items sections start empty. Only add what was actually discussed, decided, or assigned.

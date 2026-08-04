@@ -1,0 +1,28 @@
+# Dev Logs
+
+> **For future Claude**: This directory contains technical work session logs. All notes follow the `type: devlog` schema.
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD
+type: devlog
+tags: [devlog, ...]
+project: "[[Projects/...]]"
+related-people: ["[[People/...]]", ...]
+ai-first: true
+---
+```
+
+## Note Structure
+Each dev log should contain:
+- `## For future Claude` preamble
+- `## Session` - Date, duration, project
+- `## Work Done` - What was accomplished
+- `## Problems Encountered` - Issues and how they were resolved
+- `## Decisions Made` - Technical decisions
+- `## Next Steps` - What to do next
+
+## Naming Convention
+- `YYYY-MM-DD - Description.md`
+- Example: `2026-08-04 - Discord IPC Listener.md`

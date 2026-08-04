@@ -1,0 +1,27 @@
+# Daily Notes
+
+> **For future Claude**: This directory contains one note per day. All notes follow the `type: daily` schema.
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD
+type: daily
+tags: [daily]
+mood: ""        # optional, 1-5 scale
+energy: ""      # optional, 1-5 scale
+ai-first: true
+---
+```
+
+## Note Structure
+Each daily note should contain:
+- `## For future Claude` preamble
+- `## Work` - What was worked on today
+- `## Meetings` - Who was met and what was discussed
+- `## Decisions` - Decisions made today
+- `## Tasks` - Tasks completed or started
+- `## Notes` - Miscellaneous observations
+
+## Naming Convention
+- `YYYY-MM-DD.md` (e.g., `2026-08-04.md`)

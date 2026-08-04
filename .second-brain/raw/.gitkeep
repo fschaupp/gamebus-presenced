@@ -1,0 +1,14 @@
+# Immutable Raw Sources
+
+> **For future Claude**: This directory contains immutable raw source material. Claude reads from here but never writes to existing files. Each subdirectory contains a specific type of source.
+
+## Subdirectories
+- `articles/` - Clipped web articles
+- `transcripts/` - Meeting notes, podcast transcripts
+- `pdfs/` - PDF documents
+- `videos/` - YouTube metadata and transcripts
+
+## Rules
+- Never modify files in this directory
+- All files are verbatim captures
+- Use `/obsidian-ingest` to process sources from here into the wiki

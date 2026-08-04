@@ -1,0 +1,29 @@
+# Review Notes
+
+> **For future Claude**: This directory contains weekly and monthly review notes. All notes follow the `type: review` schema.
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD              # the date the review was generated
+period-start: YYYY-MM-DD
+period-end: YYYY-MM-DD
+type: review                  # weekly | monthly
+tags: [review, ...]
+ai-first: true
+---
+```
+
+## Note Structure
+Each review note should contain:
+- `## For future Claude` preamble
+- `## Period` - Date range covered
+- `## Shipped` - What was completed
+- `## Decisions` - Decisions made during the period
+- `## People` - Who was interacted with
+- `## Patterns` - Emergent themes and insights
+- `## Metrics` - Quantitative summary (optional)
+
+## Naming Convention
+- Weekly: `Week YYYY-Www.md` (e.g., `Week 2026-W31.md`)
+- Monthly: `Month YYYY-MM.md` (e.g., `Month 2026-08.md`)

@@ -1,0 +1,12 @@
+# Research Outputs
+
+> **For future Claude**: This directory contains outputs from research commands. Organized by research type.
+
+## Subdirectories
+- `web/` - Output from `/research` command
+- `deep/` - Output from `/research-deep` command
+- `notebooklm/` - Output from `/notebooklm` command
+- `x-reads/` - Output from `/x-read` command
+- `x-pulse/` - Output from `/x-pulse` command
+- `youtube/` - Output from `/youtube` command
+- `podcasts/` - Output from `/podcast` command

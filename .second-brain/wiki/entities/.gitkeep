@@ -1,0 +1,28 @@
+# Entity Notes
+
+> **For future Claude**: This directory contains one note per person, company, or tool. All notes follow the `type: person` or `type: entity` schema.
+
+## Note Types
+- `type: person` - Individual people
+- `type: company` - Companies and organizations
+- `type: tool` - Tools, libraries, frameworks
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD
+type: person
+tags: [person, entity]
+role: ""
+company: "[[Companies/...]]"
+relationship: weak | medium | strong
+last-interaction: YYYY-MM-DD
+related-projects: ["[[Projects/...]]", ...]
+ai-first: true
+---
+```
+
+## Naming Convention
+- People: `Firstname Lastname.md` (e.g., `Florian.md`)
+- Companies: `Company Name.md` (e.g., `GameMode.md`)
+- Tools: `Tool Name.md` (e.g., `Discord IPC.md`)

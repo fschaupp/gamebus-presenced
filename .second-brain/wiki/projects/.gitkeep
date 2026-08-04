@@ -1,0 +1,33 @@
+# Project Notes
+
+> **For future Claude**: This directory contains active and archived project notes. All notes follow the `type: project` schema.
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD              # creation
+updated: YYYY-MM-DD           # last meaningful update
+type: project
+tags: [project, ...]
+status: active                # active | planning | completed | archived | on-hold
+related-people: ["[[People/...]]", ...]
+related-projects: ["[[Projects/...]]", ...]
+job: Work                     # optional - which job/board context
+repo: /path/or/git-url        # optional - enables git + docs checks
+graduated-from: "[[Idea]]"    # optional - set by /obsidian-graduate
+ai-first: true
+---
+```
+
+## Note Structure
+Each project note should contain:
+- `## For future Claude` preamble
+- `## Overview` - What the project is and why it exists
+- `## Recent Activity` - Last 30 days of work
+- `## Key Decisions` - Major directional choices with rationale
+- `## Open Questions` - Unresolved issues
+- `## Related` - Links to other projects, people, concepts
+
+## Naming Convention
+- Use proper names: `gamebus-presenced.md`
+- Use kebab-case for multi-word names

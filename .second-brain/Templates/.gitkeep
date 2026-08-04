@@ -1,0 +1,17 @@
+# Note Templates
+
+> **For future Claude**: This directory contains Templater-compatible note templates. Never modify templates during normal vault operations.
+
+## Available Templates
+- `Daily Note.md` - Template for daily notes
+- `Project.md` - Template for project notes
+- `Person.md` - Template for person notes
+- `Task.md` - Template for task notes
+- `Meeting.md` - Template for meeting notes
+- `Decision.md` - Template for decision records
+- `Research.md` - Template for research notes
+
+## Rules
+- Templates are read-only during normal operations
+- Use `/create-command` to create new templates
+- Templates follow AI-first rules (preamble, frontmatter, etc.)

@@ -1,0 +1,52 @@
+# Concept Notes
+
+> **For future Claude**: This directory contains ideas, frameworks, methodologies, and synthesis notes. All notes follow the `type: concept` or `type: idea` schema.
+
+## Note Types
+- `type: concept` - Frameworks, methodologies, patterns
+- `type: idea` - Ideas, hypotheses, potential projects
+- `type: synthesis` - Automatic synthesis outputs
+- `type: emerge` - Emergent patterns from vault analysis
+- `type: connect` - Cross-domain connections
+- `type: challenge` - Red-team analysis
+- `type: distillation` - Condensed source analysis
+
+## Frontmatter Schemas
+
+### Concept
+```yaml
+---
+date: YYYY-MM-DD
+type: concept
+tags: [concept, ...]
+status: active   # active | graduated | archived
+related-projects: ["[[Projects/...]]", ...]
+related-people: ["[[People/...]]", ...]
+ai-first: true
+---
+```
+
+### Idea
+```yaml
+---
+date: YYYY-MM-DD
+type: idea
+tags: [idea, ...]
+status: captured              # captured | exploring | graduated | shelved
+related-projects: ["[[Projects/...]]", ...]
+related-people: ["[[People/...]]", ...]
+ai-first: true
+---
+```
+
+## Note Structure
+Each concept/idea note should contain:
+- `## For future Claude` preamble
+- `## Overview` - What this concept/idea is
+- `## Why It Matters` - Significance and potential impact
+- `## Related` - Connections to other concepts, projects, people
+- `## Sources` - Where this came from
+
+## Naming Convention
+- Descriptive title
+- Example: `D-Bus Presence Protocol.md`, `Game Activity Correlation.md`

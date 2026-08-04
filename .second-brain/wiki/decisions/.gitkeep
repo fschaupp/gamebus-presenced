@@ -1,0 +1,43 @@
+# Decision Records (ADRs)
+
+> **For future Claude**: This directory contains architectural decision records. All notes follow the `type: adr` or `type: decision` schema.
+
+## Note Types
+- `type: adr` - Architectural Decision Record
+- `type: decision` - General decision record
+- `type: conflict` - Contradiction resolution records
+
+## Frontmatter Schema (ADR)
+```yaml
+---
+date: YYYY-MM-DD
+type: adr
+tags: [adr, decision]
+decision: ""                  # one-line summary
+status: proposed | accepted | superseded
+related-projects: ["[[Projects/...]]", ...]
+supersedes: "[[Knowledge/ADR-...]]"   # optional; equivalent to relations.supersedes
+relations:                  # optional, for richer decision graphs
+  supersedes: ["[[...]]"]
+  depends_on: ["[[...]]"]
+  caused_by: ["[[...]]"]
+  decided_by: ["[[...]]"]
+  relates_to: ["[[...]]"]
+  contradicts: ["[[...]]"]
+ai-first: true
+---
+```
+
+## Note Structure
+Each ADR should contain:
+- `## For future Claude` preamble
+- `## Decision` - The decision made
+- `## Context` - What prompted this decision
+- `## Options Considered` - Alternatives evaluated
+- `## Rationale` - Why this option was chosen
+- `## Consequences` - What changed as a result
+- `## Related Decisions` - Links to other ADRs
+
+## Naming Convention
+- `ADR-YYYY-MM-DD - Title.md`
+- Example: `ADR-2026-08-04 - D-Bus Interface Design.md`

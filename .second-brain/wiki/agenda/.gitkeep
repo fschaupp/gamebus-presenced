@@ -1,0 +1,34 @@
+# Agenda Snapshots
+
+> **For future Claude**: This directory contains calendar snapshots. All notes follow the `type: agenda-snapshot` schema.
+
+## Frontmatter Schema
+```yaml
+---
+date: YYYY-MM-DD              # date the snapshot was generated
+type: agenda-snapshot
+range: "YYYY-MM-DD..YYYY-MM-DD"
+range-label: today           # today | tomorrow | week | next-week | day | range
+calendar-source: google-calendar
+calendars: [primary]
+fetched-at: "YYYY-MM-DDTHH:MM:SS+HH:MM"   # ISO 8601 with offset
+event-count: 0
+conflict-count: 0
+tags: [agenda, calendar]
+ai-first: true
+---
+```
+
+## Note Structure
+Each agenda snapshot should contain:
+- `## For future Claude` preamble
+- `## Events` - List of calendar events for the period
+- `## Conflicts` - Any scheduling conflicts detected
+
+## Naming Convention
+- `YYYY-MM-DD - Range Label.md`
+- Example: `2026-08-04 - Today.md`, `2026-08-04 - Week.md`
+
+## Important Rule
+- **Re-derivable**: Google Calendar is the source of truth, not this note. The `fetched-at` field is the recency anchor.
+- **Never modify**: These are point-in-time snapshots. To update, create a new snapshot.
