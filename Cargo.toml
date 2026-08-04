@@ -11,6 +11,10 @@ readme = "README.md"
 name = "gamebus-presenced"
 path = "src/main.rs"
 
+[[bin]]
+name = "gamebus-presence"
+path = "src/bin/gamebus-presence.rs"
+
 [dependencies]
 zbus = { version = "4", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
