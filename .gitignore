@@ -1,0 +1,8 @@
+/target
+Cargo.lock.bak
+*.swp
+.direnv/
+
+.opencode/
+
+opencode.json
