@@ -3,20 +3,22 @@
 //! Publishes a unified "what is this machine playing" presence on the session bus
 //! by collecting fragments from multiple sources (GameMode, Discord IPC, Steam)
 //! and correlating them by pid.
-//!
-//! The D-Bus surface fed by the GameMode source - pid +
-//! executable presence with no Discord code at all.
 
+mod cache;
+mod correlator;
 mod dbus;
 mod error;
 mod sources;
 
+use crate::cache::CachedRecord;
+use crate::correlator::{Correlator, Effect};
 use crate::dbus::activity::ActivityInterface;
 use crate::dbus::connection::Connection;
 use crate::dbus::manager::{Manager, ManagerInterface};
-use crate::dbus::types::{Activity, Source, BUS_NAME, ROOT_PATH, VERSION};
+use crate::dbus::types::{Activity, BUS_NAME, ROOT_PATH, VERSION};
 use crate::error::Result;
 use crate::sources::{discord, gamemode, SourceEvent};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -54,15 +56,6 @@ async fn main() -> Result<()> {
 
     info!("Manager interface registered at {}", ROOT_PATH);
 
-    // Channel from source watchers to the daemon core.
-    let (tx, mut rx) = mpsc::channel::<SourceEvent>(64);
-
-    // Spawn the GameMode source watcher on its own connection handle.
-    tokio::spawn(gamemode::watch(conn.inner().clone(), tx.clone()));
-    info!("GameMode source watcher started");
-    tokio::spawn(discord::listen(tx));
-    info!("Discord IPC source listener started");
-
     // Signal context for Manager signals (ActivityAdded/Removed) and the
     // HasActivity property change notification.
     let manager_ref = conn
@@ -73,28 +66,58 @@ async fn main() -> Result<()> {
     let signal_ctxt = manager_ref.signal_context().clone();
     drop(manager_ref);
 
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    // Daemon core state.
+    let mut correlator = Correlator::new();
+
+    // Re-adopt cache-restored records BEFORE sources start, so the
+    // sources' re-derived records merge into them (rather than racing them).
+    for record in cache::load_in(&runtime_dir) {
+        info!(
+            pid = record.pid,
+            id = %record.activity.id,
+            "Re-adopting cached activity"
+        );
+        let effects = correlator.adopt(record.activity);
+        apply_effects(&conn, &manager, &signal_ctxt, effects).await;
+    }
+
+    // Channel from source watchers to the daemon core.
+    let (tx, mut rx) = mpsc::channel::<SourceEvent>(64);
+
+    // Spawn the GameMode source watcher on its own connection handle.
+    tokio::spawn(gamemode::watch(conn.inner().clone(), tx.clone()));
+    info!("GameMode source watcher started");
+    tokio::spawn(discord::listen(tx));
+    info!("Discord IPC source listener started");
+
     info!("Service ready. Waiting for activity...");
 
-    // Daemon core: consume source events and maintain the bus surface.
+    // Daemon core: consume source events, enrich, correlate by pid, maintain the bus.
     loop {
         tokio::select! {
             event = rx.recv() => {
-                match event {
-                    Some(SourceEvent::Updated(activity)) => {
-                        handle_updated(&conn, &manager, &signal_ctxt, *activity).await;
-                    }
-                    Some(SourceEvent::Removed { id, source }) => {
-                        handle_removed(&conn, &manager, &signal_ctxt, &id, source).await;
-                    }
-                    Some(SourceEvent::SourceLost { source }) => {
-                        handle_source_lost(&conn, &manager, &signal_ctxt, source).await;
-                    }
+                let raw_events = match event {
+                    Some(e) => vec![e],
                     None => {
                         // All source watchers have exited; nothing left to do.
                         warn!("All activity sources exited; shutting down core loop");
                         break;
                     }
+                };
+                for enriched in raw_events {
+                    let effects = match enriched {
+                        SourceEvent::Updated(activity) => correlator.on_updated(*activity),
+                        SourceEvent::Removed { id, source } => correlator.on_removed(&id, source),
+                        SourceEvent::SourceLost { source } => correlator.on_source_lost(source),
+                    };
+                    apply_effects(&conn, &manager, &signal_ctxt, effects).await;
                 }
+                // Write the published surface through to the restart cache.
+                sync_cache(&correlator, &manager, &runtime_dir).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutting down...");
@@ -106,8 +129,55 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Publish a new activity or update an existing object in place.
-async fn handle_updated(
+/// Write the currently published records to the restart cache.
+/// Best-effort: failures are logged inside the cache module, never fatal.
+async fn sync_cache(
+    correlator: &Correlator,
+    manager: &Arc<Manager>,
+    runtime_dir: &std::path::Path,
+) {
+    let snapshot = manager.snapshot().await;
+    let records: Vec<CachedRecord> = correlator
+        .published_pairs()
+        .into_iter()
+        .filter_map(|(pid, id)| {
+            let activity = snapshot.iter().find(|a| a.id == id)?.clone();
+            let start_time = cache::process_start_time(pid)?;
+            Some(CachedRecord {
+                pid,
+                start_time,
+                activity,
+            })
+        })
+        .collect();
+    cache::save_in(runtime_dir, &records);
+}
+
+/// Execute the correlator's bus effects in order.
+async fn apply_effects(
+    conn: &Connection,
+    manager: &Arc<Manager>,
+    signal_ctxt: &zbus::object_server::SignalContext<'_>,
+    effects: Vec<Effect>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::PublishNew(activity) => {
+                publish_new(conn, manager, signal_ctxt, activity).await;
+            }
+            Effect::UpdateInPlace(activity) => {
+                update_in_place(conn, manager, signal_ctxt, activity).await;
+            }
+            Effect::Remove(id) => {
+                remove_by_id(conn, manager, signal_ctxt, &id).await;
+            }
+        }
+    }
+}
+
+/// Register a new activity object and announce it. Consumers reacting to
+/// ActivityAdded must find the object already present.
+async fn publish_new(
     conn: &Connection,
     manager: &Arc<Manager>,
     signal_ctxt: &zbus::object_server::SignalContext<'_>,
@@ -121,31 +191,12 @@ async fn handle_updated(
         }
     };
 
-    info!(id = %outcome.id, sources = ?activity.sources, "Activity updated");
+    info!(id = %outcome.id, sources = ?activity.sources, "Activity published");
 
-    let path = Activity::path_for_id(&outcome.id);
-    if outcome.replaced {
-        match conn
-            .inner()
-            .object_server()
-            .interface::<_, ActivityInterface>(path.as_str())
-            .await
-        {
-            Ok(iface_ref) => {
-                let mut iface = iface_ref.get_mut().await;
-                if let Err(e) = iface.update(activity, iface_ref.signal_context()).await {
-                    error!(error = %e, path, "Failed to update activity object");
-                }
-            }
-            Err(e) => error!(error = %e, path, "Failed to get activity object for update"),
-        }
-        return;
-    }
-
-    // Register the per-activity object, then announce it. Consumers
-    // reacting to ActivityAdded must find the object already present.
-    let mut stored = activity;
-    stored.id = outcome.id.clone();
+    let stored = Activity {
+        id: outcome.id.clone(),
+        ..activity
+    };
     let path = stored.object_path();
     if let Err(e) = conn
         .inner()
@@ -174,13 +225,52 @@ async fn handle_updated(
     }
 }
 
-/// Remove one source activity.
-async fn handle_removed(
+/// Refresh an existing activity object in place.
+async fn update_in_place(
+    conn: &Connection,
+    manager: &Arc<Manager>,
+    signal_ctxt: &zbus::object_server::SignalContext<'_>,
+    activity: Activity,
+) {
+    let outcome = match manager.add_activity(activity.clone()).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            error!(error = %e, "Failed to add activity");
+            return;
+        }
+    };
+
+    info!(id = %outcome.id, sources = ?activity.sources, "Activity updated");
+
+    let path = Activity::path_for_id(&outcome.id);
+    if !outcome.replaced {
+        // The correlator believes this object exists but the registry did
+        // not - treat it as a fresh publish to self-heal.
+        publish_new(conn, manager, signal_ctxt, activity).await;
+        return;
+    }
+    match conn
+        .inner()
+        .object_server()
+        .interface::<_, ActivityInterface>(path.as_str())
+        .await
+    {
+        Ok(iface_ref) => {
+            let mut iface = iface_ref.get_mut().await;
+            if let Err(e) = iface.update(activity, iface_ref.signal_context()).await {
+                error!(error = %e, path, "Failed to update activity object");
+            }
+        }
+        Err(e) => error!(error = %e, path, "Failed to get activity object for update"),
+    }
+}
+
+/// Remove one activity object from the bus and emit ActivityRemoved.
+async fn remove_by_id(
     conn: &Connection,
     manager: &Arc<Manager>,
     signal_ctxt: &zbus::object_server::SignalContext<'_>,
     id: &str,
-    source: Source,
 ) {
     let outcome = match manager.remove_activity(id).await {
         Ok(outcome) => outcome,
@@ -191,56 +281,11 @@ async fn handle_removed(
     };
 
     if !outcome.existed {
-        tracing::debug!(
-            id,
-            ?source,
-            "Removal for unknown activity (already removed?)"
-        );
+        tracing::debug!(id, "Removal for unknown activity (already removed?)");
         return;
     }
 
-    info!(id, ?source, "Activity removed");
-    remove_activity_object(conn, signal_ctxt, id).await;
-
-    if outcome.became_empty {
-        emit_has_activity_changed(conn).await;
-    }
-}
-
-/// Handle gamemoded leaving the bus: all gamemode-sourced records die.
-async fn handle_source_lost(
-    conn: &Connection,
-    manager: &Arc<Manager>,
-    signal_ctxt: &zbus::object_server::SignalContext<'_>,
-    source: Source,
-) {
-    let removed = manager.remove_by_source(source).await;
-    if removed.is_empty() {
-        return;
-    }
-
-    info!(
-        ?source,
-        count = removed.len(),
-        "Source lost; dropping its activities"
-    );
-    let had_activity_before = !removed.is_empty();
-
-    for id in &removed {
-        remove_activity_object(conn, signal_ctxt, id).await;
-    }
-
-    if had_activity_before && !manager.has_activity().await {
-        emit_has_activity_changed(conn).await;
-    }
-}
-
-/// Remove an activity object from the bus and emit ActivityRemoved.
-async fn remove_activity_object(
-    conn: &Connection,
-    signal_ctxt: &zbus::object_server::SignalContext<'_>,
-    id: &str,
-) {
+    info!(id, "Activity removed");
     let path = Activity::path_for_id(id);
 
     if let Err(e) = conn
@@ -259,6 +304,10 @@ async fn remove_activity_object(
             }
         }
         Err(e) => warn!(error = %e, path, "Invalid object path"),
+    }
+
+    if outcome.became_empty {
+        emit_has_activity_changed(conn).await;
     }
 }
 

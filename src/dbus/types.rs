@@ -91,7 +91,7 @@ pub type Extra = HashMap<String, String>;
 ///
 /// All properties are read-only and emit change signals when modified.
 /// Empty string means "not known", never a placeholder.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activity {
     /// Unique identifier for this activity.
     /// Used in object paths: /org/gamebus/Presence/v1/Activity/<id>

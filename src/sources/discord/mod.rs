@@ -1,6 +1,8 @@
-//! Discord IPC source (standalone/no-upstream mode).
+//! Discord IPC source: standalone mode when no Discord client runs,
+//! transparent proxy to a real Discord upstream when one does.
 
 pub mod protocol;
+mod proxy;
 
 use crate::dbus::types::{Activity, Source};
 use crate::sources::SourceEvent;
@@ -58,11 +60,14 @@ pub async fn listen(tx: mpsc::Sender<SourceEvent>) {
     }
 }
 
-fn socket_path() -> PathBuf {
+fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("discord-ipc-0")
+}
+
+fn socket_path() -> PathBuf {
+    runtime_dir().join("discord-ipc-0")
 }
 
 async fn bind(path: &Path) -> std::io::Result<Option<UnixListener>> {
@@ -86,11 +91,18 @@ async fn handle_connection(
     tx: mpsc::Sender<SourceEvent>,
 ) -> std::io::Result<()> {
     let pid = peer_pid(&stream)?;
+
+    // With a real Discord upstream running, proxy verbatim and only tap
+    // the traffic. Without one, we answer the protocol ourselves.
+    if let Some(upstream) = proxy::find_upstream().await {
+        return proxy::pump(stream, upstream, tx, pid).await;
+    }
+
     let id = format!("discord_{pid}");
     let mut client_id = String::new();
     let mut handshaken = false;
     let mut asserted_activity = false;
-    info!(pid, "Discord IPC client connected");
+    info!(pid, "Discord IPC client connected (standalone mode)");
 
     loop {
         let frame = match Frame::read_from(&mut stream).await {
@@ -127,32 +139,8 @@ async fn handle_connection(
                 let mut command: ActivityCmd = serde_json::from_slice(&frame.payload)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 if command.cmd == "SET_ACTIVITY" {
-                    // rsRPC's battle-tested normalisation: timestamps become
-                    // milliseconds, buttons/flags are brought in line with what
-                    // Discord-compatible servers emit.
-                    command.fix();
-                    match command
-                        .args
-                        .as_ref()
-                        .and_then(|args| args.activity.as_ref())
-                    {
-                        Some(payload) => {
-                            let activity = Activity::from_discord(pid, &client_id, payload);
-                            tx.send(SourceEvent::Updated(Box::new(activity)))
-                                .await
-                                .map_err(|_| {
-                                    std::io::Error::new(
-                                        std::io::ErrorKind::BrokenPipe,
-                                        "daemon core stopped",
-                                    )
-                                })?;
-                            asserted_activity = true;
-                        }
-                        None => {
-                            remove(&tx, &id).await?;
-                            asserted_activity = false;
-                        }
-                    }
+                    handle_set_activity(&mut command, pid, &client_id, &mut asserted_activity, &tx)
+                        .await?;
                 }
                 // Discord IPC is lock-step: every command is echoed as its response.
                 write_frame(&mut stream, &frame).await?;
@@ -169,6 +157,40 @@ async fn handle_connection(
         remove(&tx, &id).await?;
     }
     info!(pid, "Discord IPC client disconnected");
+    Ok(())
+}
+
+/// Turn a parsed SET_ACTIVITY command into source events. Shared by the
+/// standalone server and the proxy's passive tap. rsRPC's `fix()` normalises
+/// timestamps to milliseconds and brings buttons/flags in line with what
+/// Discord-compatible servers emit.
+async fn handle_set_activity(
+    command: &mut ActivityCmd,
+    pid: i32,
+    client_id: &str,
+    asserted: &mut bool,
+    tx: &mpsc::Sender<SourceEvent>,
+) -> std::io::Result<()> {
+    command.fix();
+    match command
+        .args
+        .as_ref()
+        .and_then(|args| args.activity.as_ref())
+    {
+        Some(payload) => {
+            let activity = Activity::from_discord(pid, client_id, payload);
+            tx.send(SourceEvent::Updated(Box::new(activity)))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "daemon core stopped")
+                })?;
+            *asserted = true;
+        }
+        None => {
+            remove(tx, &format!("discord_{pid}")).await?;
+            *asserted = false;
+        }
+    }
     Ok(())
 }
 
