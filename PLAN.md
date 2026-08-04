@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0, S1, S2, S3, S4a, S4b, and S4c done. S4d (candidate) next.
+## Status: S0, S1, S2, S3, S4a, S4b, S4c, S4d, and S4e done. All slices complete.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -122,11 +122,39 @@ pretty-prints bus state (activities, sources, names, appids);
 systemd user unit (`data/gamebus-presenced.service`) and D-Bus activation
 file (`data/org.gamebus.Presence.v1.service`) for session-start activation.
 
-#### S4d — Ancestor-walk join (CANDIDATE, trigger-only)
+#### S4d — Ancestor-walk join (DONE 2026-08-04)
 
-Bounded ancestor-walk (ppid chain, start-time validated) for the
-umu/Proton wrapper-tree case. Only built if S4a's join-miss logs justify
-it. Instrumented in S4a; decision deferred to real-world data.
+Bounded ancestor-walk (ppid chain, `MAX_ANCESTOR_DEPTH` = 10) for the
+umu/Proton wrapper-tree case. The Enricher tracks `{pid: steam_appid}` and,
+on a new Steam probe, checks if another tracked pid shares the same appid
+AND is in the same process tree (via `is_ancestor` ppid-chain walk). The
+descendant absorbs the ancestor (closer to the actual game process). Two
+bugs found and fixed during live testing with Brotato: (1) merge direction
+was reversed (ancestor vs descendant), (2) cache-adopted records have no
+correlator partials, so `drop_partial` couldn't remove them. Also fixed:
+`SteamAppId=default` (Steam client processes) no longer treated as a game
+appid — only numeric values accepted.
+
+#### S4e — Game identification + Steam process scan (DONE 2026-08-04)
+
+Live testing with Brotato, CoD: Black Ops Cold War, Amnesia: The Bunker,
+and Resident Evil 2 surfaced eleven gaps, all fixed. (1) detectable.json
+path-prefixed entries (83% of the DB) missed — basename-bucketed index with
+path-suffix matching + backslash normalisation. (2) Wrapper processes
+unidentified — three-layer identification: wrapper cmdline, connected
+descendant walk (exe + Wine cmdline), sandbox-family scan via the umu
+`var/tmp-XXXXXX` cmdline token (Flatpak-portal severs the tree). (3)
+Delayed game launches — `unresolved_wrappers` retried every 15s via a
+main-loop tick. (4) Games without GameMode invisible — bounded
+`/proc/*/environ` Steam-appid scan in the same tick. (5) Steam scan
+exploded into ~20 records — `identify_process` filter for utility
+processes, then **replaced pairwise ancestor-walk merge with
+`appid_records: HashMap<String, u32>`** (merge key → deepest pid, one
+record per key, `tree_depth` decides). (6) Merge key generalised beyond
+Steam — `steam:<appid>` / `lutris:<uuid>` / `umu:<id>`. (7)
+`SteamAppId=0` rejected. (8) Tracing filter overrode RUST_LOG. (9) Cache
+re-adopted stale Steam-only records. (10) Wrapper executables shown as game
+names. (11) Discord integration tests fail when real Discord is running.
 
 ## Open decisions
 - **MPRIS as a source** — deliberately deferred. It is already a good standard

@@ -38,7 +38,7 @@ This index is a complete catalog of all pages in the vault, organized by categor
 - [[wiki/daily/2026-08-04]] - S0-S3 implementation for gamebus-presenced
 
 ### wiki/projects/
-- [[wiki/projects/gamebus-presenced]] - D-Bus presence daemon for Linux desktop (S0-S4c complete, S4d candidate)
+- [[wiki/projects/gamebus-presenced]] - D-Bus presence daemon for Linux desktop (S0-S4 complete)
 
 ### wiki/entities/
 - [[wiki/entities/Florian]] - Vault owner, developer of gamebus-presenced
@@ -51,12 +51,16 @@ This index is a complete catalog of all pages in the vault, organized by categor
 - [[wiki/logs/2026-08-04 - gamebus-presenced S1]] - GameMode source implementation (S1)
 - [[wiki/logs/2026-08-04 - gamebus-presenced S2]] - Discord IPC listener implementation (S2)
 - [[wiki/logs/2026-08-04 - gamebus-presenced S3]] - Proxy, correlator and restart cache implementation (S3)
-- [[wiki/logs/2026-08-04 - gamebus-presenced S4]] - Steam enrichment, naming, packaging (S4a/S4b/S4c)
+- [[wiki/logs/2026-08-04 - gamebus-presenced S4]] - Steam enrichment, naming, packaging, ancestor-walk join (S4a/S4b/S4c/S4d)
 
 ### wiki/concepts/
 - [[wiki/concepts/test-deletion-visibility]] - Owner preference: flag test deletions visibly with rationale
 - [[wiki/concepts/2026-08-04 - Learnings Review]] - First learnings review: 7 active, 4 superseded, 1 promotion candidate
+- [[wiki/concepts/2026-08-04 - Learnings Review 2]] - Second learnings review: 9 active, 7 superseded, 1 promotion eligible
+- [[wiki/concepts/2026-08-04 - Top 5 Lessons Export]] - Shareable Top 5 lessons from gamebus-presenced S0-S4
 - [[wiki/concepts/2026-08-04 - Brainstorm - S4 Enrichment and Packaging]] - S4 brainstorm: Enricher middleware, reactive Steam, detectable.json data file, instrument-first ancestor-walk
+- [[wiki/concepts/2026-08-04 - one-record-per-key]] - Design pattern: one record per key (HashMap) over pairwise merge
+- [[wiki/concepts/2026-08-04 - detectable-json-path-suffix-matching]] - Discord's detectable.json: 83% path-prefixed, suffix matching needed
 
 ### wiki/reviews/
 *No review notes yet - create with `/obsidian-review`*
@@ -69,6 +73,7 @@ This index is a complete catalog of all pages in the vault, organized by categor
 - [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]] - pid_<pid> activity IDs; GameMode per-game object API
 - [[wiki/decisions/adr-006-rsrpc-crate-dependency]] - rsrpc crate for Discord payload model; discord_<pid> IDs; SO_PEERCRED
 - [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]] - Correlator merge/split rules; pid_<pid> absorbs; proxy degradation; restart cache
+- [[wiki/decisions/adr-008-appid-records-one-record-per-merge-key]] - One record per merge key: appid_records HashMap replaces pairwise ancestor-walk
 
 ### wiki/meetings/
 *No meeting notes yet*

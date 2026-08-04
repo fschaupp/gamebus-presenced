@@ -14,7 +14,7 @@ ai-first: true
 
 ## For future Claude
 
-`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), and S4c (packaging: CLI + systemd) are now COMPLETE. S4d (ancestor-walk join) is a candidate, trigger-only. This note tracks the project's status, decisions, and recent activity.
+`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), and S4d (ancestor-walk join for wrapper-tree dedup) are now COMPLETE. This note tracks the project's status, decisions, and recent activity.
 
 ## Overview
 
@@ -44,11 +44,11 @@ Steam probe → registry.vdf + /proc environ
 
 ## Status
 
-**S0, S1, S2, S3, S4a, S4b, and S4c implementation completed. S4d (ancestor-walk candidate) is trigger-only.**
+**S0, S1, S2, S3, S4a, S4b, S4c, and S4d implementation completed.**
 
 - Repo created: 2026-08-03
 - Design doc: `docs/design/gamebus-presence.md` (complete)
-- Roadmap: `PLAN.md` (S0-S4c done, S4d candidate)
+- Roadmap: `PLAN.md` (S0-S4 done)
 - S0: D-Bus surface foundation implemented and verified on session bus (2026-08-04)
 - S1: GameMode source implemented and verified end-to-end on session bus (2026-08-04)
 - S2: Discord IPC listener implemented and verified with a genuine discord-rich-presence client (2026-08-04)
@@ -56,6 +56,7 @@ Steam probe → registry.vdf + /proc environ
 - S4a: Steam enrichment via Enricher middleware (reactive /proc/<pid>/environ probe, tied to last non-Steam source) (2026-08-04)
 - S4b: naming enrichment via detectable.json (enrichment-only fallback, never overrides more authoritative source) (2026-08-04)
 - S4c: packaging (gamebus-presence CLI with monitor + fetch-detectable, systemd user unit, D-Bus activation) (2026-08-04)
+- S4d: ancestor-walk join for wrapper-tree dedup (ppid-chain walk, descendant absorbs ancestor) (2026-08-04)
 
 ## Slices (from PLAN.md)
 
@@ -84,7 +85,11 @@ New `src/enricher.rs`: `Enricher` struct sits between sources and correlator (`s
 **S4c — Packaging** ✅
 `gamebus-presence` CLI binary (`src/bin/gamebus-presence.rs`): `monitor` pretty-prints bus state (activities, sources, names, appids); `fetch-detectable` downloads Discord's detectable.json to `$XDG_CACHE_HOME`. systemd user unit (`data/gamebus-presenced.service`) and D-Bus activation file (`data/org.gamebus.Presence.v1.service`) for session-start activation.
 
-**S4d (candidate, trigger-only)** — bounded ancestor-walk join (ppid chain, start-time validated), only if S4a's join-miss logs justify it.
+**S4d — Ancestor-walk join (wrapper-tree dedup)** ✅
+Bounded ppid-chain walk (`MAX_ANCESTOR_DEPTH` = 10) for the umu/Proton wrapper-tree case. The Enricher tracks `{pid: steam_appid}` and, on a new Steam probe, checks if another tracked pid shares the same appid AND is in the same process tree. The descendant absorbs the ancestor. Three bugs found during live testing with Brotato: merge direction reversed, cache-adopted records couldn't be removed, `SteamAppId=default` false positive. See [[wiki/logs/2026-08-04 - gamebus-presenced S4]] for details.
+
+**S4e — Game identification + Steam process scan** ✅
+Live testing with Brotato, CoD: Black Ops Cold War, Amnesia: The Bunker, and Resident Evil 2 surfaced eleven gaps, all fixed. (1) detectable.json path-prefixed entries (83% of the DB) missed — basename-bucketed index with path-suffix matching + backslash normalisation. (2) Wrapper processes unidentified — three-layer identification: wrapper cmdline, connected descendant walk (exe + Wine cmdline), sandbox-family scan via the umu `var/tmp-XXXXXX` cmdline token (Flatpak-portal severs the tree). (3) Delayed game launches — `unresolved_wrappers` retried every 15s via a main-loop tick. (4) Games without GameMode invisible — bounded `/proc/*/environ` Steam-appid scan in the same tick, closing the S4a reactive-only gap proven real by Resident Evil 2 launched without gamemoderun. (5) Steam scan exploded into ~20 records — `identify_process` filter for utility processes, then **replaced pairwise ancestor-walk merge with `appid_records: HashMap<String, u32>`** (merge key → deepest pid, one record per key, `tree_depth` decides). (6) Merge key generalised beyond Steam — `steam:<appid>` / `lutris:<uuid>` / `umu:<id>`. (7) `SteamAppId=0` rejected. (8) Tracing filter overrode RUST_LOG. (9) Cache re-adopted stale Steam-only records. (10) Wrapper executables shown as game names. (11) Discord integration tests fail when real Discord is running. Final verification: 1 record for Amnesia: The Bunker, 1 record for Resident Evil 2. See [[wiki/logs/2026-08-04 - gamebus-presenced S4]].
 
 ## Key Decisions
 
@@ -142,6 +147,7 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 
 ## Recent Activity
 
+- 2026-08-04: S4d implementation completed - ancestor-walk join for wrapper-tree dedup. Enricher tracks `{pid: steam_appid}`, `is_ancestor()` ppid-chain walk (bounded to 10 hops), descendant absorbs ancestor. Three bugs found during live Brotato testing: merge direction reversed, cache-adopted records couldn't be removed (correlator `drop_partial` fix), `SteamAppId=default` false positive (numeric-only appids). Also fixed: naming precedence (Steam's detectable.json-enriched name beats GameMode's executable stem). See [[wiki/logs/2026-08-04 - gamebus-presenced S4]].
 - 2026-08-04: Dead-code cleanup (owner-confirmed): `Manager::remove_by_source` (superseded by the correlator) and the unused S0 error variants `NameAcquisition`/`Config`/`Internal` removed; `cargo clippy --all-targets` is now fully clean, zero warnings. The test-removal exchange produced the workflow preference [[wiki/concepts/test-deletion-visibility]].
 - 2026-08-04: S3 implementation completed - proxy (byte-identical forwarding, tap, upstream-loss close), correlator (`pid_<pid>` absorbs `discord_<pid>`, degrade-in-place, die-with-last-source, exact-pid join), restart cache (pid + start-time, re-adopted before sources spawn). 31 unit + 5 integration tests green. See [[wiki/logs/2026-08-04 - gamebus-presenced S3]] and [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]].
 - 2026-08-04: S3 planned with owner - landing order proxy -> correlator -> cache; absorption and upstream-loss-close decisions confirmed; umu research: launcher assigns identity via env vars (no runtime detection to reuse), `UMU_ID` enrichment deferred to S4, wrapper-tree join deferred to S4.

@@ -8,15 +8,26 @@ ai-first: true
 
 ## For future Claude
 
-Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S4. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher), S4b (naming via detectable.json), and S4c (packaging) are complete. S4d (ancestor-walk candidate) remains. Use this board to manage implementation progress.
+Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S4. All slices complete: S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment), S4b (naming), S4c (packaging), S4d (ancestor-walk), S4e (game identification + Steam scan + appid_records simplification). Final verification: 1 record per game, 61 unit + 6 integration tests pass, clippy clean.
 
 ## gamebus-presenced Kanban Board
 
 ### 📥 Backlog
-- [ ] 🟢 **S4d: Bounded ancestor-walk join (CANDIDATE — only if S4a join-miss logs justify it)** · @{2026-08-04}
-	ppid chain, start-time validated. Instrument-first per brainstorm. [[wiki/projects/gamebus-presenced]]
 
 ### ✅ Done
+- [x] ~~🟡 **S4e: detectable.json path-prefixed entries (83% of DB) — basename-bucketed index with path-suffix matching + backslash normalisation**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: Three-layer game identification (wrapper cmdline / descendant walk / umu tmpdir sandbox-family scan)**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: Unresolved-wrapper retry tick (15s) for delayed game launches**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: Bounded /proc Steam-appid scan for games without GameMode**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: identify_process filter for utility processes (wineserver, tabtip.exe, etc.)**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: appid_records: HashMap<String, u32> — one record per merge key, tree_depth decides**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: Merge key generalisation — steam:<appid> / lutris:<uuid> / umu:<id>**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: SteamAppId=0 rejected (Heroic/GOG Proton compat)**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: Tracing filter fix — RUST_LOG=debug was ignored by add_directive**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: Cache excludes Steam-only records (scan re-finds on restart)**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: is_wrapper_executable clears wrapper names (env, bash, etc.)**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: Discord integration tests skip when real Discord is running**~~ ✅ 2026-08-04
+- [x] ~~🟢 **S4d: Bounded ancestor-walk join (ppid chain, descendant absorbs ancestor)**~~ ✅ 2026-08-04
 - [x] ~~🟢 **S4c: gamebus-presence monitor CLI (pretty-prints bus state)**~~ ✅ 2026-08-04
 - [x] ~~🟢 **S4c: gamebus-presence fetch-detectable CLI subcommand (refresh to $XDG_CACHE_HOME)**~~ ✅ 2026-08-04
 - [x] ~~🟢 **S4c: systemd user unit + D-Bus activation file**~~ ✅ 2026-08-04
