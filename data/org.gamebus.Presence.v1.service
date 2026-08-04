@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.gamebus.Presence.v1
+Exec=/usr/bin/gamebus-presenced
+SystemdService=gamebus-presenced.service

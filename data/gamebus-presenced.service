@@ -1,0 +1,13 @@
+[Unit]
+Description=gamebus-presenced - D-Bus presence daemon for Linux desktop
+Documentation=https://github.com/fschaupp/gamebus-presenced
+
+[Service]
+Type=dbus
+BusName=org.gamebus.Presence.v1
+ExecStart=/usr/bin/gamebus-presenced
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
