@@ -25,6 +25,22 @@ use crate::naming::NamingDb;
 use crate::sources::SourceEvent;
 use std::collections::{HashMap, HashSet};
 
+/// Maximum ppid-chain depth for the ancestor walk.
+/// A game launcher tree is typically 3-5 levels deep (supervisor → reaper →
+/// srt-bwrap → pv-adverb → game). 10 is generous.
+const MAX_ANCESTOR_DEPTH: usize = 10;
+
+/// Maximum depth for the descendant walk.
+/// The wrapper tree can be deep (lutris-wrapper → umu-run → steam-runtime-l →
+/// bwrap → bwrap → pv-adverb → python3 → steam.exe → game). 12 is generous.
+const MAX_DESCENDANT_DEPTH: usize = 12;
+
+/// Maximum breadth for the descendant walk.
+/// A wrapper tree can have many children (Battle.net spawns dozens of CEF
+/// renderers). We only care about the game process, so we limit the total
+/// number of processes visited.
+const MAX_DESCENDANT_BREADTH: usize = 64;
+
 /// Enrichment middleware: sits between sources and the correlator.
 ///
 /// Processes raw source events, potentially emitting additional enriched
@@ -38,6 +54,19 @@ pub struct Enricher {
     /// Used to emit the correct `Removed` event when the last non-Steam
     /// source goes away.
     steam_ids: HashMap<u32, String>,
+    /// pid → the Steam appid found in its environ (ancestor-walk).
+    steam_appids: HashMap<u32, String>,
+    /// merge key → the deepest pid currently holding a record for it.
+    ///
+    /// One record per key: `steam:<appid>` for Steam games,
+    /// `lutris:<uuid>` for Lutris games, `umu:<id>` for umu games.
+    /// When a new pid arrives with the same key, `tree_depth` decides:
+    /// deeper wins (replaces), shallower is suppressed. No pairwise merging,
+    /// no convergence issues - one `HashMap`, one record per key.
+    appid_records: HashMap<String, u32>,
+    /// Wrapper pids whose game identity hasn't been resolved yet.
+    /// Retried periodically - the game may launch minutes after the wrapper.
+    unresolved_wrappers: HashSet<u32>,
     /// Naming database for detectable.json lookups.
     /// `None` if no database file was found - naming enrichment is disabled.
     naming: Option<NamingDb>,
@@ -50,6 +79,9 @@ impl Enricher {
         Self {
             active_sources: HashMap::new(),
             steam_ids: HashMap::new(),
+            steam_appids: HashMap::new(),
+            appid_records: HashMap::new(),
+            unresolved_wrappers: HashSet::new(),
             naming: None,
         }
     }
@@ -60,6 +92,9 @@ impl Enricher {
         Self {
             active_sources: HashMap::new(),
             steam_ids: HashMap::new(),
+            steam_appids: HashMap::new(),
+            appid_records: HashMap::new(),
+            unresolved_wrappers: HashSet::new(),
             naming,
         }
     }
@@ -92,7 +127,7 @@ impl Enricher {
         let pid = activity.process_id;
         let source = activity.sources.first().copied().unwrap_or(Source::Unknown);
 
-        let mut events = Vec::with_capacity(2);
+        let mut events = Vec::with_capacity(3);
 
         // Track non-Steam sources per pid.
         if source != Source::Steam && pid > 0 {
@@ -113,27 +148,302 @@ impl Enricher {
             }
         }
 
+        // Descendant-walk - if the executable is a wrapper, look for
+        // the actual game process in the wrapper tree and use its
+        // name/executable instead.
+        let mut activity = activity;
+        self.apply_descendant_walk(&mut activity);
+
         // Naming enrichment - modify the activity's name from
         // detectable.json before forwarding. Enrichment-only: never
         // overrides a non-empty name from a more authoritative source.
-        let mut activity = activity;
         self.apply_naming(&mut activity);
 
-        // Always forward the original event.
+        // Probe for Steam data when a non-Steam source reports a pid.
+        // Skip if already tracked (the periodic scan may have found it first).
+        let steam_activity =
+            if source != Source::Steam && pid > 0 && !self.steam_appids.contains_key(&pid) {
+                probe_steam(pid).map(|mut sa| {
+                    self.apply_naming(&mut sa);
+                    sa
+                })
+            } else {
+                None
+            };
+
+        // One record per merge key. Probe for the best available key
+        // (SteamAppId > LUTRIS_GAME_UUID > UMU_ID). `appid_records` maps
+        // each key to the deepest pid holding its record. Deeper wins
+        // (replaces), shallower is suppressed.
+        if source != Source::Steam && pid > 0 {
+            if let Some(key) = probe_merge_key(pid) {
+                match self.appid_records.get(&key).copied() {
+                    Some(existing_pid) if existing_pid != pid => {
+                        let new_deeper = tree_depth(pid) > tree_depth(existing_pid);
+                        if new_deeper {
+                            // This pid is deeper: replace the existing record.
+                            tracing::info!(
+                                old = existing_pid,
+                                new = pid,
+                                merge_key = %key,
+                                "merge: deeper pid replaces record"
+                            );
+                            events.push(SourceEvent::Removed {
+                                id: format!("pid_{existing_pid}"),
+                                source: Source::GameMode,
+                            });
+                            if let Some(sid) = self.steam_ids.remove(&existing_pid) {
+                                events.push(SourceEvent::Removed {
+                                    id: sid,
+                                    source: Source::Steam,
+                                });
+                            }
+                            self.active_sources.remove(&existing_pid);
+                            self.steam_appids.remove(&existing_pid);
+                            self.appid_records.insert(key, pid);
+                        } else {
+                            // The existing pid is deeper or equal: suppress this one.
+                            tracing::info!(
+                                suppressed = pid,
+                                kept = existing_pid,
+                                merge_key = %key,
+                                "merge: suppressing shallower pid"
+                            );
+                            events.push(SourceEvent::Removed {
+                                id: format!("pid_{pid}"),
+                                source: Source::GameMode,
+                            });
+                            if let Some(sid) = self.steam_ids.remove(&pid) {
+                                events.push(SourceEvent::Removed {
+                                    id: sid,
+                                    source: Source::Steam,
+                                });
+                            }
+                            return events; // Don't forward the GameMode activity or Steam partial.
+                        }
+                    }
+                    _ => {
+                        // First pid for this key.
+                        self.appid_records.insert(key, pid);
+                    }
+                }
+            }
+        }
+
+        // Forward the original event.
         events.push(SourceEvent::Updated(Box::new(activity)));
 
-        // Probe for Steam data when a non-Steam source reports a pid.
-        if source != Source::Steam && pid > 0 {
-            if let Some(mut steam_activity) = probe_steam(pid) {
-                // Also apply naming to the Steam partial (by appid).
-                self.apply_naming(&mut steam_activity);
-                let steam_id = steam_activity.id.clone();
-                self.steam_ids.insert(pid, steam_id);
-                events.push(SourceEvent::Updated(Box::new(steam_activity)));
+        // Forward the Steam partial (if any).
+        if let Some(sa) = steam_activity {
+            let steam_id = sa.id.clone();
+            self.steam_ids.insert(pid, steam_id);
+            self.steam_appids.insert(pid, appid_from(&sa));
+            events.push(SourceEvent::Updated(Box::new(sa)));
+        }
+
+        events
+    }
+
+    /// Apply game identification to an activity.
+    ///
+    /// When GameMode registers a wrapper process (env, bash, steam-runtime-l,
+    /// etc.), the record's real identity comes from the actual game. Three
+    /// layers, cheapest first:
+    ///
+    /// 1. **Wrapper cmdline** - the wrapper's own `/proc/<pid>/cmdline`
+    ///    usually names the game at the end
+    ///    (`... proton waitforexitandrun /path/Game.exe`).
+    /// 2. **Descendant walk** - connected process trees (native Steam,
+    ///    non-portal spawns): walk `/proc/*/task/*/children`, matching
+    ///    exe links and Wine cmdlines.
+    /// 3. **Sandbox-family scan** - Flatpak-portal spawns sever the tree
+    ///    (Lutris-Flatpak + umu): all sandbox members share the umu
+    ///    `var/tmp-XXXXXX` token in their cmdlines; scan `/proc` for it.
+    ///
+    /// If nothing is found, the pid is remembered in
+    /// [`Self::unresolved_wrappers`] and retried periodically by
+    /// [`Self::retry_unresolved`] - the game may launch minutes after the
+    /// wrapper (Battle.net launcher → actual game).
+    fn apply_descendant_walk(&mut self, activity: &mut Activity) {
+        // Only for GameMode activities with wrapper executables.
+        if !activity.sources.contains(&Source::GameMode) {
+            return;
+        }
+        if activity.executable.is_empty() || !is_wrapper_executable(&activity.executable) {
+            return;
+        }
+        let pid = activity.process_id;
+        if pid == 0 {
+            return;
+        }
+
+        // If the naming DB isn't loaded yet (it loads after sources spawn),
+        // mark for retry instead of silently skipping.
+        if self.naming.is_none() {
+            self.unresolved_wrappers.insert(pid);
+            return;
+        }
+
+        match self.identify_wrapper(pid) {
+            Some((name, exe)) => {
+                tracing::info!(wrapper_pid = pid, game_name = %name, game_exe = %exe, "identified game for wrapper");
+                activity.name = name;
+                activity.executable = exe;
+                self.unresolved_wrappers.remove(&pid);
+            }
+            None => {
+                // Game may not have launched yet (Battle.net launcher → game
+                // starts minutes later). Retry periodically.
+                self.unresolved_wrappers.insert(pid);
+            }
+        }
+    }
+
+    /// Periodic tick: retry wrapper identification + scan for Steam
+    /// processes that no other source reported.
+    ///
+    /// The Steam scan closes the reactive design's gap: games launched
+    /// without GameMode (no `gamemoderun`, no libgamemodeauto preload)
+    /// produce no source event and would otherwise be invisible. A bounded
+    /// `/proc/*/environ` scan every tick (~500 processes, ~5ms) finds them.
+    pub fn tick(&mut self) -> Vec<SourceEvent> {
+        let mut events = self.retry_unresolved();
+        events.extend(self.scan_steam_processes());
+        events
+    }
+
+    /// Retry identification for wrappers whose game hasn't been found yet.
+    ///
+    /// Called periodically from the main loop. Returns update events for
+    /// wrappers that just became identifiable.
+    pub fn retry_unresolved(&mut self) -> Vec<SourceEvent> {
+        let pids: Vec<u32> = self.unresolved_wrappers.iter().copied().collect();
+        let mut out = Vec::new();
+        for pid in pids {
+            if let Some((name, exe)) = self.identify_wrapper(pid) {
+                tracing::info!(wrapper_pid = pid, game_name = %name, game_exe = %exe, "identified game for wrapper (retry)");
+                let mut activity = Activity::from_gamemode(pid as i32, &exe, 0);
+                activity.name = name;
+                out.push(SourceEvent::Updated(Box::new(activity)));
+                self.unresolved_wrappers.remove(&pid);
+            }
+        }
+        out
+    }
+
+    /// Scan `/proc/*/environ` for Steam appids not yet tracked.
+    ///
+    /// For each new pid with a numeric appid: emit a Steam partial. The
+    /// ancestor-walk merges wrapper-family members (deepest wins). Pids
+    /// that vanish or lose their appid are reconciled (removed).
+    fn scan_steam_processes(&mut self) -> Vec<SourceEvent> {
+        let mut events = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return events;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            let Ok(environ) = std::fs::read_to_string(format!("/proc/{pid}/environ")) else {
+                continue;
+            };
+            let Some(appid) = find_steam_appid(&environ) else {
+                continue;
+            };
+            seen.insert(pid);
+            // Skip already-processed pids (emitted, absorbed, or suppressed).
+            if self.appid_records.values().any(|&p| p == pid) {
+                continue;
+            }
+
+            // Only track processes identifiable as games. The wrapper chain
+            // includes many utility processes (wineserver, tabtip.exe, etc.)
+            // that inherit the appid but are NOT the game. Emitting partials
+            // for them creates noise the merge can't cleanly converge.
+            if let Some(ref db) = self.naming {
+                if identify_process(pid, db).is_none() {
+                    continue;
+                }
+            }
+
+            // One record per appid: if this key already has a record, the
+            // deeper pid wins (replaces), shallower is suppressed.
+            let key = format!("steam:{appid}");
+            match self.appid_records.get(&key).copied() {
+                Some(existing_pid) if existing_pid != pid => {
+                    if tree_depth(pid) > tree_depth(existing_pid) {
+                        // This pid is deeper: replace the existing record.
+                        tracing::debug!(old = existing_pid, new = pid, "scan: deeper pid replaces record");
+                        events.push(SourceEvent::Removed {
+                            id: format!("steam_{existing_pid}"),
+                            source: Source::Steam,
+                        });
+                        self.steam_ids.remove(&existing_pid);
+                        self.steam_appids.remove(&existing_pid);
+                        self.appid_records.insert(key.clone(), pid);
+                    } else {
+                        // The existing pid is deeper or equal: suppress this one.
+                        tracing::debug!(suppressed = pid, kept = existing_pid, "scan: suppressing shallower pid");
+                        continue;
+                    }
+                }
+                _ => {
+                    self.appid_records.insert(key.clone(), pid);
+                }
+            }
+
+            let mut activity = Activity::from_steam(pid as i32, &appid);
+            self.apply_naming(&mut activity);
+            self.steam_appids.insert(pid, appid);
+            self.steam_ids.insert(pid, activity.id.clone());
+            tracing::debug!(pid, "Steam scan: new process");
+            events.push(SourceEvent::Updated(Box::new(activity)));
+        }
+
+        // Reconcile: tracked Steam pids that vanished (process died or pid
+        // reused by a non-Steam process). Only remove pids with no other
+        // active source - GameMode-tracked pids are managed by the
+        // source-removal path.
+        let tracked: Vec<u32> = self.steam_appids.keys().copied().collect();
+        for pid in tracked {
+            if !seen.contains(&pid) && !self.active_sources.contains_key(&pid) {
+                if let Some(sid) = self.steam_ids.remove(&pid) {
+                    events.push(SourceEvent::Removed {
+                        id: sid,
+                        source: Source::Steam,
+                    });
+                }
+                self.steam_appids.remove(&pid);
             }
         }
 
         events
+    }
+
+    /// Run the three identification layers for a wrapper pid.
+    /// Returns `(game_name, game_executable)` on success.
+    fn identify_wrapper(&self, pid: u32) -> Option<(String, String)> {
+        let db = self.naming.as_ref()?;
+
+        // Layer 1: the wrapper's own cmdline usually names the game.
+        if let Some(found) = identify_via_cmdline(pid, db) {
+            return Some(found);
+        }
+        // Layer 2: connected descendant walk.
+        if let Some(found) = find_game_descendant(pid, db) {
+            return Some(found);
+        }
+        // Layer 3: Flatpak-portal sandbox family (umu tmpdir bridge).
+        if let Some(found) = find_game_in_sandbox_family(pid, db) {
+            return Some(found);
+        }
+        None
     }
 
     /// Apply naming enrichment to an activity.
@@ -141,7 +451,24 @@ impl Enricher {
     /// Precedence: Discord name > detectable.json lookup > executable stem.
     /// Only modifies the name if it's currently empty or an executable stem
     /// (i.e., not a human-curated name from Discord).
+    ///
+    /// Wrapper executables (env, bash, sh, etc.) are never useful game names.
+    /// Their names are cleared so the record shows "(unknown)" or gets a
+    /// name from detectable.json.
     fn apply_naming(&self, activity: &mut Activity) {
+        // Clear wrapper executable names - "env", "bash", etc. are never
+        // useful game names. This runs even without a naming database.
+        if !activity.executable.is_empty() && is_wrapper_executable(&activity.executable) {
+            // Only clear if the name is the executable stem (not a
+            // human-curated name from Discord or detectable.json).
+            let stem = std::path::Path::new(&activity.executable)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase());
+            if stem.as_deref() == Some(activity.name.to_lowercase().as_str()) {
+                activity.name.clear();
+            }
+        }
+
         let Some(ref db) = self.naming else {
             return;
         };
@@ -182,6 +509,9 @@ impl Enricher {
         // If this is a non-Steam source removal, check if the pid has any
         // remaining non-Steam sources. If not, remove the Steam partial.
         if let Some(pid) = pid {
+            self.unresolved_wrappers.remove(&pid);
+            // Remove this pid from appid_records if it holds one.
+            self.appid_records.retain(|_, p| *p != pid);
             if let Some(sources) = self.active_sources.get_mut(&pid) {
                 sources.remove(&source);
                 if sources.is_empty() {
@@ -211,6 +541,7 @@ impl Enricher {
                     sources.remove(&source);
                     if sources.is_empty() {
                         self.active_sources.remove(&pid);
+                        self.appid_records.retain(|_, p| *p != pid);
                         if let Some(steam_id) = self.steam_ids.remove(&pid) {
                             events.push(SourceEvent::Removed {
                                 id: steam_id,
@@ -235,6 +566,39 @@ fn extract_pid(id: &str) -> Option<u32> {
     pid_str.parse().ok()
 }
 
+/// Probe `/proc/<pid>/environ` for the best available merge key.
+///
+/// Priority: `SteamAppId` (numeric) > `LUTRIS_GAME_UUID` > `UMU_ID`
+/// (non-default). The merge key is used for ancestor-walk deduplication
+/// across wrapper trees - two processes sharing a key and a process tree
+/// are the same game.
+fn probe_merge_key(pid: u32) -> Option<String> {
+    let environ = std::fs::read_to_string(format!("/proc/{pid}/environ")).ok()?;
+    let mut steam_appid = None;
+    let mut lutris_uuid = None;
+    let mut umu_id = None;
+    for entry in environ.split('\0') {
+        if let Some(v) = entry.strip_prefix("SteamAppId=") {
+            if v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty() {
+                steam_appid = Some(format!("steam:{v}"));
+            }
+        } else if let Some(v) = entry.strip_prefix("SteamGameId=") {
+            if steam_appid.is_none() && v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty() {
+                steam_appid = Some(format!("steam:{v}"));
+            }
+        } else if let Some(v) = entry.strip_prefix("LUTRIS_GAME_UUID=") {
+            if !v.is_empty() {
+                lutris_uuid = Some(format!("lutris:{v}"));
+            }
+        } else if let Some(v) = entry.strip_prefix("UMU_ID=umu-") {
+            if v != "default" && !v.is_empty() {
+                umu_id = Some(format!("umu:{v}"));
+            }
+        }
+    }
+    steam_appid.or(lutris_uuid).or(umu_id)
+}
+
 /// Probe `/proc/<pid>/environ` for Steam appid variables.
 ///
 /// Checks in order:
@@ -255,27 +619,289 @@ pub fn probe_steam(pid: u32) -> Option<Activity> {
 ///
 /// The environ file is NUL-separated `KEY=VALUE` pairs. We check for
 /// `UMU_ID=umu-<N>` first (umu-launcher), then `SteamAppId`, then
-/// `SteamGameId`.
+/// `SteamGameId`. Only non-zero numeric values are accepted - Steam sets
+/// `SteamAppId=default` for its own client processes and `SteamAppId=0`
+/// for non-Steam games, neither of which is a game appid.
 fn find_steam_appid(environ: &str) -> Option<String> {
     for entry in environ.split('\0') {
         if let Some(value) = entry.strip_prefix("UMU_ID=umu-") {
             // umu-launcher: numeric N implies steam appid N
-            if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() {
+            if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() && value != "0" {
                 return Some(value.to_string());
             }
         }
         if let Some(value) = entry.strip_prefix("SteamAppId=") {
-            if !value.is_empty() {
+            if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() && value != "0" {
                 return Some(value.to_string());
             }
         }
         if let Some(value) = entry.strip_prefix("SteamGameId=") {
-            if !value.is_empty() {
+            if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() && value != "0" {
                 return Some(value.to_string());
             }
         }
     }
     None
+}
+
+/// Identify a process as a game via `/proc/<pid>/exe` (native) or
+/// `/proc/<pid>/cmdline` tokens (Wine games: exe link is wine64-preloader,
+/// the real exe is a cmdline token with backslash separators).
+///
+/// Returns `(game_name, game_executable)` on a detectable.json match.
+fn identify_process(pid: u32, db: &NamingDb) -> Option<(String, String)> {
+    // Native binary: exe link.
+    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        if let Some(exe_str) = exe.to_str() {
+            if let Some(name) = db.lookup_by_executable(exe_str) {
+                return Some((name.to_string(), exe_str.to_string()));
+            }
+        }
+    }
+    // Wine game: cmdline tokens (backslash-normalised by the lookup).
+    if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+        for token in cmdline.split('\0').filter(|t| !t.is_empty()) {
+            if let Some(name) = db.lookup_by_executable(token) {
+                return Some((name.to_string(), token.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Layer 1: identify a wrapper's game from its own cmdline.
+///
+/// Launch wrappers carry the game path at the end of their command line:
+/// `... proton waitforexitandrun /path/Game.exe`. Cheap, no tree walk.
+fn identify_via_cmdline(pid: u32, db: &NamingDb) -> Option<(String, String)> {
+    let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut result = None;
+    for token in cmdline.split('\0').filter(|t| !t.is_empty()) {
+        if let Some(name) = db.lookup_by_executable(token) {
+            // Keep scanning: the LAST match wins - the game exe is at the
+            // end of the wrapper's cmdline (after proton/umu-shim paths).
+            result = Some((name.to_string(), token.to_string()));
+        }
+    }
+    result
+}
+
+/// Layer 3: find the game inside a Flatpak-portal-spawned sandbox.
+///
+/// When Lutris runs as a Flatpak, steam-runtime-launch-client asks
+/// `org.freedesktop.portal.Flatpak` to spawn the bwrap sandbox - the
+/// process tree is severed (the sandbox's parent is the portal, not the
+/// wrapper). All sandbox members share the umu `var/tmp-XXXXXX` token in
+/// their cmdlines; scan `/proc` for it, then identify among family members
+/// and their descendants.
+fn find_game_in_sandbox_family(pid: u32, db: &NamingDb) -> Option<(String, String)> {
+    let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
+    let token = umu_tmpdir_token(&cmdline)?;
+
+    let mut best: Option<(String, String)> = None;
+    for family_pid in scan_proc_for_cmdline_token(&token) {
+        // Prefer non-wrapper exes (the actual game over another wrapper).
+        if let Some((name, exe)) = identify_process(family_pid, db) {
+            let exe_is_wrapper = is_wrapper_executable(&exe);
+            match (&best, exe_is_wrapper) {
+                (None, _) => best = Some((name, exe)),
+                (Some((_, e)), false) if is_wrapper_executable(e) => {
+                    best = Some((name, exe));
+                }
+                _ => {}
+            }
+        }
+        // Also walk the family member's descendants (connected within the
+        // sandbox - the game is a child of pv-adverb).
+        if let Some((name, exe)) = find_game_descendant(family_pid, db) {
+            if !is_wrapper_executable(&exe) {
+                return Some((name, exe));
+            }
+            if best.is_none() {
+                best = Some((name, exe));
+            }
+        }
+    }
+    best
+}
+
+/// Extract the umu `tmp-XXXXXX` sandbox token from a cmdline string.
+///
+/// umu/pressure-vessel puts `--app-path .../var/tmp-XXXXXX/app` in every
+/// sandbox member's cmdline. Returns e.g. `tmp-VI2WT3`.
+fn umu_tmpdir_token(cmdline: &str) -> Option<String> {
+    let idx = cmdline.find("var/tmp-")?;
+    let rest = &cmdline[idx + "var/".len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(rest[..end].to_string())
+}
+
+/// Scan `/proc` for processes whose cmdline contains `token`.
+fn scan_proc_for_cmdline_token(token: &str) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+            if cmdline.contains(token) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// Walk the process tree downward from `pid`, looking for a process whose
+/// executable matches a detectable.json entry.
+///
+/// Returns `(pid, executable_path)` of the first game found, or `None`.
+/// The walk is bounded by `MAX_DESCENDANT_DEPTH` and `MAX_DESCENDANT_BREADTH`.
+fn find_game_descendant(pid: u32, db: &NamingDb) -> Option<(String, String)> {
+    let mut visited = 0;
+    find_game_descendant_inner(pid, db, 0, &mut visited)
+}
+
+fn find_game_descendant_inner(
+    pid: u32,
+    db: &NamingDb,
+    depth: usize,
+    visited: &mut usize,
+) -> Option<(String, String)> {
+    if depth > MAX_DESCENDANT_DEPTH || *visited >= MAX_DESCENDANT_BREADTH {
+        return None;
+    }
+    *visited += 1;
+
+    // Check this process (exe link + Wine cmdline).
+    if let Some(found) = identify_process(pid, db) {
+        return Some(found);
+    }
+
+    // Not a game - check children.
+    let children = read_children(pid);
+    for child in children {
+        if let Some(found) = find_game_descendant_inner(child, db, depth + 1, visited) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Read the child pids from `/proc/<pid>/task/<pid>/children`.
+fn read_children(pid: u32) -> Vec<u32> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect()
+}
+
+/// Known non-game wrapper executables. The executable stem of a wrapper
+/// is never a useful game name - clear it so the record shows "(unknown)"
+/// or gets a name from detectable.json.
+fn is_wrapper_executable(executable: &str) -> bool {
+    let filename = std::path::Path::new(executable)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_lowercase());
+    matches!(
+        filename.as_deref(),
+        Some(
+            "env"
+                | "bash"
+                | "sh"
+                | "zsh"
+                | "fish"
+                | "dash"
+                | "ash"
+                | "python"
+                | "python3"
+                | "python2"
+                | "perl"
+                | "ruby"
+                | "node"
+                | "steam-runtime-launch-client"
+                | "steam-runtime-supervisor"
+                | "reaper"
+                | "srt-bwrap"
+                | "pv-adverb"
+                | "bwrap"
+                | "umu-run"
+                | "umu-shim"
+                | "gamemoderun"
+                | "lutris-wrapper"
+        )
+    )
+}
+
+/// Extract the Steam appid from a Steam activity.
+fn appid_from(activity: &Activity) -> String {
+    activity.app_ids.get("steam").cloned().unwrap_or_default()
+}
+
+/// Read the parent pid from `/proc/<pid>/stat`.
+///
+/// The ppid is field 4 of the stat line. After the last `)` on the line
+/// (the comm field can contain spaces and parens), the tokens are:
+/// state(0), ppid(1), pgrp(2), ...
+fn read_ppid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// The depth of a pid in the process tree (number of ancestors).
+/// Deeper pids are closer to the actual game process.
+fn tree_depth(pid: u32) -> usize {
+    let mut depth = 0;
+    let mut current = pid;
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        match read_ppid(current) {
+            Some(ppid) if ppid > 0 => {
+                depth += 1;
+                current = ppid;
+            }
+            _ => break,
+        }
+    }
+    depth
+}
+
+/// Check whether `ancestor` is an ancestor of `descendant` by walking the
+/// ppid chain from `descendant` upward, bounded to `MAX_ANCESTOR_DEPTH` hops.
+///
+/// Both pids must be alive. Returns `false` if the chain is broken
+/// (a process died mid-walk) or the depth limit is reached.
+#[cfg(test)]
+fn is_ancestor(ancestor: u32, descendant: u32) -> bool {
+    if ancestor == descendant {
+        return false;
+    }
+    let mut current = descendant;
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        match read_ppid(current) {
+            Some(ppid) if ppid > 0 => {
+                if ppid == ancestor {
+                    return true;
+                }
+                current = ppid;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -316,6 +942,11 @@ mod tests {
 
         // Empty values are ignored
         let env = "SteamAppId=\0";
+        assert_eq!(find_steam_appid(env), None);
+
+        // Non-numeric values are ignored (Steam sets SteamAppId=default for
+        // its own client processes - not a game appid).
+        let env = "SteamAppId=default\0";
         assert_eq!(find_steam_appid(env), None);
 
         // Non-numeric UMU_ID is ignored
@@ -402,6 +1033,66 @@ mod tests {
         let events = e.process(SourceEvent::Updated(Box::new(steam)));
         // Steam events are not re-probed (source == Steam)
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn is_ancestor_basic() {
+        let own_pid = std::process::id();
+        // init (pid 1) is an ancestor of every process.
+        assert!(is_ancestor(1, own_pid));
+        // A process is not its own ancestor.
+        assert!(!is_ancestor(own_pid, own_pid));
+        // A non-existent pid breaks the chain.
+        assert!(!is_ancestor(999999, own_pid));
+    }
+
+    #[test]
+    fn ancestor_walk_merges_duplicate_appid() {
+        let mut e = Enricher::with_naming(None);
+
+        // Simulate: ancestor pid 100 already tracked with appid "480"
+        e.active_sources
+            .entry(100)
+            .or_default()
+            .insert(Source::GameMode);
+        e.steam_ids.insert(100, "steam_100".to_string());
+        e.steam_appids.insert(100, "480".to_string());
+
+        // Now the descendant pid 101 arrives with the same appid.
+        // is_ancestor(100, 101) will be false (they're not related in /proc),
+        // so find_related_pid won't match. This tests the non-related case.
+        let activity = gamemode_activity(101);
+        let events = e.process(SourceEvent::Updated(Box::new(activity)));
+        // No merge should happen (pids are not related).
+        assert!(!events
+            .iter()
+            .any(|ev| matches!(ev, SourceEvent::Removed { .. })));
+    }
+
+    #[test]
+    fn ancestor_walk_no_appid_no_merge() {
+        let mut e = Enricher::with_naming(None);
+
+        // Track a pid without a Steam appid
+        e.active_sources
+            .entry(200)
+            .or_default()
+            .insert(Source::GameMode);
+
+        // A new pid arrives - no Steam probe (no appid in /proc), no merge
+        let activity = gamemode_activity(201);
+        let events = e.process(SourceEvent::Updated(Box::new(activity)));
+        assert!(!events
+            .iter()
+            .any(|ev| matches!(ev, SourceEvent::Removed { .. })));
+    }
+
+    #[test]
+    fn read_ppid_own_process() {
+        let own_pid = std::process::id();
+        let ppid = read_ppid(own_pid);
+        assert!(ppid.is_some());
+        assert!(ppid.unwrap() > 0);
     }
 
     #[test]

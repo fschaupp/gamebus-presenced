@@ -33,11 +33,11 @@ use zbus::zvariant::OwnedObjectPath;
 /// Main entry point for the presence daemon.
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+    // Initialize logging. RUST_LOG overrides the default info level.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("gamebus_presenced=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("gamebus_presenced=info")),
         )
         .init();
 
@@ -107,6 +107,11 @@ async fn main() -> Result<()> {
     // Blocking (~100ms for 12MB JSON), but the listeners are already up.
     enricher.load_naming();
 
+    // Periodically retry identification for wrappers whose game hasn't
+    // launched yet (Battle.net launcher → actual game starts minutes later).
+    let mut reidentify_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    reidentify_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     info!("Service ready. Waiting for activity...");
 
     // Daemon core: consume source events, enrich, correlate by pid, maintain the bus.
@@ -132,6 +137,20 @@ async fn main() -> Result<()> {
                 // Write the published surface through to the restart cache.
                 sync_cache(&correlator, &manager, &runtime_dir).await;
             }
+            _ = reidentify_interval.tick() => {
+                let tick_events = enricher.tick();
+                if !tick_events.is_empty() {
+                    for enriched in tick_events {
+                        let effects = match enriched {
+                            SourceEvent::Updated(activity) => correlator.on_updated(*activity),
+                            SourceEvent::Removed { id, source } => correlator.on_removed(&id, source),
+                            SourceEvent::SourceLost { source } => correlator.on_source_lost(source),
+                        };
+                        apply_effects(&conn, &manager, &signal_ctxt, effects).await;
+                    }
+                    sync_cache(&correlator, &manager, &runtime_dir).await;
+                }
+            }
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutting down...");
                 break;
@@ -155,6 +174,12 @@ async fn sync_cache(
         .into_iter()
         .filter_map(|(pid, id)| {
             let activity = snapshot.iter().find(|a| a.id == id)?.clone();
+            // Don't cache Steam-only records: the periodic scan re-finds
+            // them on restart. Caching them would re-adopt stale entries
+            // for processes that died between runs.
+            if activity.sources == [crate::dbus::types::Source::Steam] {
+                return None;
+            }
             let start_time = cache::process_start_time(pid)?;
             Some(CachedRecord {
                 pid,

@@ -122,8 +122,11 @@ async fn gamemode_registration_appears_on_bus() {
         }
     }
 
-    // Start the daemon under test. The daemon's tracing writes to stdout;
-    // capture both streams to a temp file so failures are debuggable.
+    // Start the daemon under test with an isolated XDG_RUNTIME_DIR so the
+    // restart cache from a previous run doesn't leak into this test.
+    let test_runtime_dir =
+        std::env::temp_dir().join(format!("gamebus-gamemode-test-{}", std::process::id()));
+    std::fs::create_dir_all(&test_runtime_dir).unwrap();
     let daemon_log = std::env::temp_dir().join("gamebus-presenced-test-daemon.log");
     let daemon_log_out = std::fs::File::create(&daemon_log).unwrap();
     let daemon_log_err = daemon_log_out.try_clone().unwrap();
@@ -131,6 +134,12 @@ async fn gamemode_registration_appears_on_bus() {
         .stdout(Stdio::from(daemon_log_out))
         .stderr(Stdio::from(daemon_log_err))
         .env("RUST_LOG", "debug")
+        .env("XDG_RUNTIME_DIR", &test_runtime_dir)
+        // XDG_RUNTIME_DIR does not cut the daemon off the session bus.
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
+        )
         .spawn()
         .expect("failed to spawn gamebus-presenced");
     let mut daemon = ChildGuard(daemon);
@@ -247,5 +256,8 @@ async fn gamemode_registration_appears_on_bus() {
 
     let list = manager.list_activities().await.unwrap();
     assert!(!list.iter().any(|p| p == &added_path));
-    assert!(!manager.has_activity().await.unwrap());
+    // Note: HasActivity is not asserted false here - other processes may
+    // legitimately hold GameMode registrations (e.g. libgamemodeauto preload
+    // or a running game). The test verifies the specific game is added and
+    // removed; the global HasActivity state depends on the environment.
 }
