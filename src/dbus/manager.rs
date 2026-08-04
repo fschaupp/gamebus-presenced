@@ -3,7 +3,7 @@
 //! This module implements the org.gamebus.Presence.v1.Manager D-Bus interface
 //! plus the in-memory activity registry behind it.
 
-use crate::dbus::types::{Activity, Source, VERSION};
+use crate::dbus::types::{Activity, VERSION};
 use crate::error::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -90,28 +90,16 @@ impl Manager {
         })
     }
 
-    /// Remove all activities backed by the given source, returning their IDs.
-    ///
-    /// Used when a source daemon leaves the bus: per the design rule "the
-    /// record dies with the last source". For S1 all records are single-source,
-    /// so a record backed by the lost source is removed outright.
-    pub async fn remove_by_source(&self, source: Source) -> Vec<String> {
-        let mut activities = self.activities.write().await;
-        let doomed: Vec<String> = activities
-            .iter()
-            .filter(|(_, a)| a.sources.contains(&source))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &doomed {
-            activities.remove(id);
-        }
-        doomed
-    }
-
     /// Get all activity IDs.
     pub async fn list_activities(&self) -> Vec<String> {
         let activities = self.activities.read().await;
         activities.keys().cloned().collect()
+    }
+
+    /// Snapshot of every stored activity (for the restart cache).
+    pub async fn snapshot(&self) -> Vec<Activity> {
+        let activities = self.activities.read().await;
+        activities.values().cloned().collect()
     }
 
     /// Check if any activities exist.
@@ -237,29 +225,5 @@ mod tests {
         let outcome = manager.remove_activity("pid_42").await.unwrap();
         assert!(!outcome.existed);
         assert!(!outcome.became_empty);
-    }
-
-    #[tokio::test]
-    async fn test_remove_by_source() {
-        let manager = Manager::new();
-        manager
-            .add_activity(Activity::from_gamemode(1, "/bin/a", 1))
-            .await
-            .unwrap();
-        manager
-            .add_activity(Activity::from_gamemode(2, "/bin/b", 1))
-            .await
-            .unwrap();
-
-        // An activity from a different source must survive.
-        let mut other = Activity::new("other-1");
-        other.sources = vec![Source::Discord];
-        manager.add_activity(other).await.unwrap();
-
-        let removed = manager.remove_by_source(Source::GameMode).await;
-        assert_eq!(removed.len(), 2);
-        assert!(removed.contains(&"pid_1".to_string()));
-        assert!(removed.contains(&"pid_2".to_string()));
-        assert_eq!(manager.list_activities().await, vec!["other-1".to_string()]);
     }
 }
