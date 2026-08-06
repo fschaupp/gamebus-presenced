@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4f, S6, and S7 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
+## Status: S0-S4f, S6, S7, and S8 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -344,6 +344,24 @@ Verified: 97 unit tests (+8: merge-key zeros, two pattern truth tables, five
 withhold paths, name monotonicity) and `tests/withheld_publication.rs` on the
 private bus — a registered keyless `sh` wrapper never appears and never
 produces a removal while a plain `sleep` control publishes and dies cleanly.
+
+### S8 — Heroic support (DONE 2026-08-06)
+
+Control, launched through Heroic (Epic/legendary), was invisible: its environ
+carries `SteamAppId=0` and `GAMEID=umu-0` — both correctly rejected — and no
+Lutris UUID, so the whole launch tree was keyless; its blacklisted wrappers
+were withheld (S7 working as designed) and nothing remained to publish.
+`HEROIC_APP_NAME=<codename>` is present in every process of the tree and is
+now the merge key of last resort (`heroic:Calluna`; any Steam/Lutris/umu key
+wins). Group identity comes from the launcher's own install records:
+legendary's `installed.json` maps codename → display title
+(`Calluna → "Control"`), tried at the Flatpak and native config paths — local
+files, no network, launcher-curated, Wrapper class so a detectable.json hit
+on the real game process still upgrades. Considered and rejected: the
+umu-database — it is protonfixes-scoped and does not know this game
+(`codename=Calluna` → `[]`, verified live), and `GAMEID=umu-0` is by
+definition the umu-miss case; its one useful mapping (numeric umu id ⇒ Steam
+appid) has been implemented since S4.
 
 ## Open decisions
 - **MPRIS as a source** — the *naming* half landed as S6 (2026-08-06): player

@@ -278,8 +278,25 @@ impl Enricher {
         // correlator. Pids with no key follow the ungrouped path, untouched.
         if source == Source::GameMode && pid > 0 {
             if let Some(key) = probe_merge_key(pid) {
-                let (class, identity) =
+                let (class, mut identity) =
                     self.classify_member(pid, &raw_exe, &key, identified.as_ref());
+                // S8: a Heroic group whose members prove nothing themselves
+                // is still nameable — the launcher's own install records map
+                // the store codename to the display title. Launcher-curated,
+                // Wrapper class: a detectable.json hit on the real game
+                // process still upgrades it.
+                if identity.is_none() && self.groups.get(&key).is_none_or(|g| g.identity.is_none())
+                {
+                    if let Some(app) = key.strip_prefix("heroic:") {
+                        if let Some(title) = heroic_title(app) {
+                            identity = Some(Identity {
+                                name: title,
+                                exe: raw_exe.clone(),
+                                class: IdentityClass::Wrapper,
+                            });
+                        }
+                    }
+                }
                 let member = Member {
                     gamemode: true,
                     scan: false,
@@ -1395,6 +1412,7 @@ fn merge_key_from_environ(environ: &str) -> Option<String> {
     let mut steam_appid = None;
     let mut lutris_uuid = None;
     let mut umu_id = None;
+    let mut heroic = None;
     for entry in environ.split('\0') {
         if let Some(v) = entry.strip_prefix("SteamAppId=") {
             if valid_steam_appid(v) {
@@ -1412,9 +1430,18 @@ fn merge_key_from_environ(environ: &str) -> Option<String> {
             if v != "default" && v != "0" && !v.is_empty() {
                 umu_id = Some(format!("umu:{v}"));
             }
+        } else if let Some(v) = entry.strip_prefix("HEROIC_APP_NAME=") {
+            // Heroic (Epic/GOG/Amazon) launches carry no usable Steam or
+            // Lutris identity — SteamAppId=0 and GAMEID=umu-0, both rejected
+            // above — but the store codename is present in every process of
+            // the tree (observed live: Control ran as HEROIC_APP_NAME=Calluna
+            // with nothing else to key on, 2026-08-06).
+            if !v.is_empty() {
+                heroic = Some(format!("heroic:{v}"));
+            }
         }
     }
-    steam_appid.or(lutris_uuid).or(umu_id)
+    steam_appid.or(lutris_uuid).or(umu_id).or(heroic)
 }
 
 /// Does the environ carry a non-empty `LUTRIS_GAME_UUID`? Used for the
@@ -1521,6 +1548,35 @@ fn identify_process_exe(pid: u32, db: &NamingDb) -> Option<(String, String)> {
 /// Layer 4 (S6b): find a `lutris-wrapper` ancestor and take the title from
 /// its argv. Evidence-based: same bounded ppid chain as every other walk —
 /// never a guess across trees.
+/// S8: resolve a Heroic store codename to its display title from the
+/// launcher's own install records — `installed.json` written by legendary
+/// (Epic). Local files the user's launcher maintains; no network, no
+/// guessing. Both the Flatpak and native config locations are tried.
+fn heroic_title(app_name: &str) -> Option<String> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let candidates = [
+        home.join(".var/app/com.heroicgameslauncher.hgl/config/heroic/legendaryConfig/legendary/installed.json"),
+        home.join(".config/heroic/legendaryConfig/legendary/installed.json"),
+        home.join(".config/legendary/installed.json"),
+    ];
+    for path in candidates {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Some(title) = heroic_title_from_json(&raw, app_name) {
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+/// Pure half of [`heroic_title`], for tests: legendary's `installed.json` is
+/// a map of app-name → record with a `title` field.
+fn heroic_title_from_json(raw: &str, app_name: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let title = parsed.get(app_name)?.get("title")?.as_str()?.trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
 fn identify_via_lutris_ancestor(pid: u32) -> Option<(String, String)> {
     let mut current = pid;
     for _ in 0..MAX_ANCESTOR_DEPTH {
@@ -2030,6 +2086,45 @@ mod tests {
                 "{name} must stay off ({guards})"
             );
         }
+    }
+
+    #[test]
+    fn heroic_app_name_is_a_merge_key_of_last_resort() {
+        // The live Control shape: zero Steam id, zero umu id, no Lutris —
+        // only the Heroic codename identifies the tree.
+        assert_eq!(
+            merge_key_from_environ("SteamAppId=0\0GAMEID=umu-0\0HEROIC_APP_NAME=Calluna\0")
+                .as_deref(),
+            Some("heroic:Calluna")
+        );
+        // Any stronger key wins.
+        assert_eq!(
+            merge_key_from_environ("SteamAppId=480\0HEROIC_APP_NAME=Calluna\0").as_deref(),
+            Some("steam:480")
+        );
+        assert_eq!(
+            merge_key_from_environ("HEROIC_APP_NAME=\0"),
+            None,
+            "empty codename is not a key"
+        );
+    }
+
+    #[test]
+    fn heroic_title_resolves_from_legendary_installed_json() {
+        let raw = r#"{
+            "Calluna": {"app_name": "Calluna", "title": "Control",
+                        "install_path": "/media/Data/Spiele/Control"},
+            "Fortnite": {"app_name": "Fortnite", "title": ""}
+        }"#;
+        assert_eq!(
+            heroic_title_from_json(raw, "Calluna").as_deref(),
+            Some("Control")
+        );
+        // Empty titles and unknown apps resolve to nothing — the group then
+        // stays unidentified rather than being named after a codename.
+        assert_eq!(heroic_title_from_json(raw, "Fortnite"), None);
+        assert_eq!(heroic_title_from_json(raw, "Unknown"), None);
+        assert_eq!(heroic_title_from_json("not json", "Calluna"), None);
     }
 
     #[test]
