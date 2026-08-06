@@ -150,7 +150,7 @@ enum Msg {
     Input(ratatui::crossterm::event::Event),
     Probed(Box<Status>),
     Activities(Vec<client::ActivityView>),
-    Misses(Vec<umu_report::Miss>),
+    Misses(Vec<(String, umu_report::Miss)>),
     Done(Action, Vec<actions::StepOutcome>),
     Tick,
 }
@@ -277,16 +277,25 @@ fn spawn_activities(tx: &tokio::sync::mpsc::Sender<Msg>, conn: Option<zbus::Conn
     });
 }
 
-/// Refresh the umu-miss pane from the stash file.
+/// Refresh the umu-miss pane from the stash file. Rows carry their stash
+/// key so the UI can keep the selection on the same game across reorders,
+/// and the key is the final sort tie-break — same-day unresolved entries
+/// would otherwise land in HashMap iteration order, which reshuffles on
+/// every load.
 fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
         let report = umu_report::UmuReport::load();
-        let mut misses: Vec<umu_report::Miss> = report.entries().values().cloned().collect();
+        let mut misses: Vec<(String, umu_report::Miss)> = report
+            .entries()
+            .iter()
+            .map(|(k, m)| (k.clone(), m.clone()))
+            .collect();
         misses.sort_by(|a, b| {
-            b.last_seen
-                .cmp(&a.last_seen)
-                .then_with(|| a.title.cmp(&b.title))
+            b.1.last_seen
+                .cmp(&a.1.last_seen)
+                .then_with(|| a.1.title.cmp(&b.1.title))
+                .then_with(|| a.0.cmp(&b.0))
         });
         let _ = tx.blocking_send(Msg::Misses(misses));
     });
@@ -436,7 +445,7 @@ async fn handle(
             app.probing = false;
         }
         Msg::Activities(activities) => app.activities = activities,
-        Msg::Misses(misses) => app.misses = misses,
+        Msg::Misses(misses) => app.set_misses(misses),
         Msg::Done(action, outcomes) => {
             for outcome in &outcomes {
                 let style = if outcome.ok {

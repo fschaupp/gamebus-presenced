@@ -1,4 +1,4 @@
-//! The terminal interface: two views, a confirm modal, and an output log.
+//! The terminal interface: three views, a confirm modal, and an output log.
 //!
 //! Rendering is a pure function of [`App`]; nothing here does I/O beyond
 //! drawing. Everything slow — probing, subprocesses, the 12 MB download —
@@ -65,9 +65,11 @@ pub struct App {
     pub actions: ListState,
     pub activities: Vec<ActivityView>,
     pub monitor: ListState,
-    /// The umu-miss stash, newest first. Loaded off the render path like
-    /// everything else and arriving as a message.
-    pub misses: Vec<Miss>,
+    /// The umu-miss stash as `(stash key, entry)`, newest first. Loaded off
+    /// the render path like everything else and arriving as a message; the
+    /// key is the row's identity, so a refresh that reorders the list can
+    /// keep the selection on the same game.
+    pub misses: Vec<(String, Miss)>,
     pub miss_list: ListState,
     pub output: Vec<Line<'static>>,
     pub confirm: Option<Confirm>,
@@ -170,6 +172,24 @@ impl App {
         }
     }
 
+    /// Replace the miss list, keeping the selection on the same entry (by
+    /// stash key): the once-a-second refresh may reorder rows — a bump of
+    /// `last_seen`, a new miss on top — and a bare index would silently
+    /// switch the detail pane to a different game mid-review.
+    pub fn set_misses(&mut self, misses: Vec<(String, Miss)>) {
+        let selected_key = self
+            .miss_list
+            .selected()
+            .and_then(|i| self.misses.get(i))
+            .map(|(k, _)| k.clone());
+        self.misses = misses;
+        if let Some(key) = selected_key {
+            if let Some(idx) = self.misses.iter().position(|(k, _)| k == &key) {
+                self.miss_list.select(Some(idx));
+            }
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let action_count = self.action_list().len();
         let (state, len) = match (self.view, self.focus) {
@@ -229,19 +249,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             };
             Intent::None
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+        // Pane focus, install target, and Enter act on the Status pane's
+        // selections — which are invisible from the other views. Gated on
+        // the view, or Enter in the read-only misses pane would fire
+        // whatever Status row happened to be highlighted underneath.
+        KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
+            if app.view == View::Status =>
+        {
             app.focus = match app.focus {
                 Focus::Checks => Focus::Actions,
                 Focus::Actions => Focus::Checks,
             };
             Intent::None
         }
-        KeyCode::Char('u') => {
+        KeyCode::Char('u') if app.view == View::Status => {
             app.target = Target::User;
             app.target_pinned = true;
             Intent::None
         }
-        KeyCode::Char('s') => {
+        KeyCode::Char('s') if app.view == View::Status => {
             app.target = Target::System;
             app.target_pinned = true;
             Intent::None
@@ -254,7 +280,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             app.move_selection(-1);
             Intent::None
         }
-        KeyCode::Enter => match app.selected_action() {
+        KeyCode::Enter if app.view == View::Status => match app.selected_action() {
             Some(action) => Intent::Run(action),
             None => Intent::None,
         },
@@ -541,7 +567,7 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     let items: Vec<ListItem> = app
         .misses
         .iter()
-        .map(|m| {
+        .map(|(_, m)| {
             let (glyph, style) = miss_state(m);
             ListItem::new(vec![
                 Line::from(vec![
@@ -571,15 +597,27 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, panes[0], &mut app.miss_list);
 
-    let Some(m) = app.miss_list.selected().and_then(|i| app.misses.get(i)) else {
+    let Some((_, m)) = app.miss_list.selected().and_then(|i| app.misses.get(i)) else {
         return;
     };
-    let mut detail = vec![
-        field("Title", m.title.as_deref().unwrap_or("(unresolved)")),
+    let mut detail = vec![field("Title", m.title.as_deref().unwrap_or("(unresolved)"))];
+    // The one line that stops a duplicate submission goes FIRST: at small
+    // terminal sizes the pane clips from the bottom, and a clipped warning
+    // is a warning that never happened.
+    if let Some(pr) = &m.possible_pr {
+        detail.push(Line::from(vec![
+            Span::styled(
+                format!("{:<11} ", "Submitted?"),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::styled(pr.clone(), Style::default().fg(Color::Magenta)),
+        ]));
+    }
+    detail.extend([
         field("Store", &m.store),
         field("Codename", m.codename.as_deref().unwrap_or("-")),
         field("Reported", &m.umu_id),
-    ];
+    ]);
     if let Some(source) = &m.title_source {
         detail.push(field(
             "Resolved by",
@@ -630,15 +668,6 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             ),
         ));
     }
-    if let Some(pr) = &m.possible_pr {
-        detail.push(field("Submitted?", pr));
-    }
-    detail.push(Line::from(""));
-    detail.push(Line::from(Span::styled(
-        "Export a submission: gamebus-setup umu-misses --export-md",
-        Style::default().fg(Color::DarkGray),
-    )));
-
     f.render_widget(
         Paragraph::new(detail)
             .wrap(Wrap { trim: true })
@@ -691,7 +720,11 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             "↑↓ select · ←→ pane · ⏎ run · u/s target · tab next view · r refresh · q quit"
         }
         View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
-        View::Misses => "↑↓ select · tab next view · r refresh · q quit",
+        // The export hint lives here, not at the bottom of the detail pane,
+        // where small terminals would clip it away.
+        View::Misses => {
+            "↑↓ select · tab view · r refresh · q quit · export: umu-misses --export-md"
+        }
     };
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
@@ -970,21 +1003,77 @@ mod tests {
         assert_eq!(app.miss_list.selected(), Some(2), "wrap-around broke");
     }
 
-    fn sample_miss(title: &str) -> Miss {
-        Miss {
-            title: Some(title.to_string()),
-            store: "egs".into(),
-            codename: None,
-            umu_id: "umu-0".into(),
-            title_source: Some("heroic-config".into()),
-            confidence: None,
-            executable: None,
-            first_seen: "2026-08-07".into(),
-            last_seen: "2026-08-07".into(),
-            verification: None,
-            drafted_id: None,
-            possible_pr: None,
-        }
+    #[test]
+    fn a_refresh_keeps_the_selection_on_the_same_game() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control"), sample_miss("Brotato")]);
+        // No selection yet, so the first ↓ lands on index 1: Brotato.
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.miss_list.selected(), Some(1)); // Brotato
+
+        // The refresh reorders (a new miss lands on top, Brotato moves):
+        // the selection must follow Brotato, not stay at index 1.
+        app.set_misses(vec![
+            sample_miss("Hades II"),
+            sample_miss("Brotato"),
+            sample_miss("Control"),
+        ]);
+        let selected = app
+            .miss_list
+            .selected()
+            .and_then(|i| app.misses.get(i))
+            .map(|(k, _)| k.as_str());
+        assert_eq!(selected, Some("egs:Brotato"), "selection lost its game");
+    }
+
+    #[test]
+    fn status_pane_keys_are_inert_outside_the_status_view() {
+        let mut app = app_with_rows();
+        app.focus = Focus::Actions; // an Install row is highlighted underneath
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        // Enter must NOT fire the hidden Status-pane action from the
+        // read-only misses pane — nor may ←→/u/s mutate invisible state.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
+        handle_key(&mut app, key(KeyCode::Char('s')));
+        assert_eq!(
+            app.target,
+            Target::User,
+            "target changed from a read-only view"
+        );
+        handle_key(&mut app, key(KeyCode::Left));
+        assert_eq!(
+            app.focus,
+            Focus::Actions,
+            "focus changed from a read-only view"
+        );
+        // Back on Status, Enter works as before.
+        app.view = View::Status;
+        assert!(matches!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::Run(_)
+        ));
+    }
+
+    fn sample_miss(title: &str) -> (String, Miss) {
+        (
+            format!("egs:{title}"),
+            Miss {
+                title: Some(title.to_string()),
+                store: "egs".into(),
+                codename: None,
+                umu_id: "umu-0".into(),
+                title_source: Some("heroic-config".into()),
+                confidence: None,
+                executable: None,
+                first_seen: "2026-08-07".into(),
+                last_seen: "2026-08-07".into(),
+                verification: None,
+                drafted_id: None,
+                possible_pr: None,
+            },
+        )
     }
 
     #[test]
