@@ -6,3 +6,6 @@ Cargo.lock.bak
 .opencode/
 
 opencode.json
+
+# Obsidian editor state for the .second-brain vault — personal, not project.
+.obsidian/
