@@ -338,9 +338,13 @@ fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<(), String> {
                     verdict.note = Some("id found via the drafting rules".into());
                 }
                 DraftOutcome::Collision { id, existing_title } => {
-                    verdict.note = Some(format!(
+                    let collision = format!(
                         "draft {id} collides with the existing entry '{existing_title}' — left as umu-FIXME"
-                    ));
+                    );
+                    verdict.note = Some(match verdict.note.take() {
+                        Some(prior) => format!("{prior}; {collision}"),
+                        None => collision,
+                    });
                 }
                 DraftOutcome::NoBasis => {}
             }
@@ -393,8 +397,12 @@ fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<(), String> {
     Ok(())
 }
 
-/// The API's two lookups for one entry: exact store+codename, then title.
-/// `Ok(None)` means the API answered and found nothing — a confirmed miss.
+/// The API's two lookups for one entry. Only the store+codename lookup is
+/// authoritative — verified live 2026-08-07, it matches exactly. The title
+/// lookup does substring matching (`?title=Control` returns Ground
+/// Control's ids) and its rows carry no title to compare against, so a hit
+/// there is advisory only: it lands in the note for the human, never in the
+/// verdict's id. `Ok(None)` means the API answered and found nothing.
 fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
     if let Some(code) = m
         .codename
@@ -407,7 +415,7 @@ fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
                 urlencode(&m.store),
                 urlencode(code)
             );
-            if let Some(umu_id) = api_first_umu_id(&url)? {
+            if let Some(umu_id) = api_umu_ids(&url)?.into_iter().next() {
                 return Ok(Some(Verdict {
                     state: VerificationState::AlreadyInDatabase,
                     umu_id: Some(umu_id),
@@ -419,11 +427,16 @@ fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
     }
     if let Some(title) = m.title.as_deref() {
         let url = format!("{api}?title={}", urlencode(title));
-        if let Some(umu_id) = api_first_umu_id(&url)? {
+        let mut ids = api_umu_ids(&url)?;
+        ids.dedup();
+        if !ids.is_empty() {
             return Ok(Some(Verdict {
-                state: VerificationState::CrossStoreId,
-                umu_id: Some(umu_id),
-                note: Some("id found via a live title lookup".into()),
+                state: VerificationState::ConfirmedMissing,
+                umu_id: None,
+                note: Some(format!(
+                    "live title lookup matched {} (substring match — check whether one is this game before submitting)",
+                    ids.join(", ")
+                )),
                 drafted: None,
             }));
         }
@@ -433,7 +446,7 @@ fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
 
 /// One API query. Both lookup shapes answer `[{"umu_id": …, …}, …]`; a miss
 /// is the empty array.
-fn api_first_umu_id(url: &str) -> Result<Option<String>, String> {
+fn api_umu_ids(url: &str) -> Result<Vec<String>, String> {
     #[derive(Deserialize)]
     struct Row {
         umu_id: Option<String>,
@@ -444,7 +457,7 @@ fn api_first_umu_id(url: &str) -> Result<Option<String>, String> {
         .map_err(|e| format!("{url}: {e}"))?
         .into_json()
         .map_err(|e| format!("{url}: unexpected response: {e}"))?;
-    Ok(rows.into_iter().find_map(|r| r.umu_id))
+    Ok(rows.into_iter().filter_map(|r| r.umu_id).collect())
 }
 
 /// `--check-prs`: scan open upstream merge requests for rows that look like

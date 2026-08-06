@@ -365,6 +365,75 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     assert!(text.contains("collision-checked"), "{text}");
 }
 
+/// A one-thread fake umu API: exact-miss on the codename lookup, fuzzy ids
+/// on the title lookup — the live API's observed behavior (`?title=Control`
+/// returns Ground Control's ids, with no title field to compare against).
+fn spawn_fake_umu_api() -> String {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let body = if req.contains("codename=") {
+                "[]"
+            } else if req.contains("title=") {
+                r#"[{"umu_id":"umu-254820"},{"umu_id":"umu-254840"}]"#
+            } else {
+                "[]"
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn umu_misses_fuzzy_api_title_hits_stay_advisory() {
+    let home = TempHome::new("umu-fuzzy");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // Not in the fixture database, so verification reaches the API; the
+    // fake API answers the title lookup with someone else's ids.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"egs:KZed":{"title":"Kontrol Zed","store":"egs","codename":"KZed",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-07","last_seen":"2026-08-07"}}"#,
+    )
+    .unwrap();
+    let db = home.path().join("umu-database.csv");
+    std::fs::write(&db, S9B_DB).unwrap();
+
+    let api = spawn_fake_umu_api();
+    let out = run_env(
+        &home,
+        &["umu-misses", "--verify", "--db", db.to_str().unwrap()],
+        &[("GAMEBUS_UMU_API", api.as_str())],
+    );
+    assert!(out.status.success(), "verify failed: {out:?}");
+
+    let stash = std::fs::read_to_string(stash_dir.join("umu-misses.json")).unwrap();
+    // Fuzzy title matches must never become the verdict: the entry stays
+    // confirmed-missing, gets its own drafted id, and the ids the API
+    // offered appear only in the human-facing note.
+    assert!(stash.contains("confirmed-missing"), "{stash}");
+    assert!(!stash.contains("cross-store-id"), "{stash}");
+    assert!(stash.contains("umu-kzed"), "{stash}");
+    assert!(stash.contains("substring match"), "{stash}");
+    assert!(
+        !stash.contains(r#""id": "umu-254820""#),
+        "a fuzzy id landed in a verdict:\n{stash}"
+    );
+}
+
 #[test]
 fn umu_misses_verify_without_any_database_fails_and_touches_nothing() {
     let home = TempHome::new("umu-verify-offline");

@@ -396,7 +396,11 @@ The stash becomes a real contribution pipeline, all of it in `gamebus-setup`
   into the stash: `already-in-database` (store+codename found — the launcher
   missed, not the database), `cross-store-id` (the title exists under
   another store; the id to reuse), `confirmed-missing`. No local copy *and*
-  no API is an honest error with the stash untouched.
+  no API is an honest error with the stash untouched. Caveat found live:
+  the API's title lookup substring-matches (`?title=Control` returns Ground
+  Control's ids) and returns no title to compare against, so API title hits
+  are advisory notes only — `cross-store-id` comes exclusively from exact
+  local-title matches and the drafting collision check.
 - **Id drafting** for confirmed-missing entries, per the database's own
   rules, strongest basis first: the title's Steam appid from
   detectable.json's `third_party_skus` → `umu-<appid>`; else a codename
