@@ -20,7 +20,9 @@
 //! `SourceEvent::Removed` for Steam - preventing stale Steam data from
 //! surviving a pid reuse.
 
+use crate::cache;
 use crate::dbus::types::{Activity, Source};
+use crate::group::{GameGroup, GroupEffect, Identity, IdentityClass, Member, MemberClass};
 use crate::naming::NamingDb;
 use crate::sources::SourceEvent;
 use std::collections::{HashMap, HashSet};
@@ -56,14 +58,20 @@ pub struct Enricher {
     steam_ids: HashMap<u32, String>,
     /// pid → the Steam appid found in its environ (ancestor-walk).
     steam_appids: HashMap<u32, String>,
-    /// merge key → the deepest pid currently holding a record for it.
+    /// merge key → game group.
     ///
-    /// One record per key: `steam:<appid>` for Steam games,
-    /// `lutris:<uuid>` for Lutris games, `umu:<id>` for umu games.
-    /// When a new pid arrives with the same key, `tree_depth` decides:
-    /// deeper wins (replaces), shallower is suppressed. No pairwise merging,
-    /// no convergence issues - one `HashMap`, one record per key.
-    appid_records: HashMap<String, u32>,
+    /// One published record per key: `steam:<appid>` for Steam games,
+    /// `lutris:<uuid>` for Lutris games, `umu:<id>` for umu games. The group
+    /// tracks every member pid and decides which one - the representative -
+    /// carries the record; everyone else is absorbed silently.
+    groups: HashMap<String, GameGroup>,
+    /// member pid → its group's merge key (reverse index).
+    pid_to_group: HashMap<u32, String>,
+    /// Keys whose published record is Steam-only (created by the scan, no
+    /// GameMode partial on the bus). Their migrations and removals move only
+    /// the Steam partial; a GameMode event upgrades the record and clears
+    /// the flag.
+    steam_only_groups: HashSet<String>,
     /// Wrapper pids whose game identity hasn't been resolved yet.
     /// Retried periodically - the game may launch minutes after the wrapper.
     unresolved_wrappers: HashSet<u32>,
@@ -80,7 +88,9 @@ impl Enricher {
             active_sources: HashMap::new(),
             steam_ids: HashMap::new(),
             steam_appids: HashMap::new(),
-            appid_records: HashMap::new(),
+            groups: HashMap::new(),
+            pid_to_group: HashMap::new(),
+            steam_only_groups: HashSet::new(),
             unresolved_wrappers: HashSet::new(),
             naming: None,
         }
@@ -90,12 +100,8 @@ impl Enricher {
     #[cfg(test)]
     fn with_naming(naming: Option<NamingDb>) -> Self {
         Self {
-            active_sources: HashMap::new(),
-            steam_ids: HashMap::new(),
-            steam_appids: HashMap::new(),
-            appid_records: HashMap::new(),
-            unresolved_wrappers: HashSet::new(),
             naming,
+            ..Self::new()
         }
     }
 
@@ -127,8 +133,6 @@ impl Enricher {
         let pid = activity.process_id;
         let source = activity.sources.first().copied().unwrap_or(Source::Unknown);
 
-        let mut events = Vec::with_capacity(3);
-
         // Track non-Steam sources per pid.
         if source != Source::Steam && pid > 0 {
             self.active_sources.entry(pid).or_default().insert(source);
@@ -148,11 +152,23 @@ impl Enricher {
             }
         }
 
+        // Capture the raw `/proc/<pid>/exe` BEFORE the descendant walk
+        // rewrites `activity.executable` - member classification (helper
+        // detection) must judge the process itself, not the identified game.
+        let raw_exe = if pid > 0 {
+            std::fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .and_then(|p| p.to_str().map(str::to_string))
+                .unwrap_or_else(|| activity.executable.clone())
+        } else {
+            activity.executable.clone()
+        };
+
         // Descendant-walk - if the executable is a wrapper, look for
         // the actual game process in the wrapper tree and use its
         // name/executable instead.
         let mut activity = activity;
-        self.apply_descendant_walk(&mut activity);
+        let identified = self.apply_descendant_walk(&mut activity);
 
         // Naming enrichment - modify the activity's name from
         // detectable.json before forwarding. Enrichment-only: never
@@ -171,69 +187,28 @@ impl Enricher {
                 None
             };
 
-        // One record per merge key. Probe for the best available key
-        // (SteamAppId > LUTRIS_GAME_UUID > UMU_ID). `appid_records` maps
-        // each key to the deepest pid holding its record. Deeper wins
-        // (replaces), shallower is suppressed.
-        if source != Source::Steam && pid > 0 {
+        // Every GameMode pid that probes to a merge key joins that
+        // key's group; the group decides what (if anything) reaches the
+        // correlator. Pids with no key follow the ungrouped path, untouched.
+        if source == Source::GameMode && pid > 0 {
             if let Some(key) = probe_merge_key(pid) {
-                match self.appid_records.get(&key).copied() {
-                    Some(existing_pid) if existing_pid != pid => {
-                        let new_deeper = tree_depth(pid) > tree_depth(existing_pid);
-                        if new_deeper {
-                            // This pid is deeper: replace the existing record.
-                            tracing::info!(
-                                old = existing_pid,
-                                new = pid,
-                                merge_key = %key,
-                                "merge: deeper pid replaces record"
-                            );
-                            events.push(SourceEvent::Removed {
-                                id: format!("pid_{existing_pid}"),
-                                source: Source::GameMode,
-                            });
-                            if let Some(sid) = self.steam_ids.remove(&existing_pid) {
-                                events.push(SourceEvent::Removed {
-                                    id: sid,
-                                    source: Source::Steam,
-                                });
-                            }
-                            self.active_sources.remove(&existing_pid);
-                            self.steam_appids.remove(&existing_pid);
-                            self.appid_records.insert(key, pid);
-                        } else {
-                            // The existing pid is deeper or equal: suppress this one.
-                            tracing::info!(
-                                suppressed = pid,
-                                kept = existing_pid,
-                                merge_key = %key,
-                                "merge: suppressing shallower pid"
-                            );
-                            events.push(SourceEvent::Removed {
-                                id: format!("pid_{pid}"),
-                                source: Source::GameMode,
-                            });
-                            if let Some(sid) = self.steam_ids.remove(&pid) {
-                                events.push(SourceEvent::Removed {
-                                    id: sid,
-                                    source: Source::Steam,
-                                });
-                            }
-                            return events; // Don't forward the GameMode activity or Steam partial.
-                        }
-                    }
-                    _ => {
-                        // First pid for this key.
-                        self.appid_records.insert(key, pid);
-                    }
-                }
+                let (class, identity) =
+                    self.classify_member(pid, &raw_exe, &key, identified.as_ref());
+                let member = Member {
+                    gamemode: true,
+                    scan: false,
+                    class,
+                    depth: tree_depth(pid),
+                    start_time: cache::process_start_time(pid),
+                    alive: true,
+                };
+                return self.grouped_update(&key, pid, member, identity, activity, steam_activity);
             }
         }
 
-        // Forward the original event.
+        // Ungrouped path: forward the original event and the Steam partial.
+        let mut events = Vec::with_capacity(2);
         events.push(SourceEvent::Updated(Box::new(activity)));
-
-        // Forward the Steam partial (if any).
         if let Some(sa) = steam_activity {
             let steam_id = sa.id.clone();
             self.steam_ids.insert(pid, steam_id);
@@ -241,6 +216,236 @@ impl Enricher {
             events.push(SourceEvent::Updated(Box::new(sa)));
         }
 
+        events
+    }
+
+    /// Classify a group member and derive any identity it proves.
+    ///
+    /// `GameProcess`: `identify_process` hit, or exe under `/steamapps/`
+    /// with a resolvable Steam appid. `IdentifiedWrapper`: the descendant
+    /// walk resolved the game through this pid. `Helper`: known wrapper
+    /// executable, judged on the RAW exe. `Plain`: everything else.
+    fn classify_member(
+        &self,
+        pid: u32,
+        raw_exe: &str,
+        key: &str,
+        identified: Option<&(String, String)>,
+    ) -> (MemberClass, Option<Identity>) {
+        if let Some(ref db) = self.naming {
+            // A known wrapper's cmdline carries the full launch command,
+            // game binary included (`reaper SteamLaunch ... /path/Game`),
+            // so the cmdline layer would inflate the helper to GameProcess
+            // and block the real game's dethrone (helpers are judged
+            // on the raw exe). Wrappers only count an exe-link match; Wine
+            // games are unaffected - their exe is wine64-preloader, which
+            // is not in the wrapper list, so they keep the cmdline layer.
+            let hit = if is_wrapper_executable(raw_exe) {
+                identify_process_exe(pid, db)
+            } else {
+                identify_process(pid, db)
+            };
+            if let Some((name, exe)) = hit {
+                return (
+                    MemberClass::GameProcess,
+                    Some(Identity {
+                        name,
+                        exe,
+                        class: IdentityClass::GameProcess,
+                    }),
+                );
+            }
+            if raw_exe.contains("/steamapps/") {
+                if let Some(name) = key
+                    .strip_prefix("steam:")
+                    .and_then(|appid| db.lookup_by_steam_appid(appid))
+                {
+                    return (
+                        MemberClass::GameProcess,
+                        Some(Identity {
+                            name: name.to_string(),
+                            exe: raw_exe.to_string(),
+                            class: IdentityClass::GameProcess,
+                        }),
+                    );
+                }
+            }
+        }
+        if let Some((name, exe)) = identified {
+            return (
+                MemberClass::IdentifiedWrapper,
+                Some(Identity {
+                    name: name.clone(),
+                    exe: exe.clone(),
+                    class: IdentityClass::Wrapper,
+                }),
+            );
+        }
+        if is_wrapper_executable(raw_exe) {
+            (MemberClass::Helper, None)
+        } else {
+            (MemberClass::Plain, None)
+        }
+    }
+
+    /// Route one member arrival through its group and translate
+    /// the [`GroupEffect`] into correlator events. Used by the GameMode event
+    /// path (`member.gamemode == true`) and by scan adoption (`scan == true`).
+    fn grouped_update(
+        &mut self,
+        key: &str,
+        pid: u32,
+        mut member: Member,
+        identity: Option<Identity>,
+        mut activity: Activity,
+        steam_activity: Option<Activity>,
+    ) -> Vec<SourceEvent> {
+        let via_gamemode = member.gamemode;
+
+        // Discord pin: a rep carrying a joined Discord partial
+        // is displaced by rep death only, never by class.
+        let rep_pinned = self.groups.get(key).is_some_and(|g| {
+            self.active_sources
+                .get(&g.rep)
+                .is_some_and(|s| s.contains(&Source::Discord))
+        });
+
+        let group = self
+            .groups
+            .entry(key.to_string())
+            .or_insert_with(|| GameGroup::new(key, activity.since));
+        self.pid_to_group.insert(pid, key.to_string());
+        if let Some(id) = identity {
+            group.set_identity(id);
+        }
+        // The rep carries the group's one Steam partial; remember the appid
+        // so it can move with the record on migration.
+        if group.steam_appid.is_none() {
+            if let Some(appid) = key.strip_prefix("steam:") {
+                group.steam_appid = Some(appid.to_string());
+            } else if let Some(sa) = &steam_activity {
+                let appid = appid_from(sa);
+                if !appid.is_empty() {
+                    group.steam_appid = Some(appid);
+                }
+            }
+        }
+        // Scan evidence survives re-registration.
+        if let Some(existing) = group.members.get(&pid) {
+            member.scan = member.scan || existing.scan;
+        }
+        // A scan-created group was born blind (`since` 0): the
+        // first GameMode evidence supplies the authoritative timestamp. A
+        // 0→real transition is still set-once, so `Since` can never jump.
+        if via_gamemode && group.since == 0 {
+            group.since = activity.since;
+        }
+        // The published record's name/exe come from the group identity when
+        // set; `Since` is pinned at group creation and never jumps.
+        activity.since = group.since;
+        if let Some(id) = &group.identity {
+            activity.name = id.name.clone();
+            activity.executable = id.exe.clone();
+        }
+        let group_appid = group.steam_appid.clone();
+
+        match group.upsert(pid, member, rep_pinned) {
+            GroupEffect::PublishRep => {
+                if via_gamemode {
+                    self.steam_only_groups.remove(key);
+                }
+                let mut events = Vec::with_capacity(2);
+                events.push(SourceEvent::Updated(Box::new(activity)));
+                if let Some(sa) = steam_activity {
+                    self.steam_ids.insert(pid, sa.id.clone());
+                    self.steam_appids.insert(pid, appid_from(&sa));
+                    events.push(SourceEvent::Updated(Box::new(sa)));
+                }
+                events
+            }
+            GroupEffect::Absorb => {
+                // The bus never sees this pid: drop the event, the Steam
+                // probe, and the source bookkeeping.
+                tracing::debug!(pid, merge_key = %key, "group: member absorbed");
+                self.active_sources.remove(&pid);
+                Vec::new()
+            }
+            GroupEffect::Migrate { old } => {
+                tracing::info!(
+                    old,
+                    new = pid,
+                    merge_key = %key,
+                    "group: higher-class member dethrones representative"
+                );
+                let sa = steam_activity.or_else(|| {
+                    group_appid.map(|appid| {
+                        let mut sa = Activity::from_steam(pid as i32, &appid);
+                        self.apply_naming(&mut sa);
+                        sa
+                    })
+                });
+                // A Steam-only group stays Steam-only under scan-driven
+                // migration; a GameMode arrival upgrades the record.
+                let gamemode_activity = if via_gamemode || !self.steam_only_groups.contains(key) {
+                    Some(activity)
+                } else {
+                    None
+                };
+                let events = self.emit_migration(key, old, pid, gamemode_activity, sa);
+                if via_gamemode {
+                    self.steam_only_groups.remove(key);
+                }
+                events
+            }
+            // `upsert` never returns RemoveAll.
+            GroupEffect::RemoveAll => Vec::new(),
+        }
+    }
+
+    /// Emit the publish-first migration sequence: `Updated(new rep)`,
+    /// `Updated(new Steam partial)`, `Removed(old Steam id, Steam)`,
+    /// `Removed(pid_<old>, GameMode)` - the bus never dips empty. Steam-only
+    /// groups have no GameMode partial: their sequence is the Steam pair.
+    ///
+    /// Deliberately removes Steam first, not GameMode first, honoring the
+    /// exactly-one-ActivityRemoved promise:
+    /// removing the GameMode partial first would leave the old Steam partial
+    /// briefly sole owner and re-publish it as a transient `steam_<old>`
+    /// record before its own removal lands. Steam-first degrades the old
+    /// record in place, then removes it once.
+    fn emit_migration(
+        &mut self,
+        key: &str,
+        old: u32,
+        new_pid: u32,
+        gamemode_activity: Option<Activity>,
+        steam_activity: Option<Activity>,
+    ) -> Vec<SourceEvent> {
+        let was_steam_only = self.steam_only_groups.contains(key);
+        let mut events = Vec::with_capacity(4);
+        if let Some(a) = gamemode_activity {
+            events.push(SourceEvent::Updated(Box::new(a)));
+        }
+        if let Some(sa) = steam_activity {
+            self.steam_ids.insert(new_pid, sa.id.clone());
+            self.steam_appids.insert(new_pid, appid_from(&sa));
+            events.push(SourceEvent::Updated(Box::new(sa)));
+        }
+        if let Some(old_sid) = self.steam_ids.remove(&old) {
+            events.push(SourceEvent::Removed {
+                id: old_sid,
+                source: Source::Steam,
+            });
+        }
+        if !was_steam_only {
+            events.push(SourceEvent::Removed {
+                id: format!("pid_{old}"),
+                source: Source::GameMode,
+            });
+        }
+        self.steam_appids.remove(&old);
+        // The dethroned rep is an absorbed member now - nothing may leak.
+        self.active_sources.remove(&old);
         events
     }
 
@@ -264,79 +469,189 @@ impl Enricher {
     /// [`Self::unresolved_wrappers`] and retried periodically by
     /// [`Self::retry_unresolved`] - the game may launch minutes after the
     /// wrapper (Battle.net launcher → actual game).
-    fn apply_descendant_walk(&mut self, activity: &mut Activity) {
+    /// Returns the `(name, exe)` identification when the walk resolved the
+    /// game through this pid - the group model records it as the member's
+    /// [`IdentifiedWrapper`](MemberClass::IdentifiedWrapper) proof.
+    fn apply_descendant_walk(&mut self, activity: &mut Activity) -> Option<(String, String)> {
         // Only for GameMode activities with wrapper executables.
         if !activity.sources.contains(&Source::GameMode) {
-            return;
+            return None;
         }
         if activity.executable.is_empty() || !is_wrapper_executable(&activity.executable) {
-            return;
+            return None;
         }
         let pid = activity.process_id;
         if pid == 0 {
-            return;
+            return None;
         }
 
         // If the naming DB isn't loaded yet (it loads after sources spawn),
         // mark for retry instead of silently skipping.
         if self.naming.is_none() {
             self.unresolved_wrappers.insert(pid);
-            return;
+            return None;
         }
 
         match self.identify_wrapper(pid) {
             Some((name, exe)) => {
                 tracing::info!(wrapper_pid = pid, game_name = %name, game_exe = %exe, "identified game for wrapper");
-                activity.name = name;
-                activity.executable = exe;
+                activity.name = name.clone();
+                activity.executable = exe.clone();
                 self.unresolved_wrappers.remove(&pid);
+                Some((name, exe))
             }
             None => {
                 // Game may not have launched yet (Battle.net launcher → game
                 // starts minutes later). Retry periodically.
                 self.unresolved_wrappers.insert(pid);
+                None
             }
         }
     }
 
-    /// Periodic tick: retry wrapper identification + scan for Steam
-    /// processes that no other source reported.
-    ///
-    /// The Steam scan closes the reactive design's gap: games launched
-    /// without GameMode (no `gamemoderun`, no libgamemodeauto preload)
-    /// produce no source event and would otherwise be invisible. A bounded
-    /// `/proc/*/environ` scan every tick (~500 processes, ~5ms) finds them.
+    /// Periodic tick: retry wrapper identification + reconcile the game
+    /// groups against `/proc`.
     pub fn tick(&mut self) -> Vec<SourceEvent> {
         let mut events = self.retry_unresolved();
-        events.extend(self.scan_steam_processes());
+        events.extend(self.reconcile_groups());
         events
     }
 
     /// Retry identification for wrappers whose game hasn't been found yet.
     ///
     /// Called periodically from the main loop. Returns update events for
-    /// wrappers that just became identifiable.
+    /// wrappers that just became identifiable. For a **grouped** pid the
+    /// identity belongs to the group: set it and re-emit the current rep's
+    /// activity in place - never construct a fresh activity for the wrapper
+    /// pid, which would publish a duplicate record.
     pub fn retry_unresolved(&mut self) -> Vec<SourceEvent> {
         let pids: Vec<u32> = self.unresolved_wrappers.iter().copied().collect();
         let mut out = Vec::new();
         for pid in pids {
-            if let Some((name, exe)) = self.identify_wrapper(pid) {
-                tracing::info!(wrapper_pid = pid, game_name = %name, game_exe = %exe, "identified game for wrapper (retry)");
-                let mut activity = Activity::from_gamemode(pid as i32, &exe, 0);
-                activity.name = name;
-                out.push(SourceEvent::Updated(Box::new(activity)));
-                self.unresolved_wrappers.remove(&pid);
+            let Some((name, exe)) = self.identify_wrapper(pid) else {
+                continue;
+            };
+            tracing::info!(wrapper_pid = pid, game_name = %name, game_exe = %exe, "identified game for wrapper (retry)");
+            self.unresolved_wrappers.remove(&pid);
+            match self.pid_to_group.get(&pid).cloned() {
+                Some(key) => {
+                    let Some(group) = self.groups.get_mut(&key) else {
+                        continue;
+                    };
+                    group.set_identity(Identity {
+                        name,
+                        exe,
+                        class: IdentityClass::Wrapper,
+                    });
+                    // The pid proved the group identity: upgrade its class.
+                    if let Some(member) = group.members.get_mut(&pid) {
+                        if member.class < MemberClass::IdentifiedWrapper {
+                            member.class = MemberClass::IdentifiedWrapper;
+                        }
+                    }
+                    let rep = group.rep;
+                    out.extend(self.emit_rep_refresh(&key, rep));
+                }
+                None => {
+                    let mut activity = Activity::from_gamemode(pid as i32, &exe, 0);
+                    activity.name = name;
+                    out.push(SourceEvent::Updated(Box::new(activity)));
+                }
             }
         }
         out
     }
 
-    /// Scan `/proc/*/environ` for Steam appids not yet tracked.
-    ///
-    /// For each new pid with a numeric appid: emit a Steam partial. The
-    /// ancestor-walk merges wrapper-family members (deepest wins). Pids
-    /// that vanish or lose their appid are reconciled (removed).
-    fn scan_steam_processes(&mut self) -> Vec<SourceEvent> {
+    /// Re-emit the rep's current record (UpdateInPlace on the bus via the
+    /// correlator; the publish dedup swallows it when nothing changed).
+    fn emit_rep_refresh(&self, key: &str, rep: u32) -> Vec<SourceEvent> {
+        let Some(group) = self.groups.get(key) else {
+            return Vec::new();
+        };
+        if self.steam_only_groups.contains(key) {
+            self.build_group_steam_partial(rep, group)
+                .map(|sa| vec![SourceEvent::Updated(Box::new(sa))])
+                .unwrap_or_default()
+        } else {
+            vec![SourceEvent::Updated(Box::new(
+                self.build_grouped_activity(rep, group),
+            ))]
+        }
+    }
+
+    /// Build the published activity for a grouped pid from its `/proc`
+    /// state, the group identity, and the group's original `since`.
+    fn build_grouped_activity(&self, pid: u32, group: &GameGroup) -> Activity {
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .or_else(|| group.identity.as_ref().map(|i| i.exe.clone()))
+            .unwrap_or_default();
+        let mut activity = Activity::from_gamemode(pid as i32, &exe, group.since);
+        if let Some(id) = &group.identity {
+            activity.name = id.name.clone();
+            activity.executable = id.exe.clone();
+        } else {
+            self.apply_naming(&mut activity);
+        }
+        activity
+    }
+
+    /// Build the group's Steam partial for a pid, named as well as evidence
+    /// allows. `None` when the group carries no Steam appid.
+    fn build_group_steam_partial(&self, pid: u32, group: &GameGroup) -> Option<Activity> {
+        let appid = group.steam_appid.as_deref()?;
+        let mut sa = Activity::from_steam(pid as i32, appid);
+        self.apply_naming(&mut sa);
+        if let Some(id) = &group.identity {
+            if !id.name.is_empty() {
+                sa.name = id.name.clone();
+            }
+        }
+        Some(sa)
+    }
+
+    /// Reconcile the groups against `/proc`:
+    /// liveness refresh, one scan pass, then the sweep.
+    fn reconcile_groups(&mut self) -> Vec<SourceEvent> {
+        self.refresh_liveness();
+        let mut events = self.scan_proc();
+        events.extend(self.sweep_groups());
+        events
+    }
+
+    /// Liveness refresh: a member is alive iff `/proc/<pid>`
+    /// still resolves to the group's key and is still the same process
+    /// (start-time pid-reuse guard). Dead non-rep members are pruned; a dead
+    /// rep is kept for the sweep to migrate away from.
+    fn refresh_liveness(&mut self) {
+        let mut pruned: Vec<u32> = Vec::new();
+        for group in self.groups.values_mut() {
+            let rep = group.rep;
+            let key = group.key.clone();
+            group.members.retain(|&pid, member| {
+                member.alive = member_alive(pid, &key, member.start_time);
+                if member.alive || pid == rep {
+                    true
+                } else {
+                    pruned.push(pid);
+                    false
+                }
+            });
+        }
+        for pid in pruned {
+            self.pid_to_group.remove(&pid);
+            self.unresolved_wrappers.remove(&pid);
+        }
+    }
+
+    /// The scan: one `/proc` pass. Members refresh their scan evidence;
+    /// pids matching an existing group are adopted with no gate (failover
+    /// memory - though a strictly better class still dethrones);
+    /// a NEW group needs `identify_process` or a `/steamapps/` exe with a
+    /// resolvable appid, so `Brotato.x86_64` is recoverable while a stray
+    /// `SteamAppId` on `/usr/bin/sleep` stays unpublishable.
+    fn scan_proc(&mut self) -> Vec<SourceEvent> {
         let mut events = Vec::new();
         let mut seen: HashSet<u32> = HashSet::new();
 
@@ -357,61 +672,95 @@ impl Enricher {
                 continue;
             };
             seen.insert(pid);
-            // Skip already-processed pids (emitted, absorbed, or suppressed).
-            if self.appid_records.values().any(|&p| p == pid) {
+
+            // Known member: nothing to do - the liveness pass owns its
+            // refresh, and scan evidence is only ever ADOPTED:
+            // a member that unregisters while its process lives is dropped
+            // and re-adopted here next tick, as failover memory. Stamping
+            // scan evidence onto registered members would instead hold every
+            // record open for as long as the process outlives its
+            // registration (the `/usr/bin/sleep` fixture would never die).
+            if let Some(key) = self.pid_to_group.get(&pid) {
+                // Key-fragmentation telemetry: one member
+                // carrying two key types would split a game across groups.
+                if has_lutris_uuid(&environ) && key.starts_with("steam:") {
+                    tracing::warn!(
+                        pid,
+                        merge_key = %key,
+                        "scan: member carries both SteamAppId and LUTRIS_GAME_UUID (key fragmentation)"
+                    );
+                }
                 continue;
             }
 
-            // Only track processes identifiable as games. The wrapper chain
-            // includes many utility processes (wineserver, tabtip.exe, etc.)
-            // that inherit the appid but are NOT the game. Emitting partials
-            // for them creates noise the merge can't cleanly converge.
-            if let Some(ref db) = self.naming {
-                if identify_process(pid, db).is_none() {
-                    continue;
-                }
+            let Some(key) = merge_key_from_environ(&environ) else {
+                continue;
+            };
+            let raw_exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .and_then(|p| p.to_str().map(str::to_string))
+                .unwrap_or_default();
+
+            if self.groups.contains_key(&key) {
+                // Adoption, no gate: the group already earned its record.
+                let (class, identity) = self.classify_member(pid, &raw_exe, &key, None);
+                let member = Member {
+                    gamemode: false,
+                    scan: true,
+                    class,
+                    depth: tree_depth(pid),
+                    start_time: cache::process_start_time(pid),
+                    alive: true,
+                };
+                let activity = self.build_grouped_activity(pid, &self.groups[&key]);
+                tracing::debug!(pid, merge_key = %key, "scan: adopting member");
+                events.extend(self.grouped_update(&key, pid, member, identity, activity, None));
+                continue;
             }
 
-            // One record per appid: if this key already has a record, the
-            // deeper pid wins (replaces), shallower is suppressed.
-            let key = format!("steam:{appid}");
-            match self.appid_records.get(&key).copied() {
-                Some(existing_pid) if existing_pid != pid => {
-                    if tree_depth(pid) > tree_depth(existing_pid) {
-                        // This pid is deeper: replace the existing record.
-                        tracing::debug!(old = existing_pid, new = pid, "scan: deeper pid replaces record");
-                        events.push(SourceEvent::Removed {
-                            id: format!("steam_{existing_pid}"),
-                            source: Source::Steam,
-                        });
-                        self.steam_ids.remove(&existing_pid);
-                        self.steam_appids.remove(&existing_pid);
-                        self.appid_records.insert(key.clone(), pid);
-                    } else {
-                        // The existing pid is deeper or equal: suppress this one.
-                        tracing::debug!(suppressed = pid, kept = existing_pid, "scan: suppressing shallower pid");
-                        continue;
-                    }
-                }
-                _ => {
-                    self.appid_records.insert(key.clone(), pid);
-                }
+            // New group: widened gate.
+            if !self.new_group_gate(pid, &raw_exe, &appid) {
+                continue;
             }
-
-            let mut activity = Activity::from_steam(pid as i32, &appid);
-            self.apply_naming(&mut activity);
+            let (class, identity) = self.classify_member(pid, &raw_exe, &key, None);
+            let mut group = GameGroup::new(key.clone(), 0);
+            group.steam_appid = Some(appid.clone());
+            if let Some(id) = identity {
+                group.set_identity(id);
+            }
+            group.upsert(
+                pid,
+                Member {
+                    gamemode: false,
+                    scan: true,
+                    class,
+                    depth: tree_depth(pid),
+                    start_time: cache::process_start_time(pid),
+                    alive: true,
+                },
+                false,
+            );
+            let sa = self
+                .build_group_steam_partial(pid, &group)
+                .expect("scan group always has a steam appid");
+            self.groups.insert(key.clone(), group);
+            self.steam_only_groups.insert(key.clone());
+            self.pid_to_group.insert(pid, key.clone());
             self.steam_appids.insert(pid, appid);
-            self.steam_ids.insert(pid, activity.id.clone());
-            tracing::debug!(pid, "Steam scan: new process");
-            events.push(SourceEvent::Updated(Box::new(activity)));
+            self.steam_ids.insert(pid, sa.id.clone());
+            tracing::debug!(pid, merge_key = %key, "scan: new Steam-only group");
+            events.push(SourceEvent::Updated(Box::new(sa)));
         }
 
         // Reconcile: tracked Steam pids that vanished (process died or pid
         // reused by a non-Steam process). Only remove pids with no other
         // active source - GameMode-tracked pids are managed by the
-        // source-removal path.
+        // source-removal path, grouped pids by the group lifecycle.
         let tracked: Vec<u32> = self.steam_appids.keys().copied().collect();
         for pid in tracked {
+            if self.pid_to_group.contains_key(&pid) {
+                continue;
+            }
             if !seen.contains(&pid) && !self.active_sources.contains_key(&pid) {
                 if let Some(sid) = self.steam_ids.remove(&pid) {
                     events.push(SourceEvent::Removed {
@@ -424,6 +773,108 @@ impl Enricher {
         }
 
         events
+    }
+
+    /// The gate for creating a NEW group from the scan:
+    /// `identify_process` hit, OR exe under `/steamapps/` with an appid
+    /// detectable.json resolves. Keeps the `/usr/bin/sleep` fixture and
+    /// wrapper-chain utility processes unpublishable.
+    fn new_group_gate(&self, pid: u32, exe: &str, appid: &str) -> bool {
+        let Some(ref db) = self.naming else {
+            return false;
+        };
+        if identify_process(pid, db).is_some() {
+            return true;
+        }
+        exe.contains("/steamapps/") && db.lookup_by_steam_appid(appid).is_some()
+    }
+
+    /// The sweep: evidence-less groups are removed;
+    /// dead/unregistered reps migrate to an eligible survivor (deferred
+    /// migration case b); unidentified reps get an identification retry.
+    fn sweep_groups(&mut self) -> Vec<SourceEvent> {
+        let mut events = Vec::new();
+        let keys: Vec<String> = self.groups.keys().cloned().collect();
+        for key in keys {
+            let Some(group) = self.groups.get(&key) else {
+                continue;
+            };
+            if !group.has_evidence() {
+                tracing::info!(
+                    merge_key = %key,
+                    rep = group.rep,
+                    "group sweep: last evidence gone, removing record"
+                );
+                events.extend(self.remove_group_records(&key));
+                continue;
+            }
+            let rep = group.rep;
+            let rep_live_registered = group
+                .members
+                .get(&rep)
+                .is_some_and(|m| m.alive && m.gamemode);
+            if !rep_live_registered {
+                if let Some(new_rep) = group.elect() {
+                    if new_rep != rep {
+                        tracing::info!(
+                            old = rep,
+                            new = new_rep,
+                            merge_key = %key,
+                            "group sweep: migrating representative (publish-first)"
+                        );
+                        self.groups
+                            .get_mut(&key)
+                            .expect("group present in sweep")
+                            .rep = new_rep;
+                        let group = &self.groups[&key];
+                        let gamemode_activity = if self.steam_only_groups.contains(&key) {
+                            None
+                        } else {
+                            Some(self.build_grouped_activity(new_rep, group))
+                        };
+                        let sa = self.build_group_steam_partial(new_rep, group);
+                        events.extend(self.emit_migration(
+                            &key,
+                            rep,
+                            new_rep,
+                            gamemode_activity,
+                            sa,
+                        ));
+                    }
+                }
+            }
+            // Unidentified rep: identification retry.
+            if self.groups.get(&key).is_some_and(|g| g.identity.is_none()) {
+                events.extend(self.retry_group_identity(&key));
+            }
+        }
+        events
+    }
+
+    /// Try to identify an unidentified group through its rep's own process
+    /// state (exe link or Wine cmdline). On success the identity is set and
+    /// the record refreshed in place.
+    fn retry_group_identity(&mut self, key: &str) -> Vec<SourceEvent> {
+        let Some(ref db) = self.naming else {
+            return Vec::new();
+        };
+        let Some(group) = self.groups.get(key) else {
+            return Vec::new();
+        };
+        let rep = group.rep;
+        let Some((name, exe)) = identify_process(rep, db) else {
+            return Vec::new();
+        };
+        tracing::info!(rep, game_name = %name, merge_key = %key, "group sweep: identified representative");
+        self.groups
+            .get_mut(key)
+            .expect("group checked above")
+            .set_identity(Identity {
+                name,
+                exe,
+                class: IdentityClass::GameProcess,
+            });
+        self.emit_rep_refresh(key, rep)
     }
 
     /// Run the three identification layers for a wrapper pid.
@@ -504,33 +955,168 @@ impl Enricher {
             None
         };
 
-        let mut events = vec![SourceEvent::Removed { id, source }];
-
-        // If this is a non-Steam source removal, check if the pid has any
-        // remaining non-Steam sources. If not, remove the Steam partial.
-        if let Some(pid) = pid {
-            self.unresolved_wrappers.remove(&pid);
-            // Remove this pid from appid_records if it holds one.
-            self.appid_records.retain(|_, p| *p != pid);
-            if let Some(sources) = self.active_sources.get_mut(&pid) {
-                sources.remove(&source);
-                if sources.is_empty() {
-                    self.active_sources.remove(&pid);
-                    if let Some(steam_id) = self.steam_ids.remove(&pid) {
-                        events.push(SourceEvent::Removed {
-                            id: steam_id,
-                            source: Source::Steam,
-                        });
-                    }
+        // Grouped GameMode removals are the group's business -
+        // deferred migration holds the record through the exit cascade.
+        if source == Source::GameMode {
+            if let Some(pid) = pid {
+                if let Some(key) = self.pid_to_group.get(&pid).cloned() {
+                    return self.grouped_removal(&key, pid);
                 }
             }
         }
 
+        // If this is a non-Steam source removal, check if the pid has any
+        // remaining non-Steam sources. If not, remove the Steam partial -
+        // BEFORE the triggering removal (per the exactly-one-ActivityRemoved
+        // promise: Steam-first degrades
+        // the record in place instead of flashing a transient steam_<pid>
+        // record between the two removals).
+        let mut events = Vec::with_capacity(2);
+        if let Some(pid) = pid {
+            self.unresolved_wrappers.remove(&pid);
+            if let Some(sources) = self.active_sources.get_mut(&pid) {
+                sources.remove(&source);
+                if sources.is_empty() {
+                    self.active_sources.remove(&pid);
+                    // A grouped pid's Steam partial is owned by the group
+                    // lifecycle (remove_group_records / emit_migration) -
+                    // same guard as on_source_lost and the scan reconcile.
+                    // A detaching Discord partial must not kill a
+                    // scan-backed group's record.
+                    if !self.pid_to_group.contains_key(&pid) {
+                        if let Some(steam_id) = self.steam_ids.remove(&pid) {
+                            events.push(SourceEvent::Removed {
+                                id: steam_id,
+                                source: Source::Steam,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        events.push(SourceEvent::Removed { id, source });
+
+        events
+    }
+
+    /// GameMode unregistered a grouped pid.
+    ///
+    /// Non-rep members were never on the bus: bookkeeping only, zero events.
+    /// The rep's departure is swallowed while any member still holds evidence
+    /// (deferred migration - the tick sweep elects a successor); only when
+    /// the last evidence is gone do the group's records leave the bus.
+    fn grouped_removal(&mut self, key: &str, pid: u32) -> Vec<SourceEvent> {
+        self.unresolved_wrappers.remove(&pid);
+        self.active_sources.remove(&pid);
+        let Some(group) = self.groups.get_mut(key) else {
+            self.pid_to_group.remove(&pid);
+            return Vec::new();
+        };
+        match group.member_gone(pid) {
+            GroupEffect::RemoveAll => {
+                tracing::info!(
+                    merge_key = %key,
+                    rep = group.rep,
+                    "group: last evidence gone, removing record"
+                );
+                self.remove_group_records(key)
+            }
+            _ => {
+                if !group.members.contains_key(&pid) {
+                    self.pid_to_group.remove(&pid);
+                }
+                if pid == group.rep {
+                    tracing::debug!(
+                        pid,
+                        merge_key = %key,
+                        "group: rep unregistered, holding record (deferred migration)"
+                    );
+                } else if !group.has_evidence() {
+                    // A non-rep departure stripped the LAST evidence (the rep
+                    // unregistered earlier and was held): the game is over -
+                    // remove now instead of waiting for the sweep (the
+                    // exit cascade ends in exactly one prompt ActivityRemoved).
+                    tracing::info!(
+                        merge_key = %key,
+                        rep = group.rep,
+                        "group: last evidence gone, removing record"
+                    );
+                    return self.remove_group_records(key);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// Drop a group and emit the removal events for its published records:
+    /// `Removed(steam id, Steam)` then `Removed(pid_<rep>, GameMode)`.
+    /// Steam-only groups only ever published the Steam partial.
+    ///
+    /// Deliberately removes Steam first, not GameMode first, honoring the
+    /// exactly-one-ActivityRemoved promise: with the GameMode
+    /// partial gone first, the surviving Steam partial would re-merge and
+    /// flash a transient `steam_<rep>` Added+Removed pair at every exit.
+    /// Steam-first degrades the record in place; it dies with its last
+    /// source - one removal.
+    fn remove_group_records(&mut self, key: &str) -> Vec<SourceEvent> {
+        let Some(group) = self.groups.remove(key) else {
+            return Vec::new();
+        };
+        let steam_only = self.steam_only_groups.remove(key);
+        let mut events = Vec::with_capacity(2);
+        if let Some(sid) = self.steam_ids.remove(&group.rep) {
+            events.push(SourceEvent::Removed {
+                id: sid,
+                source: Source::Steam,
+            });
+        }
+        if !steam_only {
+            events.push(SourceEvent::Removed {
+                id: format!("pid_{}", group.rep),
+                source: Source::GameMode,
+            });
+        }
+        self.steam_appids.remove(&group.rep);
+        self.active_sources.remove(&group.rep);
+        self.pid_to_group.remove(&group.rep);
+        for member_pid in group.members.keys() {
+            self.pid_to_group.remove(member_pid);
+            self.unresolved_wrappers.remove(member_pid);
+            self.active_sources.remove(member_pid);
+        }
         events
     }
 
     fn on_source_lost(&mut self, source: Source) -> Vec<SourceEvent> {
         let mut events = vec![SourceEvent::SourceLost { source }];
+
+        // Group bookkeeping: every gamemode flag is void.
+        // Groups with scan evidence survive - the correlator degrades their
+        // records to Steam-only on SourceLost; the rest are dropped here
+        // (bookkeeping) and their Steam partials reaped by the loop below.
+        if source == Source::GameMode {
+            for group in self.groups.values_mut() {
+                for member in group.members.values_mut() {
+                    member.gamemode = false;
+                }
+            }
+            let dead: Vec<String> = self
+                .groups
+                .iter()
+                .filter(|(_, g)| !g.has_evidence())
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in dead {
+                tracing::debug!(merge_key = %key, "group: dropped on GameMode source loss");
+                self.groups.remove(&key);
+                self.steam_only_groups.remove(&key);
+            }
+            for key in self.groups.keys() {
+                self.steam_only_groups.insert(key.clone());
+            }
+            let groups = &self.groups;
+            self.pid_to_group.retain(|_, key| groups.contains_key(key));
+        }
 
         // When a non-Steam source is lost, remove its entries from all pids.
         // If a pid's non-Steam source set becomes empty, remove its Steam partial.
@@ -541,7 +1127,11 @@ impl Enricher {
                     sources.remove(&source);
                     if sources.is_empty() {
                         self.active_sources.remove(&pid);
-                        self.appid_records.retain(|_, p| *p != pid);
+                        // Surviving scan-backed groups keep their Steam
+                        // partial - the group lifecycle owns it.
+                        if self.pid_to_group.contains_key(&pid) {
+                            continue;
+                        }
                         if let Some(steam_id) = self.steam_ids.remove(&pid) {
                             events.push(SourceEvent::Removed {
                                 id: steam_id,
@@ -574,6 +1164,13 @@ fn extract_pid(id: &str) -> Option<u32> {
 /// are the same game.
 fn probe_merge_key(pid: u32) -> Option<String> {
     let environ = std::fs::read_to_string(format!("/proc/{pid}/environ")).ok()?;
+    merge_key_from_environ(&environ)
+}
+
+/// Parse the best available merge key from an environ string (see
+/// [`probe_merge_key`]). Split out so the scan's single environ read serves
+/// both the appid and the key probe.
+fn merge_key_from_environ(environ: &str) -> Option<String> {
     let mut steam_appid = None;
     let mut lutris_uuid = None;
     let mut umu_id = None;
@@ -597,6 +1194,31 @@ fn probe_merge_key(pid: u32) -> Option<String> {
         }
     }
     steam_appid.or(lutris_uuid).or(umu_id)
+}
+
+/// Does the environ carry a non-empty `LUTRIS_GAME_UUID`? Used for the
+/// key-fragmentation telemetry.
+fn has_lutris_uuid(environ: &str) -> bool {
+    environ.split('\0').any(|e| {
+        e.strip_prefix("LUTRIS_GAME_UUID=")
+            .is_some_and(|v| !v.is_empty())
+    })
+}
+
+/// Group-member liveness with the pid-reuse guard: the
+/// pid must still resolve to the group's merge key AND still be the same
+/// process (start time captured at insert). A recycled pid fails the
+/// start-time check even when the new occupant carries the same key.
+fn member_alive(pid: u32, key: &str, recorded_start: Option<u64>) -> bool {
+    if probe_merge_key(pid).as_deref() != Some(key) {
+        return false;
+    }
+    match (recorded_start, cache::process_start_time(pid)) {
+        (Some(recorded), Some(current)) => recorded == current,
+        // No start time captured at insert: existence + key is the best test.
+        (None, Some(_)) => true,
+        _ => false,
+    }
 }
 
 /// Probe `/proc/<pid>/environ` for Steam appid variables.
@@ -651,12 +1273,8 @@ fn find_steam_appid(environ: &str) -> Option<String> {
 /// Returns `(game_name, game_executable)` on a detectable.json match.
 fn identify_process(pid: u32, db: &NamingDb) -> Option<(String, String)> {
     // Native binary: exe link.
-    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
-        if let Some(exe_str) = exe.to_str() {
-            if let Some(name) = db.lookup_by_executable(exe_str) {
-                return Some((name.to_string(), exe_str.to_string()));
-            }
-        }
+    if let Some(found) = identify_process_exe(pid, db) {
+        return Some(found);
     }
     // Wine game: cmdline tokens (backslash-normalised by the lookup).
     if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
@@ -667,6 +1285,16 @@ fn identify_process(pid: u32, db: &NamingDb) -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// The exe-link layer of [`identify_process`] alone. Used for known wrapper
+/// executables, whose cmdlines name the game they merely launch - only the
+/// process's own binary may prove it IS the game.
+fn identify_process_exe(pid: u32, db: &NamingDb) -> Option<(String, String)> {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let exe_str = exe.to_str()?;
+    let name = db.lookup_by_executable(exe_str)?;
+    Some((name.to_string(), exe_str.to_string()))
 }
 
 /// Layer 1: identify a wrapper's game from its own cmdline.
@@ -842,6 +1470,9 @@ fn is_wrapper_executable(executable: &str) -> bool {
                 | "umu-shim"
                 | "gamemoderun"
                 | "lutris-wrapper"
+                | "i386-linux-gnu-inspect-library"
+                | "x86_64-linux-gnu-inspect-library"
+                | "steam-runtime-check-requirements"
         )
     )
 }
@@ -988,17 +1619,27 @@ mod tests {
         assert_eq!(events.len(), 1); // Only the original removal
         assert!(e.steam_ids.contains_key(&42));
 
-        // Discord removes its record - last non-Steam source gone
+        // Discord removes its record - last non-Steam source gone. The Steam
+        // removal precedes the triggering removal so the record degrades in
+        // place and dies with its last source (one ActivityRemoved).
         let events = e.process(SourceEvent::Removed {
             id: "discord_42".to_string(),
             source: Source::Discord,
         });
-        assert_eq!(events.len(), 2); // Original removal + Steam removal
-        assert!(matches!(events[1], SourceEvent::Removed { .. }));
-        if let SourceEvent::Removed { id, source } = &events[1] {
+        assert_eq!(events.len(), 2); // Steam removal + original removal
+        if let SourceEvent::Removed { id, source } = &events[0] {
             assert_eq!(id, "steam_42");
             assert_eq!(*source, Source::Steam);
+        } else {
+            panic!("expected Steam Removed first, got {events:?}");
         }
+        assert_eq!(
+            events[1],
+            SourceEvent::Removed {
+                id: "discord_42".to_string(),
+                source: Source::Discord,
+            }
+        );
         assert!(!e.steam_ids.contains_key(&42));
     }
 
@@ -1161,5 +1802,422 @@ mod tests {
         if let SourceEvent::Updated(enriched) = &events[0] {
             assert_eq!(enriched.name, "eldenring"); // unchanged
         }
+    }
+
+    /// A live, gamemode-registered group member of the given class.
+    fn group_member(class: MemberClass) -> Member {
+        Member {
+            gamemode: true,
+            scan: false,
+            class,
+            depth: 0,
+            start_time: None,
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn migrate_emits_updated_before_removed_and_moves_steam_partial() {
+        // The four-event order, publish-first, and the
+        // group's one Steam partial moving with the rep.
+        let mut e = Enricher::with_naming(None);
+
+        let events = e.grouped_update(
+            "steam:480",
+            100,
+            group_member(MemberClass::Helper),
+            None,
+            gamemode_activity(100),
+            Some(Activity::from_steam(100, "480")),
+        );
+        assert_eq!(
+            events.len(),
+            2,
+            "first member publishes rep + steam partial"
+        );
+        assert_eq!(e.steam_ids.get(&100), Some(&"steam_100".to_string()));
+
+        // A strictly higher class arrives: one Migrate, publish-first.
+        let events = e.grouped_update(
+            "steam:480",
+            101,
+            group_member(MemberClass::GameProcess),
+            None,
+            gamemode_activity(101),
+            None,
+        );
+        assert_eq!(events.len(), 4);
+        let SourceEvent::Updated(a) = &events[0] else {
+            panic!("expected Updated first, got {events:?}");
+        };
+        assert_eq!(a.id, "pid_101");
+        let SourceEvent::Updated(sa) = &events[1] else {
+            panic!("expected Steam Updated second, got {events:?}");
+        };
+        assert_eq!(sa.id, "steam_101");
+        assert_eq!(sa.app_ids.get("steam").unwrap(), "480");
+        // Steam removal before GameMode removal (the old record degrades
+        // in place and dies once - no transient steam_<old> flash).
+        assert_eq!(
+            events[2],
+            SourceEvent::Removed {
+                id: "steam_100".to_string(),
+                source: Source::Steam,
+            }
+        );
+        assert_eq!(
+            events[3],
+            SourceEvent::Removed {
+                id: "pid_100".to_string(),
+                source: Source::GameMode,
+            }
+        );
+        // Steam bookkeeping moved to the new rep.
+        assert_eq!(e.steam_ids.get(&101), Some(&"steam_101".to_string()));
+        assert!(!e.steam_ids.contains_key(&100));
+        assert!(!e.steam_appids.contains_key(&100));
+    }
+
+    #[test]
+    fn absorbed_member_death_emits_nothing() {
+        // An absorbed member was never on the bus, so neither
+        // its arrival nor its death produces events (the Brotato kill shot).
+        let mut e = Enricher::with_naming(None);
+        e.grouped_update(
+            "steam:480",
+            100,
+            group_member(MemberClass::Helper),
+            None,
+            gamemode_activity(100),
+            None,
+        );
+        let events = e.grouped_update(
+            "steam:480",
+            101,
+            group_member(MemberClass::Helper),
+            None,
+            gamemode_activity(101),
+            None,
+        );
+        assert!(events.is_empty(), "equal class is absorbed silently");
+
+        let events = e.process(SourceEvent::Removed {
+            id: "pid_101".to_string(),
+            source: Source::GameMode,
+        });
+        assert!(events.is_empty(), "absorbed member death is invisible");
+
+        // The rep's departure with no evidence left removes the record.
+        let events = e.process(SourceEvent::Removed {
+            id: "pid_100".to_string(),
+            source: Source::GameMode,
+        });
+        assert_eq!(
+            events,
+            vec![SourceEvent::Removed {
+                id: "pid_100".to_string(),
+                source: Source::GameMode,
+            }]
+        );
+        assert!(e.groups.is_empty());
+        assert!(e.pid_to_group.is_empty());
+    }
+
+    #[test]
+    fn scan_gate_steamapps_and_appid_only() {
+        // A /steamapps/ exe with a resolvable appid admits a
+        // new group; a plain exe with a stray appid does not (sleep guard).
+        let json = r#"[{"name": "Brotato", "executables": [], "third_party_skus": [{"distributor": "steam", "id": "1942280"}]}]"#;
+        let db = NamingDb::parse(json).unwrap();
+        let e = Enricher::with_naming(Some(db));
+
+        assert!(e.new_group_gate(
+            999_999_999,
+            "/home/u/.local/share/Steam/steamapps/common/Brotato/Brotato.x86_64",
+            "1942280"
+        ));
+        assert!(
+            !e.new_group_gate(999_999_999, "/usr/bin/sleep", "1942280"),
+            "a stray SteamAppId on a plain exe must stay unpublishable"
+        );
+        assert!(
+            !e.new_group_gate(
+                999_999_999,
+                "/home/u/.local/share/Steam/steamapps/common/Foo/Foo",
+                "99999"
+            ),
+            "an unresolvable appid does not pass the steamapps gate"
+        );
+    }
+
+    #[test]
+    fn retry_unresolved_grouped_updates_rep_in_place_no_duplicate() {
+        // Late identify_wrapper success for a grouped pid sets
+        // the GROUP identity and refreshes the current rep in place - it
+        // never constructs a fresh activity for the wrapper pid (the latent
+        // duplicate-record bug at the old enricher.rs:319-332).
+        let own = std::process::id();
+        let exe = std::env::current_exe().unwrap();
+        let exe_name = exe.file_name().unwrap().to_str().unwrap().to_lowercase();
+        let json = format!(
+            r#"[{{"name": "Fake Game", "executables": [{{"name": "{exe_name}"}}], "third_party_skus": []}}]"#
+        );
+        let db = NamingDb::parse(&json).unwrap();
+        let mut e = Enricher::with_naming(Some(db));
+
+        e.grouped_update(
+            "steam:480",
+            100,
+            group_member(MemberClass::Helper),
+            None,
+            gamemode_activity(100),
+            None,
+        );
+        let events = e.grouped_update(
+            "steam:480",
+            own,
+            group_member(MemberClass::Helper),
+            None,
+            gamemode_activity(own),
+            None,
+        );
+        assert!(events.is_empty(), "own pid is absorbed");
+        e.unresolved_wrappers.insert(own);
+
+        // identify_wrapper resolves via our own cmdline (layer 1).
+        let events = e.retry_unresolved();
+        assert_eq!(events.len(), 1);
+        let SourceEvent::Updated(a) = &events[0] else {
+            panic!("expected Updated, got {events:?}");
+        };
+        assert_eq!(a.id, "pid_100", "the CURRENT rep is refreshed in place");
+        assert_eq!(a.process_id, 100);
+        assert_eq!(a.name, "Fake Game");
+        assert!(e.unresolved_wrappers.is_empty());
+        assert!(e.groups.get("steam:480").unwrap().identity.is_some());
+    }
+
+    #[test]
+    fn wrapper_cmdline_game_token_never_classifies_game_process() {
+        // A Steam wrapper's cmdline carries the full launch command, game
+        // binary included (`reaper SteamLaunch ... /steamapps/.../Brotato`).
+        // The cmdline identification layer must not inflate the helper to
+        // GameProcess - a rep pinned at that class would block the real
+        // game's strictly-greater dethrone (helpers are judged on the
+        // raw exe).
+        let json = r#"[{"name": "Brotato", "executables": [{"name": "brotato.x86_64"}], "third_party_skus": []}]"#;
+        let db = NamingDb::parse(json).unwrap();
+        let e = Enricher::with_naming(Some(db));
+
+        // A shell posing as the wrapper, with the game binary in its argv
+        // ($0). The `;:` suffix stops the shell exec-optimising itself away.
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "sleep 30;:",
+                "/steamapps/common/Brotato/Brotato.x86_64",
+            ])
+            .spawn()
+            .expect("spawn sh");
+        let pid = child.id();
+        // The cmdline appears with the exec; poll briefly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let cmdline =
+                std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            if cmdline.contains("Brotato.x86_64") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let raw_exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            is_wrapper_executable(&raw_exe),
+            "sh resolves to a listed wrapper: {raw_exe}"
+        );
+        // The trap being guarded: the cmdline layer DOES identify this pid.
+        assert!(identify_process(pid, e.naming.as_ref().unwrap()).is_some());
+
+        let (class, identity) = e.classify_member(pid, &raw_exe, "steam:1942280", None);
+        assert_eq!(
+            class,
+            MemberClass::Helper,
+            "a wrapper must never inflate to GameProcess via its cmdline"
+        );
+        assert!(identity.is_none());
+
+        // With the walk's identification it is an IdentifiedWrapper: the
+        // record stays named, the strictly-greater dethrone stays open.
+        let walked = (
+            "Brotato".to_string(),
+            "/steamapps/common/Brotato/Brotato.x86_64".to_string(),
+        );
+        let (class, identity) = e.classify_member(pid, &raw_exe, "steam:1942280", Some(&walked));
+        assert_eq!(class, MemberClass::IdentifiedWrapper);
+        assert_eq!(identity.unwrap().class, IdentityClass::Wrapper);
+
+        child.kill().ok();
+        child.wait().ok();
+    }
+
+    #[test]
+    fn group_teardown_removes_steam_before_gamemode() {
+        // Exactly-one-ActivityRemoved: the Steam partial goes first so
+        // the correlator degrades the record in place and it dies with its
+        // last source - no transient steam_<rep> Added+Removed flash.
+        let mut e = Enricher::with_naming(None);
+        e.grouped_update(
+            "steam:480",
+            100,
+            group_member(MemberClass::Helper),
+            None,
+            gamemode_activity(100),
+            Some(Activity::from_steam(100, "480")),
+        );
+        let events = e.process(SourceEvent::Removed {
+            id: "pid_100".to_string(),
+            source: Source::GameMode,
+        });
+        assert_eq!(
+            events,
+            vec![
+                SourceEvent::Removed {
+                    id: "steam_100".to_string(),
+                    source: Source::Steam,
+                },
+                SourceEvent::Removed {
+                    id: "pid_100".to_string(),
+                    source: Source::GameMode,
+                },
+            ]
+        );
+        assert!(e.groups.is_empty());
+    }
+
+    #[test]
+    fn grouped_pid_keeps_steam_partial_on_foreign_source_removal() {
+        // A grouped pid's Steam partial is owned by the group lifecycle
+        // (same guard as on_source_lost and the scan reconcile): a detaching
+        // Discord partial must not reap it and kill a scan-backed record.
+        let mut e = Enricher::new();
+        e.pid_to_group.insert(100, "steam:480".to_string());
+        e.steam_ids.insert(100, "steam_100".to_string());
+        e.active_sources
+            .entry(100)
+            .or_default()
+            .insert(Source::Discord);
+
+        let events = e.process(SourceEvent::Removed {
+            id: "discord_100".to_string(),
+            source: Source::Discord,
+        });
+        assert_eq!(
+            events,
+            vec![SourceEvent::Removed {
+                id: "discord_100".to_string(),
+                source: Source::Discord,
+            }],
+            "only the Discord removal is forwarded"
+        );
+        assert!(
+            e.steam_ids.contains_key(&100),
+            "the group keeps its Steam partial"
+        );
+        assert!(!e.active_sources.contains_key(&100));
+    }
+
+    #[test]
+    fn scan_created_group_adopts_first_gamemode_since() {
+        // A scan-created group is born blind (since 0); the first GameMode
+        // evidence supplies the authoritative timestamp, set-once - a later
+        // event can never move it (Since never jumps).
+        let mut e = Enricher::with_naming(None);
+        let mut group = GameGroup::new("steam:480", 0);
+        group.steam_appid = Some("480".to_string());
+        group.upsert(
+            100,
+            Member {
+                gamemode: false,
+                scan: true,
+                class: MemberClass::GameProcess,
+                depth: 3,
+                start_time: None,
+                alive: true,
+            },
+            false,
+        );
+        e.groups.insert("steam:480".to_string(), group);
+        e.steam_only_groups.insert("steam:480".to_string());
+        e.pid_to_group.insert(100, "steam:480".to_string());
+
+        let events = e.grouped_update(
+            "steam:480",
+            100,
+            group_member(MemberClass::GameProcess),
+            None,
+            gamemode_activity(100),
+            None,
+        );
+        let SourceEvent::Updated(a) = &events[0] else {
+            panic!("expected Updated, got {events:?}");
+        };
+        assert_eq!(a.since, 1_700_000_100, "GameMode's real timestamp is kept");
+        assert_eq!(e.groups["steam:480"].since, 1_700_000_100);
+
+        // Set-once: a later GameMode event cannot move it.
+        let mut later = gamemode_activity(100);
+        later.since = 1_700_000_999;
+        let events = e.grouped_update(
+            "steam:480",
+            100,
+            group_member(MemberClass::GameProcess),
+            None,
+            later,
+            None,
+        );
+        let SourceEvent::Updated(a) = &events[0] else {
+            panic!("expected Updated, got {events:?}");
+        };
+        assert_eq!(a.since, 1_700_000_100);
+    }
+
+    #[test]
+    fn liveness_start_time_mismatch_is_dead() {
+        // The pid-reuse guard - same pid, same key, different
+        // start time means a recycled pid, and the member is dead.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env("SteamAppId", "90001")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let start = cache::process_start_time(pid).expect("child start time");
+
+        // The environ appears with the exec; poll briefly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !member_alive(pid, "steam:90001", Some(start)) && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(member_alive(pid, "steam:90001", Some(start)));
+        assert!(
+            !member_alive(pid, "steam:90001", Some(start + 1)),
+            "start-time mismatch is a recycled pid"
+        );
+        assert!(
+            !member_alive(pid, "steam:42", Some(start)),
+            "key mismatch is dead"
+        );
+
+        child.kill().ok();
+        child.wait().ok();
+        assert!(
+            !member_alive(pid, "steam:90001", Some(start)),
+            "a vanished process is dead"
+        );
     }
 }

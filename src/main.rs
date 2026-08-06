@@ -13,6 +13,7 @@ mod correlator;
 mod dbus;
 mod enricher;
 mod error;
+mod group;
 mod naming;
 mod sources;
 
@@ -97,8 +98,16 @@ async fn main() -> Result<()> {
     // Channel from source watchers to the daemon core.
     let (tx, mut rx) = mpsc::channel::<SourceEvent>(64);
 
-    // Spawn the GameMode source watcher on its own connection handle.
-    tokio::spawn(gamemode::watch(conn.inner().clone(), tx.clone()));
+    // Spawn the GameMode source watcher on its own connection handle. The
+    // Notify drives the tick-triggered ListGames reseed: each tick re-emits
+    // every registered pid so enricher state wiped mid-session is rebuilt
+    // (the correlator dedups the resulting no-op re-publishes).
+    let reseed = Arc::new(tokio::sync::Notify::new());
+    tokio::spawn(gamemode::watch(
+        conn.inner().clone(),
+        tx.clone(),
+        reseed.clone(),
+    ));
     info!("GameMode source watcher started");
     tokio::spawn(discord::listen(tx));
     info!("Discord IPC source listener started");
@@ -138,6 +147,9 @@ async fn main() -> Result<()> {
                 sync_cache(&correlator, &manager, &runtime_dir).await;
             }
             _ = reidentify_interval.tick() => {
+                // Reseed BEFORE the enricher tick so re-emitted registrations
+                // are already in flight when the sweep runs.
+                reseed.notify_one();
                 let tick_events = enricher.tick();
                 if !tick_events.is_empty() {
                     for enriched in tick_events {

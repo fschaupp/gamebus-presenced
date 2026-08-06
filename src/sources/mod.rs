@@ -11,7 +11,7 @@ pub mod gamemode;
 use crate::dbus::types::{Activity, Source};
 
 /// Source-independent events consumed by the daemon core.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SourceEvent {
     /// A source created or updated an activity.
     Updated(Box<Activity>),

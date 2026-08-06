@@ -19,6 +19,11 @@
 //!
 //! The correlator is pure state + functions over records - no D-Bus, no
 //! sockets - so the merge/split rules are unit-testable in isolation.
+//!
+//! For *grouped* records (see `src/group.rs`) removal authority lives in the
+//! enricher: it decides when a game's evidence is gone and forwards the
+//! removals, Steam partial first, so the record degrades in place and dies
+//! with its last source. This file still owns the merge and the ids.
 
 use crate::dbus::types::{Activity, Kind, Source};
 use std::collections::HashMap;
@@ -61,8 +66,10 @@ impl Partials {
 #[derive(Debug, Default)]
 pub struct Correlator {
     partials: HashMap<u32, Partials>,
-    /// pid -> currently published activity id.
-    published: HashMap<u32, String>,
+    /// pid -> currently published activity id plus the record as published.
+    /// The cached record backs the publish dedup: re-deriving an
+    /// identical merge (ListGames reseed, tick sweep) must be a no-op.
+    published: HashMap<u32, (String, Activity)>,
     /// published activity id -> pid (for source-scoped removal lookups).
     id_index: HashMap<String, u32>,
 }
@@ -90,7 +97,8 @@ impl Correlator {
             return Vec::new();
         }
         self.id_index.insert(activity.id.clone(), pid);
-        self.published.insert(pid, activity.id.clone());
+        self.published
+            .insert(pid, (activity.id.clone(), activity.clone()));
         vec![Effect::PublishNew(activity)]
     }
 
@@ -98,7 +106,7 @@ impl Correlator {
     pub fn published_pairs(&self) -> Vec<(u32, String)> {
         self.published
             .iter()
-            .map(|(pid, id)| (*pid, id.clone()))
+            .map(|(pid, (id, _))| (*pid, id.clone()))
             .collect()
     }
 
@@ -175,7 +183,7 @@ impl Correlator {
         // Fast path: no partial entry at all.
         if !self.partials.contains_key(&pid) {
             // Check if this is a cache-adopted record (published but no partials).
-            if let Some(old_id) = self.published.remove(&pid) {
+            if let Some((old_id, _)) = self.published.remove(&pid) {
                 self.id_index.retain(|_, p| *p != pid);
                 return vec![Effect::Remove(old_id)];
             }
@@ -192,7 +200,7 @@ impl Correlator {
             // The record dies with the last source.
             self.partials.remove(&pid);
             self.id_index.retain(|_, p| *p != pid);
-            if let Some(old_id) = self.published.remove(&pid) {
+            if let Some((old_id, _)) = self.published.remove(&pid) {
                 return vec![Effect::Remove(old_id)];
             }
             return Vec::new();
@@ -217,19 +225,30 @@ impl Correlator {
     /// current one: sources reference their own scoped id in removal events,
     /// and after an absorb the published id no longer matches the id the
     /// absorbed source will use when it says goodbye.
+    ///
+    /// Publish dedup: when the merged record equals what is already on
+    /// the bus, no effects are emitted - the ListGames reseed and the tick
+    /// sweep re-derive identical records by design, and re-publishing them
+    /// would ripple no-op PropertiesChanged to every consumer.
     fn publish(&mut self, pid: u32, merged: Activity) -> Vec<Effect> {
         let new_id = merged.id.clone();
         match self.published.get(&pid) {
             None => {
-                self.published.insert(pid, new_id.clone());
-                self.id_index.insert(new_id, pid);
+                self.id_index.insert(new_id.clone(), pid);
+                self.published.insert(pid, (new_id, merged.clone()));
                 vec![Effect::PublishNew(merged)]
             }
-            Some(old_id) if *old_id == new_id => vec![Effect::UpdateInPlace(merged)],
-            Some(old_id) => {
+            Some((old_id, cached)) if *old_id == new_id => {
+                if *cached == merged {
+                    return Vec::new();
+                }
+                self.published.insert(pid, (new_id, merged.clone()));
+                vec![Effect::UpdateInPlace(merged)]
+            }
+            Some((old_id, _)) => {
                 let old_id = old_id.clone();
                 self.id_index.insert(new_id.clone(), pid);
-                self.published.insert(pid, new_id);
+                self.published.insert(pid, (new_id, merged.clone()));
                 vec![Effect::Remove(old_id), Effect::PublishNew(merged)]
             }
         }
@@ -571,11 +590,41 @@ mod tests {
         c.on_updated(gamemode(61));
         c.on_updated(steam(61)); // name = "" (from_steam)
 
-        let effects = c.on_updated(steam(61)); // re-update to trigger merge
+        // Re-sending the identical partial derives an identical merge:
+        // the publish dedup swallows it entirely.
+        let effects = c.on_updated(steam(61));
+        assert_eq!(effects, vec![], "identical re-publish must be a no-op");
+
+        // Mutate a field so the merge actually changes: the name fallback
+        // still holds through the update.
+        let mut poked = steam(61);
+        poked.extra.insert("poke".to_string(), "1".to_string());
+        let effects = c.on_updated(poked);
         let [Effect::UpdateInPlace(merged)] = effects.as_slice() else {
             panic!("expected in-place merge, got {effects:?}");
         };
         assert_eq!(merged.name, "eldenring"); // GameMode's stem is the fallback
+    }
+
+    #[test]
+    fn identical_republish_yields_no_effects() {
+        // The ListGames reseed and tick sweep re-send unchanged partials by
+        // design; the publish dedup must suppress the resulting no-ops.
+        let mut c = Correlator::new();
+        c.on_updated(gamemode(90));
+        c.on_updated(discord(90));
+
+        assert!(c.on_updated(gamemode(90)).is_empty());
+        assert!(c.on_updated(discord(90)).is_empty());
+
+        // A changed field still yields UpdateInPlace.
+        let mut updated = discord(90);
+        updated.state = "Boss: Godrick".to_string();
+        let effects = c.on_updated(updated);
+        let [Effect::UpdateInPlace(merged)] = effects.as_slice() else {
+            panic!("expected in-place update, got {effects:?}");
+        };
+        assert_eq!(merged.state, "Boss: Godrick");
     }
 
     #[test]
