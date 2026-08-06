@@ -89,6 +89,30 @@ async fn wait_for_name(conn: &Connection, name: &str, timeout: Duration) -> bool
     false
 }
 
+fn socket_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("discord-ipc-0")
+}
+
+/// Poll until the daemon's IPC socket accepts a connection (or give up).
+///
+/// The path existing is not a readiness signal: a SIGKILLed daemon from an
+/// earlier test leaves the socket file behind, so the path can be there while
+/// nothing is listening yet. Only a successful connect proves the listener is
+/// up, and by then the stale file has been unlinked and rebound.
+async fn wait_for_socket(path: &std::path::Path, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if tokio::net::UnixStream::connect(path).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 async fn wait_for_activities(
     manager: &ManagerProxy<'_>,
     timeout: Duration,
@@ -153,14 +177,23 @@ async fn gamemode_and_discord_join_by_pid() {
     let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    for n in 1..=9 {
+    // `discord-ipc-0` is checked too - the daemon under test is not up yet, so
+    // anything answering there is somebody else's; a file nobody answers on is
+    // a corpse from an earlier SIGKILLed daemon and gets cleared out of the way.
+    for n in 0..=9 {
         let candidate = runtime_dir.join(format!("discord-ipc-{n}"));
-        if candidate.exists() && std::os::unix::net::UnixStream::connect(&candidate).is_ok() {
+        if !candidate.exists() {
+            continue;
+        }
+        if std::os::unix::net::UnixStream::connect(&candidate).is_ok() {
             eprintln!(
                 "SKIP: real Discord client running on {}; proxy would reject test client_id",
                 candidate.display()
             );
             return;
+        }
+        if n == 0 {
+            let _ = std::fs::remove_file(&candidate);
         }
     }
 
@@ -178,6 +211,15 @@ async fn gamemode_and_discord_join_by_pid() {
     assert!(
         wait_for_name(&conn, GAMEBUS_NAME, Duration::from_secs(5)).await,
         "daemon did not acquire its bus name"
+    );
+    // The bus name is acquired before the Discord source is spawned, so it
+    // arrives first; the RPC client below must not connect until the IPC
+    // listener is actually accepting.
+    let sock = socket_path();
+    assert!(
+        wait_for_socket(&sock, Duration::from_secs(5)).await,
+        "daemon did not bind {}",
+        sock.display()
     );
     let manager = ManagerProxy::new(&conn).await.unwrap();
 
@@ -308,6 +350,10 @@ async fn gamemode_and_discord_join_by_pid() {
         "record {merged_path} survived its last source: {list:?}"
     );
 
+    // SIGKILL skips the daemon's own unlink, so clear the socket here: a
+    // leftover file would otherwise sit in the shared runtime dir for the next
+    // test binary to trip over.
     let _ = daemon.0.kill();
     let _ = daemon.0.wait();
+    let _ = std::fs::remove_file(&sock);
 }
