@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4f and S6 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
+## Status: S0-S4f, S6, and S7 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -303,6 +303,47 @@ player (`zbus::interface`, real
 `Properties.Get` wire) from the test process, joined by pid via the bus's own
 gamemoded — record named after the player's Identity, MPRIS absent from
 `Sources`, name survives player exit.
+
+### S7 — Publication hygiene (DONE 2026-08-06)
+
+Three fixes born from one evening's journal (107 pid publishes in 4 hours).
+
+**Pattern blacklist.** `is_wrapper_executable` became three rules over a
+backslash-aware basename: literals (shells, launch plumbing, the Wine service
+set — `wineserver`, `services.exe`, `conhost.exe`, … — and `steamwebhelper`),
+prefix families (`steam-runtime-`, `pressure-vessel-`, `pv-`, `srt-`,
+`{i386,x86_64}-linux-gnu-`), and version-trimmed interpreters
+(`python3.13` → `python`). Live symptom fixed: a `/usr/bin/python3.13`
+wrapper had classified GameProcess from the game path in its own argv —
+pinning its group so the real game could never dethrone it. Deliberately off
+the list: `wine64-preloader` (Wine games are only identifiable via the
+cmdline layer) and `sleep` (integration fixture, stem asserted).
+
+**Publish-once-named.** An ungrouped GameMode record whose name is empty
+after enrichment — a blacklisted wrapper or unreadable exe, what the monitor
+showed as "(unknown)" — is withheld from the bus and publishes the moment
+anything names it (hint, late identification, Discord join, or the 15s
+reseed), with its original `Since`. Its death while withheld is fully silent:
+the µs-lived keyless-helper corpses now produce zero bus traffic. Grouped
+records are never withheld (a merge key is game evidence); stem-named records
+still publish (the S1 pid+executable contract). Owner decision 2026-08-06.
+
+**No name regression.** At game close the dying process re-emits with an
+unreadable exe, and the update used to clear the published name to
+"(unknown)" before removal. The correlator now enforces design rule 2 for
+names: an empty merged name carries the published name forward, so the record
+stays truthful until its single ActivityRemoved.
+
+Also: `merge_key_from_environ` accepted `SteamAppId=0` while
+`find_steam_appid` rejected it — every non-Steam title pooled into one bogus
+`steam:0` group whose members dethroned each other all evening. One
+`valid_steam_appid` definition now serves both, and a zero Steam id falls
+through to the real Lutris/umu key.
+
+Verified: 97 unit tests (+8: merge-key zeros, two pattern truth tables, five
+withhold paths, name monotonicity) and `tests/withheld_publication.rs` on the
+private bus — a registered keyless `sh` wrapper never appears and never
+produces a removal while a plain `sleep` control publishes and dies cleanly.
 
 ## Open decisions
 - **MPRIS as a source** — the *naming* half landed as S6 (2026-08-06): player

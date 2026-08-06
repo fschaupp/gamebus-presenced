@@ -201,8 +201,17 @@ Activity properties, all read-only, all `emits-change`:
 Design rules worth stating so they do not erode:
 
 1. **Empty string means "not known", never a placeholder.** Consumers render
-   what they get.
+   what they get. One deliberate exception (S7): an ungrouped GameMode record
+   whose *name* resolves to empty — a known non-game wrapper with nothing yet
+   naming it — is withheld from the bus entirely rather than published
+   nameless; it publishes, with its original `Since`, the moment any evidence
+   names it. Grouped records are never withheld (a merge key is game
+   evidence), and stem names still publish. Consequence: `HasActivity`
+   ignores withheld registrations.
 2. **A property never regresses to unknown while a source still asserts it.**
+   Enforced for `Name` in the correlator: an update whose merged name is
+   empty carries the published name forward, so a record keeps its name
+   through the teardown cascade until its single `ActivityRemoved`.
    Losing Discord does not blank the name if GameMode still holds the pid.
 3. **The record dies with the last evidence for the game.** No lingering
    "last played". For grouped records (a merge key joining several pids) the
