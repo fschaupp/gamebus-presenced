@@ -24,7 +24,7 @@ use crate::dbus::connection::Connection;
 use crate::dbus::manager::{Manager, ManagerInterface};
 use crate::dbus::types::{Activity, BUS_NAME, ROOT_PATH, VERSION};
 use crate::error::Result;
-use crate::sources::{discord, gamemode, SourceEvent};
+use crate::sources::{discord, gamemode, mpris, SourceEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -109,6 +109,9 @@ async fn main() -> Result<()> {
         reseed.clone(),
     ));
     info!("GameMode source watcher started");
+    // MPRIS naming hints - never a source, only a name supplier.
+    tokio::spawn(mpris::watch(conn.inner().clone(), tx.clone()));
+    info!("MPRIS naming-hint watcher started");
     tokio::spawn(discord::listen(tx));
     info!("Discord IPC source listener started");
 
@@ -140,6 +143,8 @@ async fn main() -> Result<()> {
                         SourceEvent::Updated(activity) => correlator.on_updated(*activity),
                         SourceEvent::Removed { id, source } => correlator.on_removed(&id, source),
                         SourceEvent::SourceLost { source } => correlator.on_source_lost(source),
+                        // Enricher-internal; process() never re-emits it.
+                        SourceEvent::NameHint { .. } => Vec::new(),
                     };
                     apply_effects(&conn, &manager, &signal_ctxt, effects).await;
                 }
@@ -157,6 +162,8 @@ async fn main() -> Result<()> {
                             SourceEvent::Updated(activity) => correlator.on_updated(*activity),
                             SourceEvent::Removed { id, source } => correlator.on_removed(&id, source),
                             SourceEvent::SourceLost { source } => correlator.on_source_lost(source),
+                            // Enricher-internal; process() never re-emits it.
+                            SourceEvent::NameHint { .. } => Vec::new(),
                         };
                         apply_effects(&conn, &manager, &signal_ctxt, effects).await;
                     }
