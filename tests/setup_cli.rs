@@ -363,6 +363,67 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     assert!(text.contains("## Evidence"), "{text}");
     assert!(text.contains("## Checklist"), "{text}");
     assert!(text.contains("collision-checked"), "{text}");
+    // One row is a title-slug draft — nothing proves that game is absent
+    // from Steam, so the Steam-rule box must stay for the human.
+    assert!(
+        text.contains("- [ ] Every id follows the database rules"),
+        "steam-rule box was pre-ticked over a slug draft:\n{text}"
+    );
+}
+
+#[test]
+fn umu_misses_export_escapes_external_data_and_strips_paths() {
+    let home = TempHome::new("umu-escape");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // Codename comes verbatim from an untrusted process's environment: a
+    // comma in it must not shift the CSV columns (that would forge the
+    // UMU_ID cell). The executable is an absolute path with the username in
+    // it — only the basename may reach a public submission.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"egs:evil":{"title":"Bad Game","store":"egs","codename":"Evil,umu-hijack,x",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "executable":"/home/private-user/Games/Heroic/Bad Game/Game.exe",
+            "first_seen":"2026-08-07","last_seen":"2026-08-07"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-FIXME"#),
+        "codename not escaped — columns shifted:\n{text}"
+    );
+    assert!(
+        !text.contains("/home/private-user"),
+        "absolute path leaked into the export:\n{text}"
+    );
+    assert!(text.contains("Game.exe"), "{text}");
+}
+
+#[test]
+fn a_corrupt_stash_errors_loudly_and_stays_untouched() {
+    let home = TempHome::new("umu-corrupt");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    let stash_path = stash_dir.join("umu-misses.json");
+    std::fs::write(&stash_path, "{\"oops\": ,}").unwrap();
+    let before = std::fs::read(&stash_path).unwrap();
+
+    // Both the list and the flows must refuse — "No misses recorded" over a
+    // corrupt file would read as data loss.
+    for args in [vec!["umu-misses"], vec!["umu-misses", "--export"]] {
+        let out = run(&home, &args);
+        assert!(
+            !out.status.success(),
+            "{args:?} succeeded on a corrupt stash"
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("failed to parse"), "{err}");
+    }
+    assert_eq!(before, std::fs::read(&stash_path).unwrap());
 }
 
 /// A one-thread fake umu API: exact-miss on the codename lookup, fuzzy ids

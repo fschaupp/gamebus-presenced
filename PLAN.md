@@ -388,7 +388,12 @@ commands they are.
 ### S9b — verify, draft, and export umu-database submissions (2026-08-07)
 
 The stash becomes a real contribution pipeline, all of it in `gamebus-setup`
-(the daemon stays network-free and only ever writes the stash):
+(the daemon stays network-free). The file now has TWO writers, each owning
+half of every entry — the daemon the resolution half, the setup tool the
+annotation half (verification, drafted id, PR mark) — and every persist
+merges the other writer's half from disk first, so neither a launch after
+`--verify` nor a `--verify` during a session loses the other's work. A
+stash that fails to parse is reported and never written over.
 
 - **`--verify`** checks every miss against the database, local copy first —
   `--db <file>` or `GAMEBUS_UMU_DB` (the git checkout's CSV or the API's

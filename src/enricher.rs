@@ -133,6 +133,15 @@ impl Enricher {
     /// the user's data.
     pub fn load_umu_report(&mut self) {
         self.umu_report = UmuReport::load();
+        if let Some(e) = self.umu_report.load_error() {
+            // The stash keeps the accumulated umu-miss knowledge; refusing
+            // to write over an unreadable file is the report's job, saying
+            // so out loud is ours.
+            tracing::warn!(
+                error = e,
+                "umu-miss stash unreadable; not recording misses this session"
+            );
+        }
     }
 
     /// Load the naming database (blocking).

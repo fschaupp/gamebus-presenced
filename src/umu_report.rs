@@ -10,9 +10,11 @@
 //!
 //! Persisted at `$XDG_DATA_HOME/gamebus-presenced/umu-misses.json` — data,
 //! not cache: it accumulates across sessions and is the raw material for a
-//! human-reviewed contribution. Written atomically on change, read-only
-//! everywhere else. The daemon stays network-free; submitting is the user's
-//! act, not ours.
+//! human-reviewed contribution. Two writers share it, each owning half of
+//! every entry: the daemon writes resolutions, the setup tool writes
+//! verification annotations (S9b); every persist merges the other half from
+//! disk first (see [`UmuReport`]). Writes are atomic. The daemon stays
+//! network-free; submitting is the user's act, not ours.
 
 // Compiled into both the daemon (which uses the write half) and gamebus-setup
 // (which reads the stash and owns the whole UmuDb/verification half — the
@@ -125,28 +127,71 @@ pub enum DraftBasis {
 
 /// The stash: keyed by `store:codename` (or the merge key when no codename
 /// exists), loaded once, written through on change.
+///
+/// TWO writers share the file, each owning half of every entry: the daemon
+/// writes the resolution half (title, store, codename, confidence, …), the
+/// setup tool writes the annotation half (`verification`, `drafted_id`,
+/// `possible_pr`). Every persist re-reads the file and adopts the other
+/// writer's half first, so a daemon launch after `--verify` keeps the
+/// verdicts and a `--verify` during a session keeps fresh misses.
 #[derive(Debug, Default)]
 pub struct UmuReport {
     entries: HashMap<String, Miss>,
     path: Option<PathBuf>,
     dirty: bool,
+    /// True in the setup tool: this instance owns the annotation half.
+    annotator: bool,
+    /// Set when the file exists but did not parse. The path is dropped in
+    /// that case so no write can ever flatten a file we failed to read —
+    /// accumulated knowledge beats a working session.
+    load_error: Option<String>,
 }
 
 impl UmuReport {
     /// Load from `$XDG_DATA_HOME/gamebus-presenced/umu-misses.json`.
     pub fn load() -> Self {
-        let Some(path) = Self::default_path() else {
-            return Self::default();
-        };
-        let entries = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default();
-        Self {
-            entries,
-            path: Some(path),
-            dirty: false,
+        match Self::default_path() {
+            Some(path) => Self::from_path(path),
+            None => Self::default(),
         }
+    }
+
+    /// The setup tool's constructor: same file, annotation half owned.
+    pub fn load_for_annotations() -> Self {
+        Self {
+            annotator: true,
+            ..Self::load()
+        }
+    }
+
+    fn from_path(path: PathBuf) -> Self {
+        match std::fs::read_to_string(&path) {
+            // Missing file: a fresh stash that writes normally.
+            Err(_) => Self {
+                path: Some(path),
+                ..Self::default()
+            },
+            Ok(raw) => match serde_json::from_str(&raw) {
+                Ok(entries) => Self {
+                    entries,
+                    path: Some(path),
+                    ..Self::default()
+                },
+                Err(e) => Self {
+                    load_error: Some(format!(
+                        "{} exists but failed to parse: {e}",
+                        path.display()
+                    )),
+                    ..Self::default()
+                },
+            },
+        }
+    }
+
+    /// Why the stash refused to load, if it did. Callers surface this —
+    /// silently showing "no misses" over a corrupt file hides data loss.
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
     }
 
     pub fn default_path() -> Option<PathBuf> {
@@ -262,6 +307,9 @@ impl UmuReport {
         if !self.dirty {
             return;
         }
+        // The other writer may have written since we loaded — adopt its half
+        // before flattening the map onto disk.
+        self.merge_from_disk();
         let Some(path) = &self.path else { return };
         let Ok(json) = serde_json::to_string_pretty(&self.entries) else {
             return;
@@ -275,6 +323,49 @@ impl UmuReport {
             self.dirty = false;
         } else {
             let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// Adopt the other writer's half of every entry from the current file.
+    ///
+    /// The daemon owns resolutions, the setup tool owns annotations; each
+    /// takes the *other* half from disk (where the other writer put it) and
+    /// keeps its own from memory. Entries only the disk knows are kept
+    /// whole — nobody ever deletes a miss. This shrinks the lost-update
+    /// window from session-long to the read-write gap; the writers are a
+    /// human-run CLI and a rare launch event, which do not race in practice.
+    fn merge_from_disk(&mut self) {
+        let Some(path) = &self.path else { return };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return; // no file yet — nothing to adopt
+        };
+        let Ok(disk) = serde_json::from_str::<HashMap<String, Miss>>(&raw) else {
+            return; // unreadable file — memory is the best surviving copy
+        };
+        for (key, theirs) in disk {
+            match self.entries.get_mut(&key) {
+                None => {
+                    self.entries.insert(key, theirs);
+                }
+                Some(ours) if self.annotator => {
+                    // The daemon may have refreshed the resolution half.
+                    ours.title = theirs.title;
+                    ours.store = theirs.store;
+                    ours.codename = theirs.codename;
+                    ours.umu_id = theirs.umu_id;
+                    ours.title_source = theirs.title_source;
+                    ours.confidence = theirs.confidence;
+                    ours.executable = theirs.executable;
+                    ours.first_seen = theirs.first_seen;
+                    ours.last_seen = theirs.last_seen;
+                }
+                Some(ours) => {
+                    // The setup tool may have annotated since we loaded.
+                    ours.verification = theirs.verification;
+                    ours.drafted_id = theirs.drafted_id;
+                    ours.possible_pr = theirs.possible_pr;
+                }
+            }
         }
     }
 }
@@ -455,12 +546,11 @@ impl UmuDb {
         db
     }
 
+    // parse() rejects empty databases, so an is_empty() could never return
+    // true and would be dead in both binaries (audited 2026-08-07).
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// The exact-launch lookup: this store, this codename. A hit means the
@@ -726,6 +816,104 @@ mod tests {
         let d = today();
         assert_eq!(d.len(), 10);
         assert!(d.starts_with("20"), "{d}");
+    }
+
+    /// A throwaway stash path for the two-writer tests.
+    struct TempStash(PathBuf);
+    impl TempStash {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "gamebus-umu-report-test-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir.join("umu-misses.json"))
+        }
+    }
+    impl Drop for TempStash {
+        fn drop(&mut self) {
+            if let Some(dir) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_writers_never_clobber_each_others_half() {
+        let stash = TempStash::new("two-writers");
+
+        // The daemon records a miss and keeps running (stale in-memory copy).
+        let mut daemon = UmuReport::from_path(stash.0.clone());
+        daemon.note_launch("egs", Some("Calluna"), "umu-0", "heroic:Calluna");
+
+        // The setup tool verifies: loads, annotates, saves.
+        let mut setup = UmuReport {
+            annotator: true,
+            ..UmuReport::from_path(stash.0.clone())
+        };
+        setup.update("egs:Calluna", |m| {
+            m.verification = Some(Verification {
+                state: VerificationState::ConfirmedMissing,
+                umu_id: None,
+                checked: "2026-08-07".into(),
+                note: None,
+            });
+            m.drafted_id = Some(DraftedId {
+                id: "umu-870780".into(),
+                basis: DraftBasis::SteamSku,
+                collision_checked: "2026-08-07".into(),
+            });
+        });
+        setup.save();
+
+        // The game launches again: the daemon persists from its PRE-verify
+        // copy. The annotations must survive.
+        daemon.note_launch("egs", Some("Calluna"), "umu-0", "heroic:Calluna");
+        // And the daemon records a brand-new miss the setup tool never saw.
+        daemon.note_launch("gog", Some("1207600000"), "umu-0", "heroic:1207600000");
+
+        // The setup tool saves again from ITS stale copy: the new miss must
+        // survive too.
+        setup.update("egs:Calluna", |m| m.possible_pr = None);
+        setup.save();
+
+        let disk: HashMap<String, Miss> =
+            serde_json::from_str(&std::fs::read_to_string(&stash.0).unwrap()).unwrap();
+        let calluna = &disk["egs:Calluna"];
+        assert!(
+            calluna.verification.is_some(),
+            "daemon write erased the verification"
+        );
+        assert_eq!(
+            calluna.drafted_id.as_ref().map(|d| d.id.as_str()),
+            Some("umu-870780"),
+            "daemon write erased the drafted id"
+        );
+        assert!(
+            disk.contains_key("gog:1207600000"),
+            "setup save erased the daemon's new miss"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_stash_is_reported_and_never_overwritten() {
+        let stash = TempStash::new("corrupt");
+        std::fs::write(&stash.0, "{\"key\": {\"broken\": true},}").unwrap();
+        let before = std::fs::read(&stash.0).unwrap();
+
+        let mut r = UmuReport::from_path(stash.0.clone());
+        assert!(r.load_error().is_some(), "parse failure went unreported");
+        assert!(r.entries.is_empty());
+
+        // Writes must be refused: the corrupt file holds the only copy of
+        // whatever knowledge it still contains.
+        r.note_launch("egs", Some("X"), "umu-0", "heroic:X");
+        assert_eq!(
+            before,
+            std::fs::read(&stash.0).unwrap(),
+            "a write flattened the corrupt stash"
+        );
     }
 
     #[test]

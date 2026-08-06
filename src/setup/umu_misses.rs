@@ -1,7 +1,9 @@
 //! S9b — review, verify, draft, and export the umu-database miss stash.
 //!
-//! The daemon (network-free, always) writes the stash; everything here reads
-//! it and talks to the world on the user's explicit command:
+//! The daemon (network-free, always) writes the stash's resolution half;
+//! this module writes the annotation half (verification, drafted ids, PR
+//! marks — merged, never clobbered: see `UmuReport`) and talks to the world
+//! on the user's explicit command:
 //!
 //! - default: the review list.
 //! - `--verify`: check every miss against the database — local copy first
@@ -58,7 +60,15 @@ pub fn run(args: &[String]) -> ExitCode {
         }
     }
 
-    let mut report = UmuReport::load();
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        // Never show "no misses" over a file that failed to parse — that
+        // reads as data loss. Nothing writes to it either (the report
+        // refuses), so the user can repair or move it.
+        eprintln!("{e}");
+        eprintln!("Fix or move the file; nothing has overwritten it.");
+        return ExitCode::FAILURE;
+    }
     if report.path().is_none() {
         eprintln!("Cannot resolve the stash path (no HOME).");
         return ExitCode::FAILURE;
@@ -482,6 +492,19 @@ fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
         prs.len()
     );
 
+    // Every run re-evaluates from scratch: a PR that closed unmerged, or a
+    // substring false positive, must not hold an entry out of the exports
+    // forever. Cleared only once the PR list actually arrived (above).
+    let stale: Vec<String> = report
+        .entries()
+        .iter()
+        .filter(|(_, m)| m.possible_pr.is_some())
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in &stale {
+        report.update(key, |m| m.possible_pr = None);
+    }
+
     let mut hits: Vec<(String, String)> = Vec::new();
     for pr in &prs {
         let diff = ureq::get(&pr.diff_url)
@@ -498,22 +521,10 @@ fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
             }
         };
         for (key, m) in report.entries() {
-            if m.possible_pr.is_some() || hits.iter().any(|(k, _)| k == key) {
+            if hits.iter().any(|(k, _)| k == key) {
                 continue;
             }
-            // Match added CSV cells, not free text: ",codename," anywhere,
-            // or a "+Title," line start — titles are ordinary words and a
-            // bare substring match would flag half the tracker.
-            let codename_hit = m
-                .codename
-                .as_deref()
-                .filter(|c| c.len() >= 4 && !c.eq_ignore_ascii_case("none"))
-                .is_some_and(|c| diff.contains(&format!(",{},", c.to_lowercase())));
-            let title_hit = m
-                .title
-                .as_deref()
-                .is_some_and(|t| diff.contains(&format!("\n+{},", t.to_lowercase())));
-            if codename_hit || title_hit {
+            if diff_mentions(&diff, m) {
                 hits.push((key.clone(), format!("PR #{} — {}", pr.number, pr.title)));
             }
         }
@@ -521,6 +532,12 @@ fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
 
     if hits.is_empty() {
         println!("  No open merge request seems to contain these entries.");
+        if !stale.is_empty() {
+            println!(
+                "  ({} earlier possibly-submitted annotation(s) no longer match and were cleared.)",
+                stale.len()
+            );
+        }
     }
     for (key, pr) in hits {
         let title = report.entries()[&key]
@@ -534,6 +551,25 @@ fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
     Ok(())
 }
 
+/// Does this (lowercased) PR diff add a CSV row that looks like this miss?
+/// Cells, not free text — titles are ordinary words and a bare substring
+/// match would flag half the tracker. Titles match both the plain and the
+/// quoted form: the upstream CSV quotes comma-carrying titles
+/// (`"Warhammer 40,000: Space Marine",gog,…`).
+fn diff_mentions(diff_lower: &str, m: &Miss) -> bool {
+    let codename_hit = m
+        .codename
+        .as_deref()
+        .filter(|c| c.len() >= 4 && !c.eq_ignore_ascii_case("none"))
+        .is_some_and(|c| diff_lower.contains(&format!(",{},", c.to_lowercase())));
+    let title_hit = m.title.as_deref().is_some_and(|t| {
+        let plain = format!("\n+{},", t.to_lowercase());
+        let quoted = format!("\n+{},", csv_field(t).to_lowercase());
+        diff_lower.contains(&plain) || diff_lower.contains(&quoted)
+    });
+    codename_hit || title_hit
+}
+
 /// One submission-ready row, shared by both exports.
 struct SubmissionRow<'a> {
     miss: &'a Miss,
@@ -541,6 +577,15 @@ struct SubmissionRow<'a> {
     umu_id: String,
     /// Where the id came from, for the NOTE column and the evidence list.
     id_provenance: Option<String>,
+    /// The CODENAME column value. The README's standalone rule pairs
+    /// store `none` with codename `none` — a codename without a store
+    /// namespace is meaningless upstream, so it moves to the NOTE instead.
+    codename: String,
+    /// True when the id provably honors the "Steam appid when on Steam"
+    /// rule: verified cross-store from the database, or drafted from a
+    /// detectable.json Steam sku. Slug/codename drafts only prove Discord's
+    /// file had no entry — NOT that the game is absent from Steam.
+    steam_rule_certain: bool,
 }
 
 /// Split the stash into rows worth submitting and entries listed after the
@@ -576,13 +621,14 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             held.push((m, "unresolved or low-confidence title".to_string()));
             continue;
         };
-        let (umu_id, id_provenance) = match (&m.verification, &m.drafted_id) {
+        let (umu_id, id_provenance, steam_rule_certain) = match (&m.verification, &m.drafted_id) {
             (Some(v), _) if v.state == VerificationState::CrossStoreId && v.umu_id.is_some() => (
                 v.umu_id.clone().expect("checked"),
                 Some(format!(
                     "id shared from the database's existing entry (verified {})",
                     v.checked
                 )),
+                true,
             ),
             (_, Some(d)) => (
                 d.id.clone(),
@@ -591,17 +637,32 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
                     basis_label(d.basis),
                     d.collision_checked
                 )),
+                d.basis == DraftBasis::SteamSku,
             ),
-            _ => ("umu-FIXME".to_string(), None),
+            _ => ("umu-FIXME".to_string(), None, false),
+        };
+        let codename = if m.store == "none" {
+            "none".to_string()
+        } else {
+            m.codename.clone().unwrap_or_else(|| "none".into())
         };
         rows.push(SubmissionRow {
             miss: m,
             title,
             umu_id,
             id_provenance,
+            codename,
+            steam_rule_certain,
         });
     }
     (rows, held)
+}
+
+/// The submission wants executable names, not this machine's absolute
+/// paths — those embed `/home/<user>` and whatever else the install layout
+/// leaks. Basename only, either separator (Wine paths carry backslashes).
+fn exe_basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 fn csv_line(row: &SubmissionRow<'_>) -> String {
@@ -621,14 +682,26 @@ fn csv_line(row: &SubmissionRow<'_>) -> String {
             note.push_str(vn);
         }
     }
+    if m.store == "none" {
+        if let Some(code) = m.codename.as_deref().filter(|c| !c.is_empty()) {
+            note.push_str(&format!("; launcher codename was '{code}' (store unknown)"));
+        }
+    }
     format!(
         "{},{},{},{},,{},{}",
         csv_field(row.title),
         m.store.to_lowercase(),
-        m.codename.as_deref().unwrap_or("none"),
+        // Codename comes verbatim from an untrusted process's environment
+        // (HEROIC_APP_NAME) — escaped like every other external field, or a
+        // comma in it would shift the columns and forge the UMU_ID cell.
+        csv_field(&row.codename),
         row.umu_id,
         csv_field(&note),
-        m.executable.as_deref().map(csv_field).unwrap_or_default(),
+        m.executable
+            .as_deref()
+            .map(exe_basename)
+            .map(csv_field)
+            .unwrap_or_default(),
     )
 }
 
@@ -660,6 +733,10 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
     }
     let titles: Vec<&str> = rows.iter().map(|r| r.title).collect();
     let all_checked = rows.iter().all(|r| r.umu_id != "umu-FIXME");
+    // Only tick the Steam rule when every id provably honors it; a slug or
+    // codename draft leaves "is this on Steam?" a genuinely open question
+    // for the human submitter.
+    let steam_rule = rows.iter().all(|r| r.steam_rule_certain);
 
     let mut md = String::new();
     md.push_str(&format!(
@@ -688,10 +765,10 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
             "- **{}** — store `{}`, codename `{}`{}; title from {} ({} confidence); {}.\n",
             row.title,
             m.store.to_lowercase(),
-            m.codename.as_deref().unwrap_or("none"),
+            row.codename,
             m.executable
                 .as_deref()
-                .map(|e| format!(", exe `{e}`"))
+                .map(|e| format!(", exe `{}`", exe_basename(e)))
                 .unwrap_or_default(),
             m.title_source.as_deref().unwrap_or("unknown"),
             confidence_label(m.confidence),
@@ -705,7 +782,7 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
     md.push_str("- [x] Store ids are lowercase\n");
     md.push_str(&format!(
         "- [{}] Every id follows the database rules (Steam appid when the game is on Steam)\n",
-        if all_checked { 'x' } else { ' ' }
+        if steam_rule { 'x' } else { ' ' }
     ));
     md.push_str(&format!(
         "- [{}] Drafted ids collision-checked against the full database\n",
@@ -853,4 +930,66 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn miss(title: Option<&str>, codename: Option<&str>) -> Miss {
+        Miss {
+            title: title.map(str::to_string),
+            store: "egs".into(),
+            codename: codename.map(str::to_string),
+            umu_id: "umu-0".into(),
+            title_source: None,
+            confidence: None,
+            executable: None,
+            first_seen: "2026-08-07".into(),
+            last_seen: "2026-08-07".into(),
+            verification: None,
+            drafted_id: None,
+            possible_pr: None,
+        }
+    }
+
+    #[test]
+    fn diff_matching_handles_quoted_and_plain_titles() {
+        // The upstream CSV quotes comma-carrying titles; a PR adding such a
+        // row must still match.
+        let diff =
+            "\n+\"warhammer 40,000: space marine\",gog,1668484481,umu-55150,,,\n".to_string();
+        assert!(diff_mentions(
+            &diff,
+            &miss(Some("Warhammer 40,000: Space Marine"), None)
+        ));
+
+        let plain = "\n+borderlands 3,egs,catnip,umu-397540,bl3,,\n".to_string();
+        assert!(diff_mentions(&plain, &miss(Some("Borderlands 3"), None)));
+        // A title appearing as free text (not a row start) is NOT a hit.
+        let prose = "this pr improves borderlands 3, the entry\n+something,else,x,umu-1a,,,\n";
+        assert!(!diff_mentions(prose, &miss(Some("Borderlands 3"), None)));
+    }
+
+    #[test]
+    fn diff_matching_uses_codenames_only_when_meaningful() {
+        let diff = ",calluna,".to_string();
+        assert!(diff_mentions(&diff, &miss(None, Some("Calluna"))));
+        // Short or placeholder codenames would match everything.
+        assert!(!diff_mentions(&diff, &miss(None, Some("none"))));
+        assert!(!diff_mentions("...,abc,...", &miss(None, Some("abc"))));
+    }
+
+    #[test]
+    fn exe_basename_strips_both_separator_styles() {
+        assert_eq!(
+            exe_basename("/home/somebody/Games/Heroic/Control/Control_DX12.exe"),
+            "Control_DX12.exe"
+        );
+        assert_eq!(
+            exe_basename("Z:\\Spiele\\Control\\Control_DX12.exe"),
+            "Control_DX12.exe"
+        );
+        assert_eq!(exe_basename("bare.exe"), "bare.exe");
+    }
 }
