@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4f, S6, S7, and S8 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
+## Status: S0-S4f and S6-S9 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -362,6 +362,28 @@ umu-database — it is protonfixes-scoped and does not know this game
 (`codename=Calluna` → `[]`, verified live), and `GAMEID=umu-0` is by
 definition the umu-miss case; its one useful mapping (numeric umu id ⇒ Steam
 appid) has been implemented since S4.
+
+### S9 — umu-database miss report (DONE 2026-08-07)
+
+Every launch that goes through umu without a database entry (`GAMEID=umu-0`,
+`UMU_ID=umu-default`) is a gap in the shared umu-database — and by the time a
+session ends, this daemon has usually worked out what the game was. S9 turns
+that into a contribution pipeline (owner's idea): the enricher stashes each
+miss at `$XDG_DATA_HOME/gamebus-presenced/umu-misses.json` — store guess
+(`HEROIC_APP_SOURCE`, else install-path heuristics, else `none`), codename
+(`HEROIC_APP_NAME` — for EGS exactly the App Name the database wants), the
+resolved title with its source and a confidence label (high: launcher config
+or detectable hit; medium: wrapper layers; low: hints/stems), and the game
+exe. Resolutions only upgrade, never downgrade; writes are atomic; the daemon
+stays network-free.
+
+`gamebus-setup umu-misses` lists the stash for review;
+`--export` emits submission-shaped CSV matching the database's own header,
+with `UMU_ID` left as `umu-FIXME` on purpose — the database rule (checked
+against the local checkout at /media/Data/Projekte/umu-database) is
+`umu-<Steam appid>` whenever the game also exists on Steam, which only the
+reviewer can confirm. Low-confidence and unresolved entries are listed but
+excluded from export. A setup-TUI review pane is the natural next extension.
 
 ## Open decisions
 - **MPRIS as a source** — the *naming* half landed as S6 (2026-08-06): player

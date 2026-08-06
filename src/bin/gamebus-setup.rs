@@ -14,6 +14,8 @@ use std::sync::Arc;
 mod client;
 #[path = "../setup/mod.rs"]
 mod setup;
+#[path = "../umu_report.rs"]
+mod umu_report;
 
 use setup::actions::{self, Action, Plan, Source, Step};
 use setup::paths::{Dirs, Target};
@@ -29,6 +31,9 @@ fn usage() {
     eprintln!("  status                    Print system status as plain text");
     eprintln!("  plan <action> [options]   Print what an action would do, change nothing");
     eprintln!("  apply <action> [options]  Perform an action non-interactively");
+    eprintln!("  umu-misses [--export]     Games umu had no database entry for, and what");
+    eprintln!("                            this machine resolved them to; --export emits");
+    eprintln!("                            umu-database submission CSV for review");
     eprintln!("  help                      Show this help");
     eprintln!();
     eprintln!("Actions:");
@@ -50,6 +55,7 @@ async fn main() -> ExitCode {
         Some("status") => cmd_status().await,
         Some("plan") => cmd_plan(&args, &flags),
         Some("apply") => cmd_apply(&args, &flags),
+        Some("umu-misses") => cmd_umu_misses(&args),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             ExitCode::SUCCESS
@@ -633,5 +639,112 @@ fn cmd_apply(args: &[String], flags: &Flags) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// S9: review the umu-database misses the daemon collected, or export them
+/// as submission-shaped CSV (https://github.com/Open-Wine-Components/umu-database).
+fn cmd_umu_misses(args: &[String]) -> ExitCode {
+    let Some(path) = umu_report::UmuReport::default_path() else {
+        eprintln!("Cannot resolve the stash path (no HOME).");
+        return ExitCode::FAILURE;
+    };
+    let entries: std::collections::HashMap<String, umu_report::Miss> =
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
+    if entries.is_empty() {
+        println!("No umu-database misses recorded yet.");
+        println!(
+            "({} — written by the daemon when a game launches with GAMEID=umu-0.)",
+            path.display()
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let mut rows: Vec<_> = entries.values().collect();
+    rows.sort_by(|a, b| a.last_seen.cmp(&b.last_seen).reverse());
+
+    if args.iter().any(|a| a == "--export") {
+        // Submission-shaped CSV. UMU_ID is left for human review on purpose:
+        // the database rule is umu-<Steam appid> when the game is on Steam
+        // (even from another store), which only the reviewer can confirm.
+        println!("# umu-database submission draft — review before submitting!");
+        println!("# Rules: https://github.com/Open-Wine-Components/umu-database#readme");
+        println!("# UMU_ID: use umu-<Steam appid> if the game is also on Steam.");
+        println!("TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)");
+        let mut skipped = 0;
+        for m in &rows {
+            let confident = matches!(
+                m.confidence,
+                Some(umu_report::Confidence::High) | Some(umu_report::Confidence::Medium)
+            );
+            match (&m.title, confident) {
+                (Some(title), true) => {
+                    let note = format!(
+                        "resolved by gamebus-presenced ({}, {} confidence)",
+                        m.title_source.as_deref().unwrap_or("unknown"),
+                        match m.confidence {
+                            Some(umu_report::Confidence::High) => "high",
+                            Some(umu_report::Confidence::Medium) => "medium",
+                            _ => "low",
+                        }
+                    );
+                    println!(
+                        "{},{},{},umu-FIXME,,{},{}",
+                        csv_field(title),
+                        m.store,
+                        m.codename.as_deref().unwrap_or("none"),
+                        csv_field(&note),
+                        m.executable.as_deref().map(csv_field).unwrap_or_default(),
+                    );
+                }
+                _ => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            eprintln!("({skipped} unresolved/low-confidence entries skipped — see the list view.)");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    println!(
+        "umu-database misses collected by the daemon ({}):",
+        path.display()
+    );
+    println!();
+    for m in rows {
+        let conf = match m.confidence {
+            Some(umu_report::Confidence::High) => "high",
+            Some(umu_report::Confidence::Medium) => "medium",
+            Some(umu_report::Confidence::Low) => "low",
+            None => "unresolved",
+        };
+        println!(
+            "  {:<28} store: {:<8} codename: {:<16} {} [{}{}] seen {}",
+            m.title.as_deref().unwrap_or("(unresolved)"),
+            m.store,
+            m.codename.as_deref().unwrap_or("-"),
+            m.umu_id,
+            conf,
+            m.title_source
+                .as_deref()
+                .map(|s| format!(", {s}"))
+                .unwrap_or_default(),
+            m.last_seen,
+        );
+    }
+    println!();
+    println!("Export a submission draft:  gamebus-setup umu-misses --export");
+    ExitCode::SUCCESS
+}
+
+/// Quote a CSV field when it needs it.
+fn csv_field(v: &str) -> String {
+    if v.contains(',') || v.contains('"') {
+        format!("\"{}\"", v.replace('"', "\"\""))
+    } else {
+        v.to_string()
     }
 }

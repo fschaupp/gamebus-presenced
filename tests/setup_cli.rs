@@ -222,3 +222,36 @@ fn status_runs_without_a_terminal_and_says_what_it_found() {
         );
     }
 }
+
+#[test]
+fn umu_misses_lists_and_exports_the_stash() {
+    let home = TempHome::new("umu-misses");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"egs:Calluna":{"title":"Control","store":"egs","codename":"Calluna",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "executable":"Control_DX12.exe","first_seen":"2026-08-06",
+            "last_seen":"2026-08-07"}}"#,
+    )
+    .unwrap();
+
+    let list = run(&home, &["umu-misses"]);
+    assert!(list.status.success());
+    let text = stdout(&list);
+    for expected in ["Control", "egs", "Calluna", "high", "heroic-config"] {
+        assert!(text.contains(expected), "list missing {expected}:\n{text}");
+    }
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    // Submission-shaped: the database's own header and a review placeholder
+    // for the id (umu-<Steam appid> is the reviewer's call).
+    assert!(text.contains("TITLE,STORE,CODENAME,UMU_ID"), "{text}");
+    assert!(
+        text.contains("Control,egs,Calluna,umu-FIXME"),
+        "export row malformed:\n{text}"
+    );
+}
