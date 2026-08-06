@@ -1,3 +1,18 @@
+---
+date: 2026-08-04
+type: export
+tags: [export, lessons, learnings-review]
+ai-first: true
+---
+
+## For future Claude
+
+Shareable prose export of Review 2's Top 5 (period S0-S4, written 2026-08-04).
+Frontmatter and this preamble were added retroactively on 2026-08-06 to meet
+the vault's AI-first rules; the body below is unchanged except one dated
+supersession marker in section 2 — its "depth decides" claim died with S4f
+(see [[wiki/concepts/2026-08-06 - Learnings Review]]).
+
 # Top 5 Lessons — gamebus-presenced (2026-08-04)
 
 > Extracted from the second learnings review of the gamebus-presenced project vault. All five were discovered and reinforced in a single day of intensive development (S0-S4, 61 unit + 6 integration tests, 8 ADRs).
@@ -9,6 +24,9 @@ Two design-doc assumptions broke against the live system during implementation. 
 The principle extends to instrumentation: the ancestor-walk join was instrument-first (debug log before code) because we didn't know the miss rate. The detectable.json path-suffix matching was discovered empirically from the data — 83% of entries are path-prefixed, which the basename-only index missed entirely.
 
 ## 2. One record per key — prefer HashMap over pairwise merge
+
+> *Superseded 2026-08-06:* the tiebreaker described below ("deepest pid / depth decides") was replaced by S4f class-based election; the one-record-per-key pattern stands.
+
 
 When deduplicating by a shared key across a process hierarchy, a single `HashMap<key, representative>` mapping each key to exactly ONE record (decided by `tree_depth` — deepest pid wins) is simpler and more robust than pairwise ancestor-walk merging.
 

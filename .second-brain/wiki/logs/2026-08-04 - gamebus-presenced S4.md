@@ -8,7 +8,7 @@ ai-first: true
 
 ## For future Claude
 
-Dev log for S4 of [[wiki/projects/gamebus-presenced]] — enrichment and packaging, completed 2026-08-04. Four sub-slices landed in one session: S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), S4d (ancestor-walk join for wrapper-tree duplicates). 58 unit tests + 6 integration tests pass; clippy fully clean. The Enricher middleware pattern (chosen over probe-in-main for separation of concerns) accommodates future launcher enrichment and tracing/profiling.
+Dev log for S4 of [[wiki/projects/gamebus-presenced]] — enrichment and packaging, completed 2026-08-04. Five sub-slices landed in one session: S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), S4d (ancestor-walk join for wrapper-tree duplicates). 61 unit tests + 6 integration tests pass; clippy fully clean. The Enricher middleware pattern (chosen over probe-in-main for separation of concerns) accommodates future launcher enrichment and tracing/profiling.
 
 ## What was done
 
@@ -163,3 +163,22 @@ Live testing with Brotato (native Steam), Call of Duty: Black Ops Cold War (Lutr
 - [[wiki/logs/2026-08-04 - gamebus-presenced S3]] — S3 dev log
 - `PLAN.md` — roadmap (S0-S4 done)
 - `docs/design/gamebus-presence.md` — design doc
+
+### Corrections (2026-08-06 reconcile)
+
+- Preamble corrected: **five** sub-slices (S4a-S4e), **61** unit tests — the
+  original header said four/58, written at the S4d checkpoint and never
+  refreshed when S4e landed in this same note.
+- The S4d section's merge narrative ("the ancestor-walk merges … the deepest
+  one, srt-bwrap") describes a mechanism Gap 5 of this note replaced the same
+  day (`appid_records`), which S4f replaced again on 2026-08-06 (class
+  election, [[wiki/concepts/2026-08-06 - Learnings Review]]). Read it as
+  history, not as the current design.
+- The two different Amnesia merge keys in this note (`lutris:37b63bec…` in
+  Gap 6 vs `lutris:113b1bfa…` in Final verification) are **both plausibly
+  correct**: on 2026-08-06 a single day's journal showed three distinct
+  `lutris:` UUIDs, so `LUTRIS_GAME_UUID` is per-launch, not per-game. A
+  lutris merge key therefore only groups processes within one launch —
+  adequate, since groups die with the launch. (A follow-up question about the
+  record's missing appid was judged unrecoverable and dropped by owner
+  decision, 2026-08-06.)

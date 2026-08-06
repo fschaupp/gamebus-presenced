@@ -10,6 +10,10 @@ This index is a complete catalog of all pages in the vault, organized by categor
 
 ---
 
+**Not catalogued:** `Bases/` (4 Obsidian Bases views), `Templates/`, and the
+empty `raw/` — infrastructure, not notes (noted 2026-08-06; the "every note"
+claim above covers notes only).
+
 ## Root Files
 - [[_CLAUDE.md]] - Claude's operating manual for this vault
 - [[index.md]] - This catalog file
@@ -18,12 +22,13 @@ This index is a complete catalog of all pages in the vault, organized by categor
 ---
 
 ## Boards
-- [[boards/gamebus-presenced]] - Kanban board for gamebus-presenced project (S0-S3 tasks done, S4 backlog)
+- [[boards/gamebus-presenced]] - Kanban board for gamebus-presenced project (S0-S5 done as of 2026-08-06)
 
 ---
 
 ## Logs
 - [[Logs/2026-08-04]] - Operations log for 2026-08-04
+- [[Logs/2026-08-06]] - Operations log for 2026-08-06 (learnings review; S5/S4f vault-gap flagged)
 
 ---
 
@@ -36,9 +41,10 @@ This index is a complete catalog of all pages in the vault, organized by categor
 
 ### wiki/daily/
 - [[wiki/daily/2026-08-04]] - S0-S3 implementation for gamebus-presenced
+- [[wiki/daily/2026-08-06]] - S5 merged + S4f landed (repo-only records); evening learnings review
 
 ### wiki/projects/
-- [[wiki/projects/gamebus-presenced]] - D-Bus presence daemon for Linux desktop (S0-S4 complete)
+- [[wiki/projects/gamebus-presenced]] - D-Bus presence daemon for Linux desktop (S0-S4f + S5 as of 2026-08-06)
 
 ### wiki/entities/
 - [[wiki/entities/Florian]] - Vault owner, developer of gamebus-presenced
@@ -57,6 +63,10 @@ This index is a complete catalog of all pages in the vault, organized by categor
 - [[wiki/concepts/test-deletion-visibility]] - Owner preference: flag test deletions visibly with rationale
 - [[wiki/concepts/2026-08-04 - Learnings Review]] - First learnings review: 7 active, 4 superseded, 1 promotion candidate
 - [[wiki/concepts/2026-08-04 - Learnings Review 2]] - Second learnings review: 9 active, 7 superseded, 1 promotion eligible
+- [[wiki/concepts/2026-08-06 - Learnings Review]] - Third review: ADR-008 deepest-pid rule superseded by S4f class election; adversarial-verification promotion eligible
+- [[wiki/concepts/2026-08-06 - Top 5 Lessons Export]] - Shareable prose export of the period's top 5 lessons
+- [[wiki/concepts/squash-merge-branch-pointer]] - Owner rule: feature branches land with ancestry intact (prefer --no-ff; squash only with branch+SHA pointer)
+- [[wiki/concepts/2026-08-06 - synthesis - record-identity-and-merging]] - Cross-reference of the four identity regimes (S3 exact-pid to S4f groups); surfaces the ADR-008 contradiction and 5 gaps
 - [[wiki/concepts/2026-08-04 - Top 5 Lessons Export]] - Shareable Top 5 lessons from gamebus-presenced S0-S4
 - [[wiki/concepts/2026-08-04 - Brainstorm - S4 Enrichment and Packaging]] - S4 brainstorm: Enricher middleware, reactive Steam, detectable.json data file, instrument-first ancestor-walk
 - [[wiki/concepts/2026-08-04 - one-record-per-key]] - Design pattern: one record per key (HashMap) over pairwise merge

@@ -25,7 +25,7 @@ S0 focuses on creating the foundational D-Bus infrastructure for the presence se
 ### Manager Properties Implemented
 - `ListActivities`: Returns array of current activity object paths
 - `HasActivity`: Boolean indicating if any activities are present
-- `Version`: Interface version string
+- `Version`: Interface version string *(correction 2026-08-06: implemented as `u64`, per ADR-004 and src/dbus/manager.rs)*
 
 ### Activity Type
 - Defined the basic `Activity` D-Bus type structure

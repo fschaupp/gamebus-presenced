@@ -7,7 +7,7 @@ ai-first: true
 
 ## For future Claude
 
-When deduplicating records across a process tree, a single `HashMap<key, pid>` where each key maps to exactly ONE record — the deepest pid, decided by `tree_depth` — is simpler and more robust than pairwise ancestor-walk merging. The pairwise approach had convergence issues with siblings (same-depth processes), arbitrary merge direction, and re-emission on subsequent ticks. The one-record-per-key approach eliminates all of these. Apply this pattern whenever you face a similar deduplication-by-key across a hierarchy — do not reach for pairwise merging.
+When deduplicating records across a process tree, a single `HashMap<key, representative>` where each key maps to exactly ONE record is simpler and more robust than pairwise ancestor-walk merging. (History 2026-08-06: the representative is elected by **evidence class**, with depth only as a within-class tiebreaker — the original "deepest pid wins" rule stated here was superseded by S4f after live failures; see History below.) The pairwise approach had convergence issues with siblings (same-depth processes), arbitrary merge direction, and re-emission on subsequent ticks. The one-record-per-key approach eliminates all of these. Apply this pattern whenever you face a similar deduplication-by-key across a hierarchy — do not reach for pairwise merging.
 
 ## Context
 
@@ -35,6 +35,16 @@ When deduplicating by a shared key across a hierarchy, prefer **one-record-per-k
 
 - When the merge operation is not idempotent (you genuinely need both records' data combined, not just one representative)
 - When there is no natural single key to deduplicate on
+
+## History
+
+- 2026-08-04: written with "deepest pid, `tree_depth` decides" as the
+  tiebreaker (source: [[wiki/decisions/adr-008-appid-records-one-record-per-merge-key]]).
+- 2026-08-06: tiebreaker superseded — depth chose short-lived Steam-runtime
+  helpers over the identified game (Brotato/Amnesia live failures, PLAN.md
+  §S4f). Representative election is now by evidence class; depth breaks ties
+  only within a class. The abstract one-record-per-key pattern, the comparison
+  table, and both "when (not) to apply" lists survive unchanged.
 
 ## Related
 

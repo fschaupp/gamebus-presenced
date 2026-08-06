@@ -3,7 +3,7 @@ type: adr
 date: 2026-08-04
 tags: [decision, adr, gamebus-presenced]
 ai-first: true
-status: Accepted
+status: Accepted (rule 2 superseded 2026-08-06 — see Supersession Note)
 ---
 
 # ADR-008: appid_records — One Record Per Merge Key
@@ -109,3 +109,19 @@ key gets the same deduplication for free.
 - [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]]
 - [[wiki/logs/2026-08-04 - gamebus-presenced S4]]
 - [[wiki/concepts/2026-08-04 - Brainstorm - S4 Enrichment and Packaging]]
+
+## Supersession Note (2026-08-06)
+
+Rule 2 ("the record stores one pid — the deepest; `tree_depth` decides") and
+the Consequences claim "the map is rebuilt each scan pass from scratch" are
+**superseded** by the S4f game-groups design (repo: PLAN.md §S4f,
+`src/group.rs`, commit `18cb92b`, 2026-08-06): representatives are elected by
+evidence class (Helper < Plain < IdentifiedWrapper < GameProcess), depth only
+breaks ties within a class and never dethrones a live representative, and
+group state is persistent (sticky rep, monotone identity, pinned `since`,
+deferred migration). Two live failures killed the depth rule — Brotato's
+record died on a 0.3ms helper; Amnesia's identified record was replaced by
+`i386-linux-gnu-inspect-library`. **Everything else here stands**: merge-key
+derivation, one record per key, no pairwise walks. See
+[[wiki/concepts/2026-08-06 - Learnings Review]] and
+[[wiki/concepts/2026-08-06 - synthesis - record-identity-and-merging]].

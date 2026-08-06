@@ -47,11 +47,28 @@ This rule was promoted from a learnings-review candidate after 4 occurrences (S1
 
 ---
 
+## Section 0.7 - Adversarially Verify Before Handing Over
+
+Nontrivial changes get a fresh-context review whose job is to refute, not
+confirm: reviewers trace failure scenarios through the actual code, and
+skeptics try to kill each finding before it reaches the owner. A fix's
+*mechanism* must be verified — measured, traced, or reproduced — never just
+its intention; the reviewer panel caught a wrong fix for a confirmed bug
+(umask-masked `mkdir` modes) that reading alone had passed. Findings without
+a concrete failure scenario are noise.
+
+This rule was promoted from a learnings-review candidate after 4 occurrences
+on 2026-08-05/06 (S5 branch review, strategic-fit review, adversarial
+find→refute workflow, S4f audit trio) — each produced confirmed,
+consequential findings the author and test suite had both missed.
+
+---
+
 ## Vault Identity
 
 - **Owner:** Florian
 - **Primary purpose:** Technical knowledge base - gamebus-presenced project, software engineering, research, and development work
-- **Last updated:** 2026-08-04
+- **Last updated:** 2026-08-06
 
 ---
 
@@ -73,6 +90,7 @@ This rule was promoted from a learnings-review candidate after 4 occurrences (S1
 | `wiki/agenda/` | Calendar snapshots |
 | `raw/` | Immutable raw sources (articles, transcripts, pdfs, videos) |
 | `Templates/` | Note templates |
+| `Bases/` | Obsidian Bases views (Daily/People/Projects/Tasks) - not notes, not indexed |
 
 ---
 
@@ -89,7 +107,7 @@ This rule was promoted from a learnings-review candidate after 4 occurrences (S1
 > Update this section at the start of each major project or focus period.
 
 **Current top priority:** gamebus-presenced - D-Bus presence daemon for Linux desktop
-**Current project:** gamebus-presenced (S0-S4 complete, all slices done)
+**Current project:** gamebus-presenced (S0-S4f done and verified; S5 setup tool landed 2026-08-06, STAGED — per repo PLAN.md)
 **Key technologies:** D-Bus, Discord IPC, GameMode, Rust, zbus, tokio, rsrpc
 
 ---
@@ -121,7 +139,7 @@ Claude should **ask before saving**:
 | Concept | Descriptive title | `D-Bus Presence Protocol.md` |
 | Project | Proper name | `gamebus-presenced.md` |
 | Source | `YYYY-MM-DD - Source Title.md` | `2026-08-04 - Discord IPC Spec.md` |
-| Decision | `ADR-YYYY-MM-DD - Title.md` | `ADR-2026-08-04 - D-Bus Interface Design.md` |
+| Decision | `adr-NNN-slug.md` (numbered, kebab-case) | `adr-008-appid-records-one-record-per-merge-key.md` |
 | Archive prefix | `_archived_` | `_archived_old-idea.md` |
 
 ---
@@ -179,7 +197,7 @@ Completed:
 
 > Keep this list current. Claude uses it to route context correctly.
 
-- `[[wiki/projects/gamebus-presenced]]` - D-Bus presence daemon for Linux desktop (S0-S4 complete)
+- `[[wiki/projects/gamebus-presenced]]` - D-Bus presence daemon for Linux desktop (S0-S4f + S5 as of 2026-08-06)
 
 ---
 

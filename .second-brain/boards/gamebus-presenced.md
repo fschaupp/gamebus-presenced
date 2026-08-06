@@ -8,7 +8,7 @@ ai-first: true
 
 ## For future Claude
 
-Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S4. All slices complete: S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment), S4b (naming), S4c (packaging), S4d (ancestor-walk), S4e (game identification + Steam scan + appid_records simplification). Final verification: 1 record per game, 61 unit + 6 integration tests pass, clippy clean.
+Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S5 (as of 2026-08-06 — S4f and S5 added by reconcile; see repo PLAN.md). Slices complete: S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment), S4b (naming), S4c (packaging), S4d (ancestor-walk), S4e (game identification + Steam scan + appid_records simplification). Final verification: 1 record per game, 61 unit + 6 integration tests pass, clippy clean.
 
 ## gamebus-presenced Kanban Board
 
@@ -20,7 +20,9 @@ Kanban board for the gamebus-presenced project. Tracks all tasks across slices S
 - [x] ~~🟡 **S4e: Unresolved-wrapper retry tick (15s) for delayed game launches**~~ ✅ 2026-08-04
 - [x] ~~🟡 **S4e: Bounded /proc Steam-appid scan for games without GameMode**~~ ✅ 2026-08-04
 - [x] ~~🟡 **S4e: identify_process filter for utility processes (wineserver, tabtip.exe, etc.)**~~ ✅ 2026-08-04
-- [x] ~~🟡 **S4e: appid_records: HashMap<String, u32> — one record per merge key, tree_depth decides**~~ ✅ 2026-08-04
+- [x] ~~🟡 **S4e: appid_records: HashMap<String, u32> — one record per merge key, tree_depth decides**~~ ✅ 2026-08-04 *(tiebreaker superseded 2026-08-06 by S4f class election)*
+- [x] ~~🟡 **S4f: game groups — class-elected sticky representative, deferred migration, ListGames reseed**~~ ✅ 2026-08-06 (repo: PLAN.md §S4f, commit 18cb92b)
+- [x] ~~🟡 **S5: gamebus-setup TUI — status dashboard + user/system install, STAGED**~~ ✅ 2026-08-06 (repo: PLAN.md §S5, merge e56bbb8)
 - [x] ~~🟡 **S4e: Merge key generalisation — steam:<appid> / lutris:<uuid> / umu:<id>**~~ ✅ 2026-08-04
 - [x] ~~🟡 **S4e: SteamAppId=0 rejected (Heroic/GOG Proton compat)**~~ ✅ 2026-08-04
 - [x] ~~🟡 **S4e: Tracing filter fix — RUST_LOG=debug was ignored by add_directive**~~ ✅ 2026-08-04

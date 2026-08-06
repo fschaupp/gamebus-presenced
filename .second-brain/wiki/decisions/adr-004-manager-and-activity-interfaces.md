@@ -80,8 +80,19 @@ The gamebus-presenced service needs to expose presence information via D-Bus. We
 
 ## Implementation Drift Note (2026-08-04)
 
-This ADR was written during S0 (interface design before any source existed). The S1 implementation drifted in two details:
+This ADR was written during S0 (interface design before any source existed). The S1 implementation drifted in two details (2026-08-06 addendum: two more below):
 - `ListActivities` returns `ao` (object paths), not `Vec<Activity>` — corrected during S0→S1 transition.
 - The property list evolved: the final Activity interface has `Sources`, `Kind`, `AppIds` (`a{ss}`), `Extra` (`a{sv}`), and uses different names for some fields (e.g., `ProcessId` not `Pid`, `Name` not `Title`).
 
 The **decision** (Manager + per-activity objects, signals, read-only properties) stands. See [[wiki/logs/2026-08-04 - gamebus-presenced S1]] for the actual implemented interface.
+
+### Drift addendum (2026-08-06 reconcile)
+
+Two further drifts the 2026-08-04 note missed:
+- Path case: objects live under `/Activity/<id>` (capital), not
+  `/activity/<id>`.
+- Signal payloads: `ActivityAdded`/`ActivityRemoved` both carry the **object
+  path** (`o`), not `Activity`/id-string as written above
+  (src/dbus/manager.rs).
+The `Version: u64` here is CORRECT — the S0 dev log's "version string" is the
+wrong side (src/dbus/manager.rs `pub fn version(&self) -> u64`).

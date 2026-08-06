@@ -52,3 +52,10 @@ The gamebus-presenced service needs a well-defined D-Bus identity that:
 - [[D-Bus]]
 - [[gamebus-presenced]]
 - [[ADR-001 zbus v4 tokio runtime]]
+
+## Drift Note (2026-08-06)
+
+The activity path element is implemented with a capital: `/org/gamebus/
+Presence/v1/Activity/<id>` (src/dbus/types.rs, `ACTIVITY_PATH_PREFIX`), not
+the lowercase `activity/<id>` written above. Everything else here — bus name,
+dot-`.v1` spelling, versioning strategy — matches the implementation.

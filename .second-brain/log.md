@@ -34,7 +34,8 @@ Entries are append-only. Never modify existing entries.
 
 ## Recent Logs
 
-- [[Logs/2026-08-04.md]] - Today's log
+- [[Logs/2026-08-06.md]] - Most recent log (as of 2026-08-06)
+- [[Logs/2026-08-04.md]] - 2026-08-04
 
 ---
 

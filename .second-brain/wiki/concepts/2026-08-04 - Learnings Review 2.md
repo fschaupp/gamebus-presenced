@@ -10,6 +10,12 @@ ai-first: true
 
 Second learnings review covering 2026-08-04 (the vault's first day, now with S4 complete). All 25 vault notes were read: 8 ADRs, 5 dev logs (S0-S4), 5 concept notes, 1 project note, 1 daily note, 1 research note, 1 brainstorm, 1 entity stub, 1 board, 1 ops log. The S4 session added 2 new active learnings (one-record-per-key, detectable.json path-suffix), confirmed the real-client-testing promotion candidate (4th occurrence via live Amnesia/RE2 verification), and added 1 new supersession (pairwise ancestor-walk → appid_records HashMap). Vault is still one day old — the stale criterion (6+ months) cannot fire.
 
+> **Superseded notice (2026-08-06):** active learning #8 and Top-5 item #2
+> below assert "`tree_depth` decides / deepest pid" — that tiebreaker died on
+> 2026-08-06 (S4f class election; see
+> [[wiki/concepts/2026-08-06 - Learnings Review]]). The one-record-per-key
+> pattern itself still holds.
+
 ## Active Learnings (still applies)
 
 ### 1. Verify live state before trusting docs or assumptions
@@ -26,7 +32,7 @@ S1 used `gamemoderun sleep 30` + `busctl` acceptance. S2 used a genuine `discord
 
 ### 4. Let the test environment's reality shape assertions, never fight it
 `libgamemodeauto` is preloaded globally — `HasActivity == false` is never assertable. `SO_PEERCRED` yields the test process's own pid (used deliberately for the same-pid correlator test). gamemoded's dead-client reaper takes 4-18s — tests use explicit `UnregisterGameByPID` for determinism. Discord's proxy rejects test client_ids — tests skip when a real Discord is running. In S4: daemon-already-running causes `Connection(NameTaken)` — tests must not assume a clean bus.
-- Sources: S1/S2/S4 dev logs, S4 test isolation issues (#9-#12, #19)
+- Sources: S1/S2/S4 dev logs, S4 test isolation issues (#9-#12)
 
 ### 5. Index identities at arrival time, not at publish time
 Found via a failing correlator test in S3 (ADR-007 decision 5): after `pid_<pid>` absorbs `discord_<pid>`, the absorbed source still references its own scoped id in removal events. Indexing only published ids misses the gamemode-first order. In S4, this principle extended to `appid_records`: the merge key is indexed per-scan, and the scan skips already-indexed pids — no re-emission.
@@ -118,4 +124,14 @@ Appeared in the S4 dev log and ADR-008. Strong but young — needs one more recu
 - [[wiki/decisions/adr-006-rsrpc-crate-dependency]] — reuse battle-tested code
 - [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]] — correlator merge rules (partially superseded by ADR-008)
 - [[wiki/decisions/adr-008-appid-records-one-record-per-merge-key]] — one record per merge key
-- [[wiki/logs/2026-08-04 - gamebus-presenced S4]] — S4 dev log (11 gaps, 27 issues)
+- [[wiki/logs/2026-08-04 - gamebus-presenced S4]] — S4 dev log (11 gaps, 12 issues)
+
+## History
+
+- 2026-08-06 reconcile: corrected two miscitations against the S4 dev log
+  (issues run #1-#12, not #19; "27 issues" never existed). Corrected #7's
+  claim that the `find_related_pid`/`find_all_related` tests "were removed
+  with visible rationale in the dev log" — no such rationale exists in
+  [[wiki/logs/2026-08-04 - gamebus-presenced S4]]; per `git log -S`, those
+  tests were added and replaced within the single commit `648d20f` and never
+  survived a commit on their own.

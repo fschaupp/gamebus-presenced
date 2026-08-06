@@ -2,7 +2,7 @@
 date: 2026-08-04
 type: project
 status: in-progress
-updated: 2026-08-04
+updated: 2026-08-06
 tags: [project, rust, d-bus, discord, gamemode]
 related-people: []
 related-projects: []
@@ -14,7 +14,7 @@ ai-first: true
 
 ## For future Claude
 
-`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), and S4d (ancestor-walk join for wrapper-tree dedup) are now COMPLETE. This note tracks the project's status, decisions, and recent activity.
+`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), S4d (ancestor-walk join), S4e (game identification + scan), and S4f (game groups, 2026-08-06) are COMPLETE; S5 (gamebus-setup TUI) landed 2026-08-06, STAGED. Authoritative detail for S4f/S5 is the repo (PLAN.md) until vault records exist. This note tracks the project's status, decisions, and recent activity.
 
 ## Overview
 
@@ -44,7 +44,7 @@ Steam probe → registry.vdf + /proc environ
 
 ## Status
 
-**S0, S1, S2, S3, S4a, S4b, S4c, and S4d implementation completed.**
+**S0 through S4f implementation completed; S5 landed (STAGED). (Corrected 2026-08-06 — this line had stopped at S4d while the note's own S4e section below said done.)**
 
 - Repo created: 2026-08-03
 - Design doc: `docs/design/gamebus-presence.md` (complete)
@@ -53,7 +53,7 @@ Steam probe → registry.vdf + /proc environ
 - S1: GameMode source implemented and verified end-to-end on session bus (2026-08-04)
 - S2: Discord IPC listener implemented and verified with a genuine discord-rich-presence client (2026-08-04)
 - S3: proxy + correlator + restart cache implemented and verified (byte-identity vs fixture, same-pid join, SIGKILL/respawn re-adoption) (2026-08-04)
-- S4a: Steam enrichment via Enricher middleware (reactive /proc/<pid>/environ probe, tied to last non-Steam source) (2026-08-04)
+- S4a: Steam enrichment via Enricher middleware (/proc/<pid>/environ probe; reactive-only until S4e added the 15s bounded scan) (2026-08-04)
 - S4b: naming enrichment via detectable.json (enrichment-only fallback, never overrides more authoritative source) (2026-08-04)
 - S4c: packaging (gamebus-presence CLI with monitor + fetch-detectable, systemd user unit, D-Bus activation) (2026-08-04)
 - S4d: ancestor-walk join for wrapper-tree dedup (ppid-chain walk, descendant absorbs ancestor) (2026-08-04)
@@ -147,6 +147,12 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 
 ## Recent Activity
 
+- 2026-08-06: S4f (game groups: class-elected sticky representative, deferred
+  migration, ListGames reseed — fixes the Brotato/Amnesia record losses) and
+  S5 (gamebus-setup TUI, STAGED) landed on master (merge e56bbb8, fix
+  18cb92b). Vault dev logs/ADRs for both are pending; see repo PLAN.md and
+  [[wiki/concepts/2026-08-06 - Learnings Review]].
+
 - 2026-08-04: S4d implementation completed - ancestor-walk join for wrapper-tree dedup. Enricher tracks `{pid: steam_appid}`, `is_ancestor()` ppid-chain walk (bounded to 10 hops), descendant absorbs ancestor. Three bugs found during live Brotato testing: merge direction reversed, cache-adopted records couldn't be removed (correlator `drop_partial` fix), `SteamAppId=default` false positive (numeric-only appids). Also fixed: naming precedence (Steam's detectable.json-enriched name beats GameMode's executable stem). See [[wiki/logs/2026-08-04 - gamebus-presenced S4]].
 - 2026-08-04: Dead-code cleanup (owner-confirmed): `Manager::remove_by_source` (superseded by the correlator) and the unused S0 error variants `NameAcquisition`/`Config`/`Internal` removed; `cargo clippy --all-targets` is now fully clean, zero warnings. The test-removal exchange produced the workflow preference [[wiki/concepts/test-deletion-visibility]].
 - 2026-08-04: S3 implementation completed - proxy (byte-identical forwarding, tap, upstream-loss close), correlator (`pid_<pid>` absorbs `discord_<pid>`, degrade-in-place, die-with-last-source, exact-pid join), restart cache (pid + start-time, re-adopted before sources spawn). 31 unit + 5 integration tests green. See [[wiki/logs/2026-08-04 - gamebus-presenced S3]] and [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]].
@@ -154,9 +160,9 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 - 2026-08-04: S2 implementation completed - standalone Discord IPC listener. `discord-ipc-0` bound with stale-socket handling, handshake/READY, lock-step echo, `SET_ACTIVITY` via pinned `rsrpc` crate payload model, `SO_PEERCRED` pid, `discord_<pid>` objects, mutable `ActivityInterface` with `PropertiesChanged`. See [[wiki/logs/2026-08-04 - gamebus-presenced S2]] and [[wiki/decisions/adr-006-rsrpc-crate-dependency]].
 - 2026-08-04: S1 implementation completed - GameMode source feeding the D-Bus surface. Watcher with `NameOwnerChanged` availability tracking, per-activity objects at `.../Activity/pid_<pid>`, `ActivityAdded`/`ActivityRemoved` signals, `HasActivity` change emission, `ListActivities` as `ao`. Two live discoveries recorded in [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]]. Verified by integration test + busctl acceptance. See [[wiki/logs/2026-08-04 - gamebus-presenced S1]] for details.
 - 2026-08-04: S0 implementation completed - D-Bus interface foundation (`org.gamebus.Presence.v1.Manager` with `ListActivities`, `HasActivity`, `Version` properties; `Activity` type; zbus v4 bindings; service verified on session bus). See [[wiki/logs/2026-08-04 - gamebus-presenced S0]] for details.
-- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]], [[wiki/logs/2026-08-04 - gamebus-presenced S3]]
+- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]], [[wiki/logs/2026-08-04 - gamebus-presenced S3]], [[wiki/logs/2026-08-04 - gamebus-presenced S4]] (S4f/S5 logs pending — repo PLAN.md is authoritative)
 - Kanban board: [[boards/gamebus-presenced]]
-- ADRs: [[wiki/decisions/adr-001-zbus-v4-tokio-runtime]], [[wiki/decisions/adr-002-simplified-activity-type]], [[wiki/decisions/adr-003-d-bus-service-naming]], [[wiki/decisions/adr-004-manager-and-activity-interfaces]], [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]], [[wiki/decisions/adr-006-rsrpc-crate-dependency]], [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]]
+- ADRs: [[wiki/decisions/adr-001-zbus-v4-tokio-runtime]], [[wiki/decisions/adr-002-simplified-activity-type]], [[wiki/decisions/adr-003-d-bus-service-naming]], [[wiki/decisions/adr-004-manager-and-activity-interfaces]], [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]], [[wiki/decisions/adr-006-rsrpc-crate-dependency]], [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]], [[wiki/decisions/adr-008-appid-records-one-record-per-merge-key]]
 
 ## Dependencies
 

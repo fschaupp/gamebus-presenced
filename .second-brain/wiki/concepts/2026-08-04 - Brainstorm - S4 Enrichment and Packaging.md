@@ -123,3 +123,14 @@ The Enricher processes events synchronously in the main event loop (between `rx.
 - [[wiki/concepts/2026-08-04 - Learnings Review]] — learnings review (verify-live-state most reinforced)
 - `docs/design/gamebus-presence.md` — design doc (S4 slice description)
 - `PLAN.md` — roadmap (S4 planned)
+
+## Evolution note (2026-08-06)
+
+Two constraints above were superseded by measured reality the same day and
+after: the "reactive only — no polling loop" Steam constraint gained a 15s
+bounded `/proc` scan when Resident Evil 2 (launched without gamemoderun)
+proved the gap real (S4e, [[wiki/concepts/2026-08-04 - Learnings Review 2]]
+supersession b); and the `$PREFIX/share` install path became an
+`XDG_DATA_DIRS` walk with `/usr/local` as the hand-install prefix (S5,
+[[wiki/concepts/2026-08-06 - Learnings Review]] N6). The remaining decisions
+(Enricher middleware, enrichment-only naming, data-file shipping) stand.

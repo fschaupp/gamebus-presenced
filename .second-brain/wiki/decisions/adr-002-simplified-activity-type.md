@@ -59,3 +59,10 @@ pub struct Activity {
 - [[zvariant]]
 - [[zbus]]
 - [[gamebus-presenced]]
+
+## Drift Note (2026-08-06)
+
+The illustrative field list above is pre-S1; the real property set (`Sources`,
+`Kind`, `Name`, `AppIds`, `Extra`, `ProcessId`, …) is recorded in
+[[wiki/decisions/adr-004-manager-and-activity-interfaces]]'s drift note. The
+decision itself — owned data, no lifetimes — stands.
