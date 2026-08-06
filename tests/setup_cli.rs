@@ -52,14 +52,23 @@ impl Drop for TempHome {
 
 /// Run the tool with a controlled environment.
 fn run(home: &TempHome, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gamebus-setup"))
-        .args(args)
+    run_env(home, args, &[])
+}
+
+/// Same, with extra environment variables (S9b: API/database overrides).
+fn run_env(home: &TempHome, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gamebus-setup"));
+    cmd.args(args)
         .env("HOME", home.path())
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CACHE_HOME")
-        .output()
-        .expect("failed to run gamebus-setup")
+        .env_remove("GAMEBUS_UMU_DB")
+        .env_remove("GAMEBUS_UMU_API");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("failed to run gamebus-setup")
 }
 
 fn stdout(out: &Output) -> String {
@@ -254,4 +263,125 @@ fn umu_misses_lists_and_exports_the_stash() {
         text.contains("Control,egs,Calluna,umu-FIXME"),
         "export row malformed:\n{text}"
     );
+}
+
+/// A stash covering all three S9b verification outcomes, and the fixture
+/// database that produces them — no network anywhere near these tests
+/// (`GAMEBUS_UMU_API` points at a closed port; a query would fail loudly).
+const S9B_STASH: &str = r#"{
+    "gog:1207600000":{"title":"Already Here","store":"gog","codename":"1207600000",
+        "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+        "first_seen":"2026-08-06","last_seen":"2026-08-07"},
+    "egs:Bee":{"title":"Borderlands 3","store":"egs","codename":"Bee",
+        "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+        "first_seen":"2026-08-06","last_seen":"2026-08-07"},
+    "lutris:zzz":{"title":"Zzz Fixture Quest","store":"none",
+        "umu_id":"umu-default","title_source":"lutris-wrapper","confidence":"medium",
+        "first_seen":"2026-08-06","last_seen":"2026-08-07"}}"#;
+
+const S9B_DB: &str = concat!(
+    "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+    "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+    "Already Here,gog,1207600000,umu-111x,,,\n",
+);
+
+const CLOSED_PORT_API: (&str, &str) = ("GAMEBUS_UMU_API", "http://127.0.0.1:1");
+
+fn write_s9b_fixtures(home: &TempHome) -> PathBuf {
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(stash_dir.join("umu-misses.json"), S9B_STASH).unwrap();
+    let db = home.path().join("umu-database.csv");
+    std::fs::write(&db, S9B_DB).unwrap();
+    db
+}
+
+#[test]
+fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
+    let home = TempHome::new("umu-verify");
+    let db = write_s9b_fixtures(&home);
+
+    let out = run_env(
+        &home,
+        &["umu-misses", "--verify", "--db", db.to_str().unwrap()],
+        &[CLOSED_PORT_API],
+    );
+    assert!(out.status.success(), "verify failed: {out:?}");
+    let text = stdout(&out);
+    // Launcher-side miss: store+codename found in the database.
+    assert!(
+        text.contains("already in the database as umu-111x"),
+        "{text}"
+    );
+    // Cross-store: the title exists under another store's entry.
+    assert!(text.contains("umu-397540"), "{text}");
+    // Confirmed missing → a collision-checked title-slug draft.
+    assert!(text.contains("drafted umu-zzzfixturequest"), "{text}");
+
+    // The verdicts persisted into the stash.
+    let stash = std::fs::read_to_string(
+        home.path()
+            .join(".local/share/gamebus-presenced/umu-misses.json"),
+    )
+    .unwrap();
+    for expected in [
+        "already-in-database",
+        "cross-store-id",
+        "confirmed-missing",
+        "umu-zzzfixturequest",
+        "title-slug",
+    ] {
+        assert!(
+            stash.contains(expected),
+            "stash missing {expected}:\n{stash}"
+        );
+    }
+
+    // Export: the launcher-side miss is held back, the other two carry the
+    // verified/drafted ids instead of umu-FIXME.
+    let export = run_env(&home, &["umu-misses", "--export"], &[]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(text.contains("Borderlands 3,egs,Bee,umu-397540"), "{text}");
+    assert!(
+        text.contains("Zzz Fixture Quest,none,none,umu-zzzfixturequest"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Already Here"),
+        "held-back entry leaked:\n{text}"
+    );
+    let errtext = String::from_utf8_lossy(&export.stderr);
+    assert!(errtext.contains("held back"), "{errtext}");
+
+    // The Markdown export: a slim merge request with the CSV fenced in.
+    let md = run_env(&home, &["umu-misses", "--export-md"], &[]);
+    assert!(md.status.success());
+    let text = stdout(&md);
+    assert!(text.contains("# Add 2 games"), "{text}");
+    assert!(text.contains("```csv"), "{text}");
+    assert!(text.contains("## Evidence"), "{text}");
+    assert!(text.contains("## Checklist"), "{text}");
+    assert!(text.contains("collision-checked"), "{text}");
+}
+
+#[test]
+fn umu_misses_verify_without_any_database_fails_and_touches_nothing() {
+    let home = TempHome::new("umu-verify-offline");
+    write_s9b_fixtures(&home); // the --db flag is NOT passed, so only the API remains
+    let stash_path = home
+        .path()
+        .join(".local/share/gamebus-presenced/umu-misses.json");
+    let before = std::fs::read(&stash_path).unwrap();
+
+    let out = run_env(&home, &["umu-misses", "--verify"], &[CLOSED_PORT_API]);
+    assert!(
+        !out.status.success(),
+        "verify must fail with nothing to verify against"
+    );
+    let errtext = String::from_utf8_lossy(&out.stderr);
+    assert!(errtext.contains("Verify failed"), "{errtext}");
+
+    // Honest failure means an untouched stash — byte for byte.
+    assert_eq!(before, std::fs::read(&stash_path).unwrap());
 }

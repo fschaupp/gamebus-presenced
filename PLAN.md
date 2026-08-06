@@ -378,12 +378,50 @@ exe. Resolutions only upgrade, never downgrade; writes are atomic; the daemon
 stays network-free.
 
 `gamebus-setup umu-misses` lists the stash for review;
-`--export` emits submission-shaped CSV matching the database's own header,
-with `UMU_ID` left as `umu-FIXME` on purpose — the database rule (checked
-against the local checkout at /media/Data/Projekte/umu-database) is
-`umu-<Steam appid>` whenever the game also exists on Steam, which only the
-reviewer can confirm. Low-confidence and unresolved entries are listed but
-excluded from export. A setup-TUI review pane is the natural next extension.
+`--export` emits submission-shaped CSV matching the database's own header.
+Low-confidence and unresolved entries are listed but excluded from export.
+A setup-TUI review pane is the natural next extension.
+
+### S9b — verify, draft, and export umu-database submissions (2026-08-07)
+
+The stash becomes a real contribution pipeline, all of it in `gamebus-setup`
+(the daemon stays network-free and only ever writes the stash):
+
+- **`--verify`** checks every miss against the database, local copy first —
+  `--db <file>` or `GAMEBUS_UMU_DB` (the git checkout's CSV or the API's
+  JSON dump both parse), else the `--fetch` cache — then confirms whatever
+  the local copy did not settle against the public API
+  (https://umu.openwinecomponents.org/umu_api.php, overridable via
+  `GAMEBUS_UMU_API` for tests and self-hosting). Three verdicts, persisted
+  into the stash: `already-in-database` (store+codename found — the launcher
+  missed, not the database), `cross-store-id` (the title exists under
+  another store; the id to reuse), `confirmed-missing`. No local copy *and*
+  no API is an honest error with the stash untouched.
+- **Id drafting** for confirmed-missing entries, per the database's own
+  rules, strongest basis first: the title's Steam appid from
+  detectable.json's `third_party_skus` → `umu-<appid>`; else a codename
+  that carries at least one letter → `umu-<codename>` (Proton parses a
+  numeric second part as a SteamAppId, so pure-numeric GOG codenames never
+  become ids); else the standalone slug `umu-<lowercased-title>`. Every
+  draft is collision-checked against the full database — a mandatory step,
+  which is why no local database means no drafts: a same-title collision IS
+  the cross-store id (used as such), a different-title collision discards
+  the draft and records the conflict.
+- **`--fetch`** refreshes the cached full dump
+  (`$XDG_CACHE_HOME/gamebus-presenced/umu-database.json`) — one request to
+  the bare endpoint, validated by parsing before it replaces the cache,
+  never implicit.
+- **`--export`** now prefills verified/drafted ids (the NOTE column says
+  which basis and when it was collision-checked); `umu-FIXME` remains only
+  where nothing could be drafted safely. Launcher-side misses and
+  possibly-already-submitted entries are held back and listed with reasons.
+- **`--export-md [file]`** writes a slim merge request: title line, one
+  paragraph of provenance, the CSV rows in a fenced block, a per-entry
+  evidence list, and a checklist mirroring the README's rules.
+- **`--check-prs`** (opt-in, best-effort) scans open upstream merge requests
+  via the unauthenticated GitHub API for rows matching our entries —
+  matched entries are annotated and held back from exports. Failures are
+  reported and non-fatal.
 
 ## Open decisions
 - **MPRIS as a source** — the *naming* half landed as S6 (2026-08-06): player
