@@ -1,9 +1,11 @@
 # gamebus-presenced — one bus for "what is this machine playing"
 
-Status: **in implementation.** S0 (D-Bus surface), S1 (GameMode source),
-S2 (Discord IPC listener) and S3 (proxy + correlator + restart cache) landed
-2026-08-04 and are verified on the session
-bus; S3-S4 follow the design below.
+Status: **working.** S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC
+listener), S3 (proxy + correlator + restart cache) and S4 (Steam enrichment,
+naming, packaging) landed 2026-08-04 and are verified on the session bus; S5
+(the `gamebus-setup` install and status tool) landed 2026-08-06 and is STAGED —
+its user-level install is exercised, its system/pkexec path is not. See
+[`PLAN.md`](../../PLAN.md) for what each slice covers and how it was verified.
 
 ## The problem
 
@@ -210,7 +212,10 @@ Design rules worth stating so they do not erode:
 
 - Publishing presence back to Discord. That direction is well served and is the
   opposite of what this daemon is for.
-- Being a Discord client mod, or shipping UI of any kind.
+- Being a Discord client mod, or shipping UI of any kind *in the daemon*. The
+  `gamebus-setup` install-and-status tool is tooling around it, not a product
+  surface: it is not a resident process, publishes nothing on the bus, and is
+  only ever a client of it. Consumers still see nothing but the interface.
 - Windows. The design is unix-socket and D-Bus shaped throughout.
 - Guessing. A source that cannot be correlated says so via `Sources` and a
   missing `ProcessId`; it does not fabricate a join.
@@ -227,7 +232,8 @@ can replace arRPC outright for Vesktop users; an MPRIS source so "watching" and
 | **S1** | GameMode source feeding the surface: `GameRegistered`/`GameUnregistered`, `ListGames` seed, per-activity objects. **Done 2026-08-04.** | Yes — pid/executable presence, zero Discord involvement. This alone is what the epaper pet needs. |
 | **S2** | Discord IPC listener with **no** upstream (the Discord-not-running case): handshake, frame codec, `SET_ACTIVITY` → activity objects, `SO_PEERCRED` pid. Payload model from the pinned [rsRPC] crate. **Done 2026-08-04.** | Yes — full rich presence on a machine without a Discord client. |
 | **S3** | Transparent proxy to a running Discord, plus the correlator: pid join across sources, merge and split rules, and the pid+start-time runtime cache that survives a restart. **Done 2026-08-04.** | Yes — works alongside a real Discord client. |
-| **S4** | Steam appid enrichment, `detectable.json` naming, a `gamebus-presence monitor` CLI, systemd user unit + D-Bus activation file. | Polish. |
+| **S4** | Steam appid enrichment, `detectable.json` naming, a `gamebus-presence monitor` CLI, systemd user unit + D-Bus activation file. Extended in S4d/S4e with the umu/Proton wrapper-tree join and game identification. **Done 2026-08-04.** | Polish. |
+| **S5** | `gamebus-setup`: what is working, what is not, and the remedy for each — plus the install itself, for a user-level (`~/.local`) or system (`/usr/local`) target. **STAGED 2026-08-06.** | Yes for a user-level install; the system target is unexercised. |
 
 S1 and S2 are independent; either can land first.
 
@@ -258,7 +264,9 @@ learn from, not to vendor. [rsRPC] is MIT and is the reasonable thing to build
 the Discord listener on, or to lift the frame handling from.
 
 Dependencies stay small: `zbus`, `tokio`, `serde`/`serde_json`. Nothing that
-drags a browser engine or an HTTP stack into a session daemon.
+drags a browser engine or an HTTP stack into a session daemon. The setup tool's
+`ratatui` sits behind a default-on `setup` feature and is linked into no binary
+but its own; `cargo build --no-default-features` is the daemon-only build.
 
 ## Relationship to epaper_rs
 

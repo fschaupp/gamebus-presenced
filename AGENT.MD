@@ -21,8 +21,11 @@ Rich Presence has the title and chapter text) and correlating them by pid.
 
 ## Status
 
-**Design draft. No code yet.** `PLAN.md` holds the slice roadmap. Nothing has
-been implemented, nothing has been verified against a real bus.
+**Working.** S0-S4e are verified against a real bus; S5 is STAGED (see
+`PLAN.md` for exactly what is and is not proven). Between them they cover: D-Bus surface, GameMode/Discord/Steam sources,
+correlator, restart cache, naming enrichment, and the `gamebus-setup` install
+and status tool. `PLAN.md` holds the slice roadmap and what is verified against
+a real bus.
 
 ## Working rules
 
@@ -54,7 +57,10 @@ after recurring three or more times. They apply here unchanged.
 - **Branches**: feature branches, never commit directly to `main`.
 - **Licence**: MIT OR Apache-2.0 (proposed, not yet applied).
 - **Dependencies stay small.** `zbus`, `tokio`, `serde`. Nothing that drags an
-  HTTP stack or a browser engine into a session daemon. Note that
+  HTTP stack or a browser engine into a session daemon. This constrains the
+  *daemon*: `gamebus-setup` adds `ratatui` behind a default-on `setup` feature
+  and is never linked into `gamebus-presenced`; `--no-default-features` builds
+  the daemon without it. Note that
   [pog5/rsrpc](https://github.com/pog5/rsrpc) is **GPLv3** — learn from it, do
   not vendor it. [rsRPC](https://github.com/SpikeHD/rsRPC) is MIT and is the
   reasonable base for the Discord listener.
@@ -64,7 +70,11 @@ after recurring three or more times. They apply here unchanged.
 Once code exists, the gates are:
 
 ```bash
-cargo test                  # pure: frame codec, correlator, merge rules
+cargo test                  # pure functions, plus integration tests that run
+                            # the daemon on a private session bus and a private
+                            # XDG_RUNTIME_DIR (tests/common/mod.rs) — safe to
+                            # run with a real gamebus-presenced installed and
+                            # a real Discord client connected
 cargo clippy -- -D warnings
 busctl --user introspect org.gamebus.Presence.v1 /org/gamebus/Presence/v1   # live surface
 gamemoderun sleep 30        # registers a real game with the real gamemoded

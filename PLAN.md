@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0, S1, S2, S3, S4a, S4b, S4c, S4d, and S4e done. All slices complete.
+## Status: S0-S4e done and verified. S5 landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -156,6 +156,66 @@ Steam — `steam:<appid>` / `lutris:<uuid>` / `umu:<id>`. (7)
 re-adopted stale Steam-only records. (10) Wrapper executables shown as game
 names. (11) Discord integration tests fail when real Discord is running.
 
+### S5 — Setup and status tool (STAGED 2026-08-06)
+
+`gamebus-setup`, a third binary: a terminal tool that reports what is working,
+installs the daemon, and fixes what it finds. S4c shipped the two unit files but
+nothing that installed them, and several failure modes were invisible — a
+`detectable.json` found only via the compile-time `OUT_DIR` path (so a copied
+binary silently loses naming), and a `discord-ipc-0` already owned by another
+process, where `bind()` warns once at startup and then returns `Ok(None)` — no
+`SourceLost`, nothing on the bus, so anyone who was not reading the log at the
+moment it started sees a daemon that simply never reports Discord.
+
+Structure: `probe()` does the I/O and returns plain data; `rows()`/`overall()`
+are pure functions from that data to what is displayed, including the remedy
+each problem offers, so all the judgement unit-tests without a bus, a terminal
+or root. Actions are likewise planned as data (`plan()` is pure) before
+`execute()` runs them, which makes `gamebus-setup plan` a real dry run and lets
+the confirm screen list the exact writes.
+
+Decisions: unit files are rendered from `const` templates pinned to
+`data/*.service` by a golden test — the D-Bus activation file's `Exec=` takes no
+specifiers, so a user-level install *must* generate both. systemd facts come
+from the `systemctl` subprocess (the same command the README tells the user to
+run, and `--global enable` has no D-Bus equivalent); bus facts come from zbus.
+A system install re-executes `apply --privileged-only` under `pkexec`, so
+ratatui never runs as root; `layout()` for the system target reads no
+environment, because `pkexec` scrubs it. Escalation is offered for the *system*
+target only — a user action escalated the same way would resolve `$HOME` to
+`/root` in the child and install where nobody agreed to.
+
+ratatui sits behind a default-on `setup` feature; `--no-default-features`
+builds the daemon and CLI alone. The zbus client proxies moved to
+`src/client.rs`, shared by `gamebus-presence` and `gamebus-setup` via `#[path]`,
+so the property reads have one implementation and two renderers.
+
+The system prefix is `/usr/local`, not `/usr`: `/usr` is what a distribution
+package owns, and a hand-run installer writing there collides with any future
+package and fails outright on image-based distributions. This needed one change
+in the daemon — `find_detectable_json()` now walks `XDG_DATA_DIRS` (default
+`/usr/local/share:/usr/share`) instead of hardcoding `/usr/share`, which is
+strictly backwards compatible since `/usr/share` remains in the default.
+
+**STAGED — what is proven and what is not.** Proven: 48 pure unit tests
+(path layouts, the golden test pinning the rendered units to `data/*.service`,
+the `systemctl` output parsers, the whole `rows()`/`overall()` judgement layer,
+plan step lists, the atomic replace); 8 CLI integration tests (a dry run writes
+nothing, the system plan names `/usr/local` and says it needs root, `apply`
+refuses without `--confirm` and refuses a privileged target rather than failing
+halfway); a full install → status → uninstall round trip into a throwaway
+`HOME`, including the real `systemctl --user daemon-reload` and D-Bus
+`ReloadConfig`; the status probe against the real session bus with a real
+`gamemoded` and a real `RegisterGameByPID`; and the TUI driven under a pty
+(status view, confirm modal listing the exact writes, cancel, monitor view
+showing a real activity).
+
+Not yet proven, and the reason this is STAGED rather than DONE: an install into
+a real `~/.local` with the daemon starting from the installed unit; D-Bus
+activation starting it on demand; autostart surviving a logout; the `--target
+system` path and its `pkexec` escalation, which has never run; and the
+`ETXTBSY` reinstall-over-a-running-binary case against a real running daemon.
+
 ## Open decisions
 - **MPRIS as a source** — deliberately deferred. It is already a good standard
   with its own consumers, so wrapping it mostly duplicates. Move into S4 if
@@ -167,5 +227,6 @@ names. (11) Discord integration tests fail when real Discord is running.
 
 ## Not doing
 
-Publishing presence *to* Discord; being a Discord client mod; any UI; Windows.
+Publishing presence *to* Discord; being a Discord client mod; any UI in the
+daemon (`gamebus-setup` is tooling around it, not a product surface); Windows.
 See the non-goals section of the design doc for why.
