@@ -1,65 +1,25 @@
-//! Integration test for the S3 transparent proxy mode.
+//! Integration test for the S3 transparent proxy.
 //!
-//! A fixture "real Discord" (an in-process unix socket server that records
-//! every byte) is bound at `discord-ipc-1` inside a temporary
-//! `XDG_RUNTIME_DIR`. The daemon under test is spawned with that runtime dir,
-//! binds `discord-ipc-0`, and must proxy a raw IPC client through to the
-//! fixture:
+//! A fixture "upstream Discord" (which records every byte) is bound at
+//! `discord-ipc-1` inside the private runtime directory; the daemon binds
+//! `discord-ipc-0` there and must proxy a raw IPC client through to it
+//! byte-identically.
 //!
-//! - bytes the client sends arrive at the fixture unchanged,
-//! - bytes the fixture sends arrive at the client unchanged,
-//! - SET_ACTIVITY is still tapped onto the session bus,
-//! - when the fixture dies, the client connection is closed and a reconnect
-//!   gets the standalone (S2) behaviour.
-//!
-//! Skips gracefully when there is no session bus.
+//! Private session bus throughout, so the daemon under test always gets the
+//! name even when a real gamebus-presenced is running on the developer's
+//! session.
 
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
-use zbus::zvariant::OwnedObjectPath;
-use zbus::{fdo, proxy, Connection};
 
-const GAMEBUS_NAME: &str = "org.gamebus.Presence.v1";
+mod common;
+use common::{ActivityPropsProxy, ManagerProxy};
+
 const WAIT: Duration = Duration::from_secs(10);
 const CLIENT_ID: &str = "fixture-client-7";
-
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Manager",
-    default_service = "org.gamebus.Presence.v1",
-    default_path = "/org/gamebus/Presence/v1"
-)]
-trait Manager {
-    fn list_activities(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
-}
-
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Activity",
-    default_service = "org.gamebus.Presence.v1",
-    assume_defaults = false
-)]
-trait ActivityProps {
-    #[zbus(property)]
-    fn name(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn details(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn process_id(&self) -> zbus::Result<u32>;
-    #[zbus(property)]
-    fn app_ids(&self) -> zbus::Result<std::collections::HashMap<String, String>>;
-}
-
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 /// The fixture "Discord": records raw bytes received and answers each frame
 /// with a deterministic response (canned READY for handshakes, echo for
@@ -171,71 +131,32 @@ fn frame(opcode: u32, payload: &str) -> Vec<u8> {
     bytes
 }
 
-async fn wait_for_name(conn: &Connection, name: &str, timeout: Duration) -> bool {
-    let fdo = match fdo::DBusProxy::new(conn).await {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let name: zbus::names::BusName = match name.try_into() {
-        Ok(n) => n,
-        Err(_) => return false,
-    };
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if fdo.name_has_owner(name.clone()).await.unwrap_or(false) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn proxy_forwards_verbatim_and_taps_activity() {
-    let conn = match Connection::session().await {
+    let Some(env) = common::TestEnv::new("proxy") else {
+        eprintln!("SKIP: could not start a private session bus (is dbus-daemon installed?)");
+        return;
+    };
+    let conn = match env.connect().await {
         Ok(conn) => conn,
         Err(e) => {
-            eprintln!("SKIP: no session bus: {e}");
+            eprintln!("SKIP: private bus unusable: {e}");
             return;
         }
     };
 
-    // Isolated runtime dir: our own discord-ipc-0/1, no interference with the
-    // real session's sockets.
-    let dir = std::env::temp_dir().join(format!("gamebus-proxy-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
+    let dir = env.runtime_dir.clone();
     let fixture = Fixture::start(dir.clone()).await;
 
-    let daemon_log = std::env::temp_dir().join("gamebus-presenced-test-proxy.log");
-    let daemon_log_out = std::fs::File::create(&daemon_log).unwrap();
-    let daemon_log_err = daemon_log_out.try_clone().unwrap();
-    let daemon = Command::new(env!("CARGO_BIN_EXE_gamebus-presenced"))
-        .stdout(Stdio::from(daemon_log_out))
-        .stderr(Stdio::from(daemon_log_err))
-        .env("RUST_LOG", "debug")
-        .env("XDG_RUNTIME_DIR", &dir)
-        // The bus address is explicit on this machine, so overriding
-        // XDG_RUNTIME_DIR does not cut the daemon off the session bus.
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
-        )
-        .spawn()
-        .expect("failed to spawn gamebus-presenced");
-    let mut daemon = ChildGuard(daemon);
+    let mut daemon = env.spawn_daemon("gamebus-presenced-test-proxy.log");
+    common::expect_own_daemon(&conn, daemon.pid(), "proxy").await;
 
+    let sock = env.socket_path();
     assert!(
-        wait_for_name(&conn, GAMEBUS_NAME, Duration::from_secs(5)).await,
-        "daemon did not acquire its bus name"
+        common::wait_for_socket(&sock, Duration::from_secs(5)).await,
+        "daemon did not bind {}",
+        sock.display()
     );
-    let sock = dir.join("discord-ipc-0");
-    let start = std::time::Instant::now();
-    while !sock.exists() && start.elapsed() < Duration::from_secs(5) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(sock.exists(), "daemon did not bind {}", sock.display());
 
     // Raw client: handcrafted frames, so the exact bytes on both sides are
     // known and byte-identity can be asserted.
@@ -351,7 +272,6 @@ async fn proxy_forwards_verbatim_and_taps_activity() {
     );
 
     drop(client);
-    let _ = daemon.0.kill();
-    let _ = daemon.0.wait();
+    daemon.kill_now();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,210 +1,53 @@
 //! Integration test for the S2 Discord IPC source, end to end.
 //!
-//! Spawns the real daemon binary (which binds `discord-ipc-0`), connects a
-//! genuine `discord-rich-presence` RPC client to it, and asserts that
-//! SET_ACTIVITY becomes a D-Bus activity object with the right properties,
-//! that a second SET_ACTIVITY updates it in place, and that clearing the
-//! activity removes it.
+//! Spawns the real daemon binary (which binds `discord-ipc-0` inside a private
+//! runtime directory), connects a genuine `discord-rich-presence` RPC client to
+//! it, and asserts that SET_ACTIVITY becomes a D-Bus activity object with the
+//! right properties, that a second SET_ACTIVITY updates it in place, and that
+//! clearing the activity removes it.
 //!
-//! Skips gracefully when there is no session bus, and when a real Discord
-//! client is running (the proxy would forward the test's invalid client_id
-//! to the upstream, which rejects it).
+//! Runs entirely on a private session bus and a private runtime directory, so a
+//! real Discord client and a real gamebus-presenced can both be running without
+//! affecting it — or being affected by it.
 
 use discord_rich_presence::activity::{
     Activity as ClientActivity, ActivityType, Assets, Party, Timestamps,
 };
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use zbus::zvariant::OwnedObjectPath;
-use zbus::{fdo, proxy, Connection};
 
-const GAMEBUS_NAME: &str = "org.gamebus.Presence.v1";
+mod common;
+use common::{ActivityPropsProxy, ManagerProxy};
+
 const WAIT: Duration = Duration::from_secs(10);
 const CLIENT_ID: &str = "test-client-42";
 
-/// Client proxy for the Manager interface under test.
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Manager",
-    default_service = "org.gamebus.Presence.v1",
-    default_path = "/org/gamebus/Presence/v1"
-)]
-trait Manager {
-    fn list_activities(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
-
-    #[zbus(property)]
-    fn has_activity(&self) -> zbus::Result<bool>;
-
-    #[zbus(signal)]
-    fn activity_added(&self, object_path: OwnedObjectPath) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn activity_removed(&self, object_path: OwnedObjectPath) -> zbus::Result<()>;
-}
-
-/// Client proxy for Activity objects (path set per-activity via the builder).
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Activity",
-    default_service = "org.gamebus.Presence.v1",
-    assume_defaults = false
-)]
-trait ActivityProps {
-    #[zbus(property)]
-    fn sources(&self) -> zbus::Result<Vec<String>>;
-    #[zbus(property)]
-    fn kind(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn name(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn details(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn state(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn process_id(&self) -> zbus::Result<u32>;
-    #[zbus(property)]
-    fn executable(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn app_ids(&self) -> zbus::Result<std::collections::HashMap<String, String>>;
-    #[zbus(property)]
-    fn since(&self) -> zbus::Result<u64>;
-    #[zbus(property)]
-    fn large_image(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn small_text(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn party_size(&self) -> zbus::Result<u32>;
-    #[zbus(property)]
-    fn party_max(&self) -> zbus::Result<u32>;
-}
-
-/// Kill the wrapped process when it goes out of scope.
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Poll until the daemon owns its bus name (or give up).
-async fn wait_for_name(conn: &Connection, name: &str, timeout: Duration) -> bool {
-    let fdo = match fdo::DBusProxy::new(conn).await {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let name: zbus::names::BusName = match name.try_into() {
-        Ok(n) => n,
-        Err(_) => return false,
-    };
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if fdo.name_has_owner(name.clone()).await.unwrap_or(false) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
-/// Poll until the daemon's IPC socket accepts a connection (or give up).
-///
-/// The path existing is not a readiness signal: a SIGKILLed daemon from an
-/// earlier test leaves the socket file behind, so the path can be there while
-/// nothing is listening yet. Only a successful connect proves the listener is
-/// up, and by then the stale file has been unlinked and rebound.
-async fn wait_for_socket(path: &std::path::Path, timeout: Duration) -> bool {
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if tokio::net::UnixStream::connect(path).await.is_ok() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-/// Poll until `cond` over the listed activity paths holds (or give up).
-async fn wait_for_activities(
-    manager: &ManagerProxy<'_>,
-    timeout: Duration,
-    mut cond: impl FnMut(&[OwnedObjectPath]) -> bool,
-) -> Vec<OwnedObjectPath> {
-    let start = std::time::Instant::now();
-    loop {
-        let list = manager.list_activities().await.unwrap_or_default();
-        if cond(&list) || start.elapsed() > timeout {
-            return list;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn socket_path() -> std::path::PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("discord-ipc-0")
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn discord_set_activity_appears_on_bus() {
-    // Skip without a session bus.
-    let conn = match Connection::session().await {
+    let Some(env) = common::TestEnv::new("discord") else {
+        eprintln!("SKIP: could not start a private session bus (is dbus-daemon installed?)");
+        return;
+    };
+    // This test drives a real discord-rich-presence client, which finds the
+    // socket through this process's own XDG_RUNTIME_DIR.
+    env.export_to_process();
+
+    let conn = match env.connect().await {
         Ok(conn) => conn,
         Err(e) => {
-            eprintln!("SKIP: no session bus: {e}");
+            eprintln!("SKIP: private bus unusable: {e}");
             return;
         }
     };
 
-    // Skip when a real Discord client is running: the proxy would forward
-    // the test's invalid client_id to the upstream, which rejects it.
-    // `discord-ipc-0` is checked too - the daemon under test is not up yet, so
-    // anything answering there is somebody else's; a file nobody answers on is
-    // a corpse from an earlier SIGKILLed daemon and gets cleared out of the way.
-    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    for n in 0..=9 {
-        let candidate = runtime_dir.join(format!("discord-ipc-{n}"));
-        if !candidate.exists() {
-            continue;
-        }
-        if std::os::unix::net::UnixStream::connect(&candidate).is_ok() {
-            eprintln!(
-                "SKIP: real Discord client running on {}; proxy would reject test client_id",
-                candidate.display()
-            );
-            return;
-        }
-        if n == 0 {
-            let _ = std::fs::remove_file(&candidate);
-        }
-    }
+    let mut daemon = env.spawn_daemon("gamebus-presenced-test-discord.log");
+    common::expect_own_daemon(&conn, daemon.pid(), "discord").await;
 
-    // Start the daemon under test. Tracing writes to stdout; capture both.
-    let daemon_log = std::env::temp_dir().join("gamebus-presenced-test-discord.log");
-    let daemon_log_out = std::fs::File::create(&daemon_log).unwrap();
-    let daemon_log_err = daemon_log_out.try_clone().unwrap();
-    let daemon = Command::new(env!("CARGO_BIN_EXE_gamebus-presenced"))
-        .stdout(Stdio::from(daemon_log_out))
-        .stderr(Stdio::from(daemon_log_err))
-        .env("RUST_LOG", "debug")
-        .spawn()
-        .expect("failed to spawn gamebus-presenced");
-    let mut daemon = ChildGuard(daemon);
-
+    // Wait until the IPC listener actually accepts connections. The bus name is
+    // acquired before the Discord source is spawned, so it arrives first.
+    let sock = env.socket_path();
     assert!(
-        wait_for_name(&conn, GAMEBUS_NAME, Duration::from_secs(5)).await,
-        "daemon did not acquire its bus name"
-    );
-
-    // Wait until the IPC listener actually accepts connections. The bus name
-    // is acquired before the Discord source is spawned, so it arrives first.
-    let sock = socket_path();
-    assert!(
-        wait_for_socket(&sock, Duration::from_secs(5)).await,
+        common::wait_for_socket(&sock, Duration::from_secs(5)).await,
         "daemon did not bind {}",
         sock.display()
     );
@@ -238,7 +81,7 @@ async fn discord_set_activity_appears_on_bus() {
     .unwrap();
 
     // The activity object must appear.
-    let list = wait_for_activities(&manager, WAIT, |list| {
+    let list = common::wait_for_activities(&manager, WAIT, |list| {
         list.iter().any(|p| p.as_str() == expected_path)
     })
     .await;
@@ -315,7 +158,7 @@ async fn discord_set_activity_appears_on_bus() {
     .await
     .unwrap();
 
-    let list = wait_for_activities(&manager, WAIT, |list| {
+    let list = common::wait_for_activities(&manager, WAIT, |list| {
         !list.iter().any(|p| p.as_str() == expected_path)
     })
     .await;
@@ -327,9 +170,7 @@ async fn discord_set_activity_appears_on_bus() {
     // machine preloads libgamemodeauto globally, so unrelated processes may
     // legitimately hold GameMode-sourced activities on the same daemon.
 
-    // Cleanup: the daemon was started with a stale-socket check, so remove
-    // the test socket for hygiene (SIGKILL skips the daemon's own unlink).
-    daemon.0.kill().unwrap();
-    let _ = daemon.0.wait();
-    let _ = std::fs::remove_file(&sock);
+    // The private runtime directory goes with the fixture, so there is no
+    // socket left to clean up by hand.
+    daemon.kill_now();
 }

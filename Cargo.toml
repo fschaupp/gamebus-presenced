@@ -15,6 +15,24 @@ path = "src/main.rs"
 name = "gamebus-presence"
 path = "src/bin/gamebus-presence.rs"
 
+[[bin]]
+name = "gamebus-setup"
+path = "src/bin/gamebus-setup.rs"
+required-features = ["setup"]
+
+# Declared explicitly so `--no-default-features` skips it: it references
+# CARGO_BIN_EXE_gamebus-setup, which does not exist without the feature.
+[[test]]
+name = "setup_cli"
+path = "tests/setup_cli.rs"
+required-features = ["setup"]
+
+[features]
+default = ["setup"]
+# The setup/status TUI. On by default because you need it to install the
+# daemon; `--no-default-features` builds the daemon and CLI without ratatui.
+setup = ["dep:ratatui"]
+
 [dependencies]
 zbus = { version = "4", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
@@ -26,6 +44,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 rsrpc = { git = "https://github.com/SpikeHD/rsRPC", rev = "062e0fd9fe34a475640a822facfee68296ba22e3" }
 ureq = { version = "2", features = ["json"] }
+# Tooling only — never linked into the daemon binary (src/main.rs does not use
+# it). crossterm comes via `ratatui::crossterm` rather than a direct dependency,
+# so the two can never disagree on a version. default-features = false drops
+# all-widgets (which pulls `time`) and the macros crate.
+ratatui = { version = "0.30", optional = true, default-features = false, features = [
+    "crossterm",
+    "layout-cache",
+    "underline-color",
+] }
 
 [build-dependencies]
 ureq = { version = "2", features = ["json"] }

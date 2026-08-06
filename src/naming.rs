@@ -143,28 +143,57 @@ impl NamingDb {
     }
 }
 
-/// Find the detectable.json file in the standard search paths.
-fn find_detectable_json() -> Option<PathBuf> {
-    let candidates = [
-        // CLI-refreshed cache (highest priority)
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .map(|p| p.join("gamebus-presenced/detectable.json")),
-        // User data directory
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .map(|p| p.join("gamebus-presenced/detectable.json")),
-        // System data directory
-        Some(PathBuf::from(
-            "/usr/share/gamebus-presenced/detectable.json",
-        )),
-        // Build-time output directory (development)
-        Some(PathBuf::from(concat!(env!("OUT_DIR"), "/detectable.json"))),
-    ];
+/// System data directories, per the XDG base directory specification.
+///
+/// The default is `/usr/local/share:/usr/share`, so software installed by hand
+/// under `/usr/local` — the FHS home for locally built software — is found
+/// without colliding with the paths a distribution package owns.
+pub(crate) fn xdg_data_dirs() -> Vec<PathBuf> {
+    std::env::var_os("XDG_DATA_DIRS")
+        .filter(|v| !v.is_empty())
+        .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+        .unwrap_or_else(|| {
+            vec![
+                PathBuf::from("/usr/local/share"),
+                PathBuf::from("/usr/share"),
+            ]
+        })
+}
 
-    candidates.into_iter().flatten().find(|p| p.exists())
+/// Find the detectable.json file in the standard search paths.
+///
+/// `gamebus-setup` mirrors this order to report which copy is live — keep the
+/// two in step (`src/setup/paths.rs`, `detectable_candidates`).
+fn find_detectable_json() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // CLI-refreshed cache (highest priority)
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+    {
+        candidates.push(cache.join("gamebus-presenced/detectable.json"));
+    }
+
+    // User data directory
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    {
+        candidates.push(data.join("gamebus-presenced/detectable.json"));
+    }
+
+    // System data directories, in XDG order
+    candidates.extend(
+        xdg_data_dirs()
+            .into_iter()
+            .map(|d| d.join("gamebus-presenced/detectable.json")),
+    );
+
+    // Build-time output directory (development)
+    candidates.push(PathBuf::from(concat!(env!("OUT_DIR"), "/detectable.json")));
+
+    candidates.into_iter().find(|p| p.exists())
 }
 
 #[cfg(test)]

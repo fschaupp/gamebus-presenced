@@ -4,54 +4,12 @@
 //! - `monitor` — pretty-prints the current bus state (activities, sources, names)
 //! - `fetch-detectable` — downloads Discord's detectable.json to $XDG_CACHE_HOME
 
-use std::collections::HashMap;
-use zbus::zvariant::OwnedObjectPath;
-use zbus::{proxy, Connection};
+use zbus::Connection;
+
+#[path = "../client.rs"]
+mod client;
 
 const DETECTABLE_URL: &str = "https://discord.com/api/v9/applications/detectable";
-
-/// Client proxy for the Manager interface.
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Manager",
-    default_service = "org.gamebus.Presence.v1",
-    default_path = "/org/gamebus/Presence/v1"
-)]
-trait Manager {
-    fn list_activities(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
-
-    #[zbus(property)]
-    fn has_activity(&self) -> zbus::Result<bool>;
-
-    #[zbus(property)]
-    fn version(&self) -> zbus::Result<u64>;
-}
-
-/// Client proxy for Activity objects.
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Activity",
-    default_service = "org.gamebus.Presence.v1",
-    assume_defaults = false
-)]
-trait ActivityProps {
-    #[zbus(property)]
-    fn sources(&self) -> zbus::Result<Vec<String>>;
-    #[zbus(property)]
-    fn kind(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn name(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn details(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn state(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn process_id(&self) -> zbus::Result<u32>;
-    #[zbus(property)]
-    fn executable(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn app_ids(&self) -> zbus::Result<HashMap<String, String>>;
-    #[zbus(property)]
-    fn since(&self) -> zbus::Result<u64>;
-}
 
 #[tokio::main]
 async fn main() {
@@ -85,8 +43,8 @@ async fn monitor() {
         }
     };
 
-    let manager = match ManagerProxy::new(&conn).await {
-        Ok(m) => m,
+    let (version, has_activity, activities) = match client::snapshot(&conn).await {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to connect to gamebus-presenced: {e}");
             eprintln!("Is the daemon running?");
@@ -94,60 +52,39 @@ async fn monitor() {
         }
     };
 
-    let has_activity = manager.has_activity().await.unwrap_or(false);
-    let version = manager.version().await.unwrap_or(0);
     println!("gamebus-presenced v{version}");
     println!("HasActivity: {has_activity}");
     println!();
 
-    let activities = manager.list_activities().await.unwrap_or_default();
     if activities.is_empty() {
         println!("No activities.");
         return;
     }
 
-    for path in &activities {
-        let activity = match ActivityPropsProxy::builder(&conn)
-            .path(path.as_str())
-            .unwrap()
-            .build()
-            .await
-        {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("  {}: error reading properties: {e}", path.as_str());
-                continue;
-            }
-        };
-
-        let name = activity.name().await.unwrap_or_default();
-        let kind = activity.kind().await.unwrap_or_default();
-        let sources = activity.sources().await.unwrap_or_default();
-        let pid = activity.process_id().await.unwrap_or(0);
-        let details = activity.details().await.unwrap_or_default();
-        let state = activity.state().await.unwrap_or_default();
-        let executable = activity.executable().await.unwrap_or_default();
-        let app_ids = activity.app_ids().await.unwrap_or_default();
-
-        println!("  {}", path.as_str());
-        println!(
-            "    Name:       {}",
-            if name.is_empty() { "(unknown)" } else { &name }
-        );
-        println!("    Kind:       {kind}");
-        println!("    Sources:    {}", sources.join(", "));
-        println!("    PID:        {pid}");
-        if !executable.is_empty() {
-            println!("    Executable: {executable}");
+    for activity in &activities {
+        println!("  {}", activity.path);
+        println!("    Name:       {}", activity.display_name());
+        println!("    Kind:       {}", activity.kind);
+        println!("    Sources:    {}", activity.sources.join(", "));
+        println!("    PID:        {}", activity.pid);
+        if !activity.executable.is_empty() {
+            println!("    Executable: {}", activity.executable);
         }
-        if !details.is_empty() {
-            println!("    Details:    {details}");
+        if !activity.details.is_empty() {
+            println!("    Details:    {}", activity.details);
         }
-        if !state.is_empty() {
-            println!("    State:      {state}");
+        if !activity.state.is_empty() {
+            println!("    State:      {}", activity.state);
         }
-        if !app_ids.is_empty() {
-            let ids: Vec<String> = app_ids.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        if let Some(elapsed) = activity.elapsed() {
+            println!("    Playing:    {elapsed}");
+        }
+        if !activity.app_ids.is_empty() {
+            let ids: Vec<String> = activity
+                .app_ids
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
             println!("    AppIds:     {}", ids.join(", "));
         }
         println!();

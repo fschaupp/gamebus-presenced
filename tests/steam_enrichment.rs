@@ -1,143 +1,37 @@
-//! Integration test for the S4a Steam enrichment, end to end on the session bus.
+//! Integration test for S4a: a process carrying `SteamAppId` in its environment
+//! and registered with GameMode must produce one record carrying the appid.
 //!
-//! Spawns the real daemon binary, then spawns a child process with
-//! `SteamAppId=480` in its environment and registers it with GameMode via
-//! `RegisterGameByPID`. The Enricher probes `/proc/<pid>/environ`, finds the
-//! appid, and the merged activity on the bus must carry `app_ids["steam"]`.
-//!
-//! Skips gracefully when there is no session bus or no gamemoded to talk to.
+//! Private session bus and runtime directory throughout.
 
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 use zbus::export::futures_util::StreamExt;
-use zbus::zvariant::OwnedObjectPath;
-use zbus::{fdo, proxy, Connection};
 
-const GAMEBUS_NAME: &str = "org.gamebus.Presence.v1";
+mod common;
+use common::{ActivityPropsProxy, ChildGuard, ManagerProxy};
+
 const ADDED_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Client proxy for the Manager interface under test.
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Manager",
-    default_service = "org.gamebus.Presence.v1",
-    default_path = "/org/gamebus/Presence/v1"
-)]
-trait Manager {
-    fn list_activities(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
-
-    #[zbus(property)]
-    fn has_activity(&self) -> zbus::Result<bool>;
-
-    #[zbus(signal)]
-    fn activity_added(&self, object_path: OwnedObjectPath) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn activity_removed(&self, object_path: OwnedObjectPath) -> zbus::Result<()>;
-}
-
-/// Client proxy for Activity objects (path set per-activity via the builder).
-#[proxy(
-    interface = "org.gamebus.Presence.v1.Activity",
-    default_service = "org.gamebus.Presence.v1",
-    assume_defaults = false
-)]
-trait ActivityProps {
-    #[zbus(property)]
-    fn sources(&self) -> zbus::Result<Vec<String>>;
-    #[zbus(property)]
-    fn kind(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn name(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn process_id(&self) -> zbus::Result<u32>;
-    #[zbus(property)]
-    fn executable(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn app_ids(&self) -> zbus::Result<std::collections::HashMap<String, String>>;
-}
-
-/// Minimal GameMode client used only for the availability check.
-#[proxy(
-    interface = "com.feralinteractive.GameMode",
-    default_service = "com.feralinteractive.GameMode",
-    default_path = "/com/feralinteractive/GameMode"
-)]
-trait GameMode {
-    fn list_games(&self) -> zbus::Result<Vec<(i32, OwnedObjectPath)>>;
-}
-
-/// Kill the wrapped process when it goes out of scope.
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Poll until the daemon owns its bus name (or give up).
-async fn wait_for_name(conn: &Connection, name: &str, timeout: Duration) -> bool {
-    let fdo = match fdo::DBusProxy::new(conn).await {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let name: zbus::names::BusName = match name.try_into() {
-        Ok(n) => n,
-        Err(_) => return false,
-    };
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if fdo.name_has_owner(name.clone()).await.unwrap_or(false) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn steam_appid_enrichment_appears_on_bus() {
-    // Skip without a session bus.
-    let conn = match Connection::session().await {
+    let Some(env) = common::TestEnv::new("steam") else {
+        eprintln!("SKIP: could not start a private session bus (is dbus-daemon installed?)");
+        return;
+    };
+    let conn = match env.connect().await {
         Ok(conn) => conn,
         Err(e) => {
-            eprintln!("SKIP: no session bus: {e}");
+            eprintln!("SKIP: private bus unusable: {e}");
             return;
         }
     };
-
-    // Skip without a usable gamemoded.
-    match GameModeProxy::new(&conn).await {
-        Ok(gm) => match gm.list_games().await {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("SKIP: gamemoded not usable: {e}");
-                return;
-            }
-        },
-        Err(e) => {
-            eprintln!("SKIP: gamemoded not available: {e}");
-            return;
-        }
+    if !env.gamemoded_available() {
+        eprintln!("SKIP: gamemoded could not be activated on the private bus");
+        return;
     }
 
-    // Start the daemon under test.
-    let daemon_log = std::env::temp_dir().join("gamebus-presenced-test-steam.log");
-    let daemon_log_out = std::fs::File::create(&daemon_log).unwrap();
-    let daemon_log_err = daemon_log_out.try_clone().unwrap();
-    let daemon = Command::new(env!("CARGO_BIN_EXE_gamebus-presenced"))
-        .stdout(Stdio::from(daemon_log_out))
-        .stderr(Stdio::from(daemon_log_err))
-        .env("RUST_LOG", "debug")
-        .spawn()
-        .expect("failed to spawn gamebus-presenced");
-    let _daemon = ChildGuard(daemon);
-
-    assert!(
-        wait_for_name(&conn, GAMEBUS_NAME, Duration::from_secs(5)).await,
-        "daemon did not acquire its bus name"
-    );
+    let _daemon = env.spawn_daemon("gamebus-presenced-test-steam.log");
+    common::expect_own_daemon(&conn, _daemon.pid(), "steam").await;
 
     let manager = ManagerProxy::new(&conn).await.unwrap();
     let mut added = manager.receive_activity_added().await.unwrap();
@@ -145,7 +39,8 @@ async fn steam_appid_enrichment_appears_on_bus() {
 
     // Spawn a "game" with SteamAppId in its environment. The Enricher will
     // probe /proc/<pid>/environ and find it.
-    let game = Command::new("sleep")
+    let game = env
+        .command("sleep")
         .arg("30")
         .env("SteamAppId", "480")
         .stdout(Stdio::null())
@@ -156,7 +51,8 @@ async fn steam_appid_enrichment_appears_on_bus() {
     let _game = ChildGuard(game);
 
     // Register the pid with GameMode so the daemon sees it.
-    let status = Command::new("busctl")
+    let status = env
+        .command("busctl")
         .args([
             "--user",
             "call",
@@ -221,7 +117,8 @@ async fn steam_appid_enrichment_appears_on_bus() {
 
     // Unregister the game. This should remove the record (GameMode is the
     // only non-Steam source, so Steam partial is removed too).
-    let status = Command::new("busctl")
+    let status = env
+        .command("busctl")
         .args([
             "--user",
             "call",
@@ -253,7 +150,10 @@ async fn steam_appid_enrichment_appears_on_bus() {
     {
         Ok(Some(path)) => path,
         other => {
-            let log = std::fs::read_to_string(&daemon_log).unwrap_or_default();
+            let log = std::fs::read_to_string(
+                std::env::temp_dir().join("gamebus-presenced-test-steam.log"),
+            )
+            .unwrap_or_default();
             panic!("timed out waiting for ActivityRemoved ({other:?});\n--- daemon log ---\n{log}");
         }
     };
