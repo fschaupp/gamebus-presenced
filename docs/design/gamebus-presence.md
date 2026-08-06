@@ -230,7 +230,9 @@ Design rules worth stating so they do not erode:
 
 Possible later, explicitly not now: an arRPC-compatible bridge on 1337 so this
 can replace arRPC outright for Vesktop users; an MPRIS source so "watching" and
-"listening" join the same model.
+"listening" join the same model — S6 (2026-08-06) landed the *naming-hint*
+half of this (player `Identity` fills default names, lowest precedence above
+the stem, never a source); the full media-record source remains not-now.
 
 ## Slices
 

@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4f done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
+## Status: S0-S4f and S6 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -256,11 +256,60 @@ private-bus integration tests (`helper_churn_never_reaches_bus`,
 findings fixed (wrapper cmdline inflation, removal order, grouped steam-partial
 reap, scan-group Since pinning); live against the running Amnesia session.
 
+### S6 — MPRIS naming hints (DONE 2026-08-06)
+
+The naming half of the deferred MPRIS decision, and only that half. A new
+watcher (`src/sources/mpris.rs`) follows `org.mpris.MediaPlayer2.*` bus names
+(ListNames seed + NameOwnerChanged), resolves each player's kernel-verified
+pid via `GetConnectionUnixProcessID`, reads its `Identity` property, and emits
+a `SourceEvent::NameHint { pid, name }`. Hints are consumed entirely by the
+enricher: they create no records, keep none alive, appear in no `Sources`
+list, and never reach the correlator.
+
+Precedence extends the S4b anti-goal: a hint replaces only a *default* name —
+empty, or the executable stem `from_gamemode` sets — one rung above the stem
+and below Discord, group identity, and detectable.json. The stem case is the
+point: a native binary like `Brotato.x86_64` whose detectable entry lists only
+the Windows exe finally gets a human name when the game (or anything in its
+group) exposes MPRIS. Group records accept any member's hint while their
+identity is unresolved; an in-place refresh applies late hints immediately,
+and the ListGames reseed converges the rest within 15s. Names are monotone —
+a closing player never un-names a record; dead pids are pruned from the hint
+map on the tick. Two fixes surfaced by the tests: `apply_naming` used to
+early-return without a naming DB (skipping hints exactly where they matter
+most), and "fill only empty names" was useless against stem defaults.
+
+Two limits found live the same evening: sandboxed players resolve to the
+`xdg-dbus-proxy` pid, so their hints join nothing (documented miss — no
+fabricated joins across sandbox boundaries), and a Lutris-launched
+`UbisoftConnect.exe` had neither a detectable.json entry nor any MPRIS player
+— which produced **S6b**: identification layer 4 reads the game title straight
+from a `lutris-wrapper` ancestor's argv (`lutris-wrapper <title> <n> <n>
+<command…>`, counters found right-to-left so titles ending in digits survive),
+bounded by the same `MAX_ANCESTOR_DEPTH` walk, and — unlike layers 1-3 —
+working without a naming database. Its live verification then exposed a third
+gap: the tick scan's adoption was gated on a *Steam* appid, so lutris/umu-keyed
+game processes (`SteamAppId=default`, `LUTRIS_GAME_UUID=<uuid>`) were invisible
+to it — Far Cry Primal ran unadopted while its record kept the launcher's name.
+The scan now probes every merge-key type for adoption into an existing group;
+a Steam appid is required only where it always was, creating a new group. With
+that, the launcher-named record upgrades to the game (`fcprimal.exe` is in
+detectable.json → GameProcess class → dethrone + identity upgrade) within one
+tick of the game process appearing.
+
+Verified: 88 unit tests (+6 hints, +3 lutris incl. a real spawned
+wrapper-tree walk) and a private-bus integration test serving a genuine MPRIS
+player (`zbus::interface`, real
+`Properties.Get` wire) from the test process, joined by pid via the bus's own
+gamemoded — record named after the player's Identity, MPRIS absent from
+`Sources`, name survives player exit.
+
 ## Open decisions
-- **MPRIS as a source** — deliberately deferred. It is already a good standard
-  with its own consumers, so wrapping it mostly duplicates. Move into S4 if
-  "one record for everything the machine is doing" turns out to matter more
-  than the duplication costs.
+- **MPRIS as a source** — the *naming* half landed as S6 (2026-08-06): player
+  `Identity` as a low-precedence naming hint, never a source. The full source
+  ("one record for everything the machine is doing", media records with
+  playback state) stays deferred for the original reason: MPRIS already has
+  its own consumers, wrapping it mostly duplicates.
 - **arRPC-compatible bridge on 1337** — would let this replace arRPC outright
   for Vesktop users. Cheap once S2 exists; not currently in scope.
 - **Licence not yet applied** — MIT OR Apache-2.0 proposed in the design doc.

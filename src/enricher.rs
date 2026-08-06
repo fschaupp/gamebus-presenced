@@ -78,6 +78,11 @@ pub struct Enricher {
     /// Naming database for detectable.json lookups (S4b).
     /// `None` if no database file was found — naming enrichment is disabled.
     naming: Option<NamingDb>,
+    /// pid → MPRIS player Identity (S6). The weakest naming evidence: fills a
+    /// name only when Discord, the group identity, and detectable.json have
+    /// all left it empty. Pruned for dead pids on the tick; applied names are
+    /// monotone, so pruning never un-names a record.
+    name_hints: HashMap<u32, String>,
 }
 
 impl Enricher {
@@ -93,6 +98,7 @@ impl Enricher {
             steam_only_groups: HashSet::new(),
             unresolved_wrappers: HashSet::new(),
             naming: None,
+            name_hints: HashMap::new(),
         }
     }
 
@@ -126,7 +132,73 @@ impl Enricher {
             SourceEvent::Updated(activity) => self.on_updated(*activity),
             SourceEvent::Removed { id, source } => self.on_removed(id, source),
             SourceEvent::SourceLost { source } => self.on_source_lost(source),
+            SourceEvent::NameHint { pid, name } => self.on_name_hint(pid, name),
         }
+    }
+
+    /// Store an MPRIS naming hint (S6) and, when it improves an already
+    /// published group record, refresh that record in place.
+    ///
+    /// Swallows the event — hints never reach the correlator. Records that
+    /// are not refreshed here pick the hint up on their next `Updated`, at
+    /// the latest via the 15s ListGames reseed.
+    fn on_name_hint(&mut self, pid: u32, name: String) -> Vec<SourceEvent> {
+        if name.is_empty() {
+            return Vec::new();
+        }
+        self.name_hints.insert(pid, name);
+
+        // A hint can arrive after the record published under a stem-cleared
+        // (empty) name. If the hinted pid belongs to a group whose identity
+        // is unresolved, re-emit the representative so the name lands now
+        // rather than a reseed later.
+        let key = match self.pid_to_group.get(&pid) {
+            Some(k) => k.clone(),
+            None => match probe_merge_key(pid) {
+                Some(k) if self.groups.contains_key(&k) => k,
+                _ => return Vec::new(),
+            },
+        };
+        let Some(group) = self.groups.get(&key) else {
+            return Vec::new();
+        };
+        if group.identity.is_some() {
+            // A resolved identity always outranks a hint.
+            return Vec::new();
+        }
+        let rep = group.rep;
+        let since = group.since;
+        let Some(hint) = self.group_hint(&key) else {
+            return Vec::new();
+        };
+
+        // Rebuild the representative's activity the same way the reseed
+        // would; apply_naming leaves the name empty (no identity, no
+        // detectable hit — that is why we are here), then the hint fills it.
+        let executable = std::fs::read_link(format!("/proc/{rep}/exe"))
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let mut activity = Activity::from_gamemode(rep as i32, &executable, since);
+        self.apply_naming(&mut activity);
+        if !name_is_default(&activity) {
+            // Something better than a stem appeared meanwhile; nothing to do.
+            return Vec::new();
+        }
+        activity.name = hint;
+        vec![SourceEvent::Updated(Box::new(activity))]
+    }
+
+    /// The best hint for a group: the representative's own, else any member's.
+    fn group_hint(&self, key: &str) -> Option<String> {
+        let group = self.groups.get(key)?;
+        if let Some(h) = self.name_hints.get(&group.rep) {
+            return Some(h.clone());
+        }
+        group
+            .members
+            .keys()
+            .find_map(|pid| self.name_hints.get(pid))
+            .cloned()
     }
 
     fn on_updated(&mut self, activity: Activity) -> Vec<SourceEvent> {
@@ -347,6 +419,19 @@ impl Enricher {
             activity.name = id.name.clone();
             activity.executable = id.exe.clone();
         }
+        // S6: with no identity and no curated name, any member's MPRIS hint
+        // beats the stem. Group lookup runs after the member upsert below is
+        // reflected in `pid_to_group`, so use the members map directly.
+        if group.identity.is_none() && name_is_default(&activity) {
+            let hint = self
+                .name_hints
+                .get(&pid)
+                .or_else(|| group.members.keys().find_map(|m| self.name_hints.get(m)))
+                .or_else(|| self.name_hints.get(&group.rep));
+            if let Some(h) = hint {
+                activity.name = h.clone();
+            }
+        }
         let group_appid = group.steam_appid.clone();
 
         match group.upsert(pid, member, rep_pinned) {
@@ -368,7 +453,18 @@ impl Enricher {
                 // probe, and the source bookkeeping (spec §1.1).
                 tracing::debug!(pid, merge_key = %key, "group: member absorbed");
                 self.active_sources.remove(&pid);
-                Vec::new()
+                // One exception can already BE on the bus: a restart-cache
+                // record adopted before sources spawned. Adoption publishes
+                // without creating correlator partials, so when the reseed
+                // then absorbs that pid into a group, the stale record would
+                // linger beside the representative's — two records for one
+                // game (observed live, Ubisoft Connect, 2026-08-06). The
+                // removal is a no-op for the common case: a pid the
+                // correlator never published produces no effect.
+                vec![SourceEvent::Removed {
+                    id: format!("pid_{pid}"),
+                    source: Source::GameMode,
+                }]
             }
             GroupEffect::Migrate { old } => {
                 tracing::info!(
@@ -512,6 +608,10 @@ impl Enricher {
     /// Periodic tick: retry wrapper identification + reconcile the game
     /// groups against `/proc` (S4f, spec §1.4).
     pub fn tick(&mut self) -> Vec<SourceEvent> {
+        // S6: drop hints whose player process is gone. Applied names are
+        // monotone, so this never un-names a published record.
+        self.name_hints
+            .retain(|pid, _| std::path::Path::new(&format!("/proc/{pid}")).exists());
         let mut events = self.retry_unresolved();
         events.extend(self.reconcile_groups());
         events
@@ -668,7 +768,15 @@ impl Enricher {
             let Ok(environ) = std::fs::read_to_string(format!("/proc/{pid}/environ")) else {
                 continue;
             };
-            let Some(appid) = find_steam_appid(&environ) else {
+            // Probe every key type, not only SteamAppId: a Lutris game's
+            // actual game process carries LUTRIS_GAME_UUID (and typically
+            // `SteamAppId=default`, which is rejected by design). Gating the
+            // whole scan on a Steam appid made lutris/umu-keyed processes
+            // invisible — observed live 2026-08-06: Far Cry Primal running
+            // under Ubisoft Connect stayed unadopted, so the record kept the
+            // launcher's name. The Steam appid is still required further
+            // down, but only where it belongs: creating a NEW group.
+            let Some(key) = merge_key_from_environ(&environ) else {
                 continue;
             };
             seen.insert(pid);
@@ -693,9 +801,6 @@ impl Enricher {
                 continue;
             }
 
-            let Some(key) = merge_key_from_environ(&environ) else {
-                continue;
-            };
             let raw_exe = std::fs::read_link(format!("/proc/{pid}/exe"))
                 .ok()
                 .and_then(|p| p.to_str().map(str::to_string))
@@ -718,7 +823,12 @@ impl Enricher {
                 continue;
             }
 
-            // New group: widened gate (§1.4 item 3).
+            // New group: widened gate (§1.4 item 3) — still Steam-only. A
+            // lutris/umu key with no Steam appid never creates a group from
+            // the scan alone; those groups are born from GameMode evidence.
+            let Some(appid) = find_steam_appid(&environ) else {
+                continue;
+            };
             if !self.new_group_gate(pid, &raw_exe, &appid) {
                 continue;
             }
@@ -880,21 +990,26 @@ impl Enricher {
     /// Run the three identification layers for a wrapper pid.
     /// Returns `(game_name, game_executable)` on success.
     fn identify_wrapper(&self, pid: u32) -> Option<(String, String)> {
-        let db = self.naming.as_ref()?;
-
-        // Layer 1: the wrapper's own cmdline usually names the game.
-        if let Some(found) = identify_via_cmdline(pid, db) {
-            return Some(found);
+        if let Some(db) = self.naming.as_ref() {
+            // Layer 1: the wrapper's own cmdline usually names the game.
+            if let Some(found) = identify_via_cmdline(pid, db) {
+                return Some(found);
+            }
+            // Layer 2: connected descendant walk.
+            if let Some(found) = find_game_descendant(pid, db) {
+                return Some(found);
+            }
+            // Layer 3: Flatpak-portal sandbox family (umu tmpdir bridge).
+            if let Some(found) = find_game_in_sandbox_family(pid, db) {
+                return Some(found);
+            }
         }
-        // Layer 2: connected descendant walk.
-        if let Some(found) = find_game_descendant(pid, db) {
-            return Some(found);
-        }
-        // Layer 3: Flatpak-portal sandbox family (umu tmpdir bridge).
-        if let Some(found) = find_game_in_sandbox_family(pid, db) {
-            return Some(found);
-        }
-        None
+        // Layer 4 (S6b): a `lutris-wrapper` ancestor announces the human
+        // title in its own argv — Lutris telling us what it launched. The
+        // authoritative fallback for games detectable.json does not know
+        // (UbisoftConnect.exe was the live case), and the only layer that
+        // works without a naming database.
+        identify_via_lutris_ancestor(pid)
     }
 
     /// Apply naming enrichment to an activity.
@@ -920,30 +1035,52 @@ impl Enricher {
             }
         }
 
-        let Some(ref db) = self.naming else {
-            return;
-        };
-
         // Discord activities already have a human-curated name — don't touch.
         if activity.sources.contains(&Source::Discord) && !activity.name.is_empty() {
             return;
         }
 
-        // Try appid lookup first (stronger signal), then executable.
-        let name = activity
-            .app_ids
-            .get("steam")
-            .and_then(|appid| db.lookup_by_steam_appid(appid))
-            .or_else(|| {
-                if activity.executable.is_empty() {
-                    None
-                } else {
-                    db.lookup_by_executable(&activity.executable)
-                }
-            });
+        // Try appid lookup first (stronger signal), then executable. No early
+        // return without a database: the hint fallback below must still run —
+        // a machine with no detectable.json is exactly where hints matter.
+        if let Some(ref db) = self.naming {
+            let name = activity
+                .app_ids
+                .get("steam")
+                .and_then(|appid| db.lookup_by_steam_appid(appid))
+                .or_else(|| {
+                    if activity.executable.is_empty() {
+                        None
+                    } else {
+                        db.lookup_by_executable(&activity.executable)
+                    }
+                });
 
-        if let Some(name) = name {
-            activity.name = name.to_string();
+            if let Some(name) = name {
+                activity.name = name.to_string();
+            }
+        }
+
+        // S6: the weakest rung — an MPRIS hint for this exact pid fills a
+        // name that everything above left empty.
+        self.apply_name_hint(activity);
+    }
+
+    /// S6: fill a *default* name from an MPRIS hint for this pid. A default
+    /// name is empty or the executable stem — what `from_gamemode` sets when
+    /// nothing curated exists. A curated name (Discord, group identity,
+    /// detectable.json) is never touched: the hint is one rung above the
+    /// stem and below everything else.
+    fn apply_name_hint(&self, activity: &mut Activity) {
+        if !name_is_default(activity) {
+            return;
+        }
+        let pid = activity.process_id;
+        if pid == 0 {
+            return;
+        }
+        if let Some(hint) = self.name_hints.get(&pid) {
+            activity.name = hint.clone();
         }
     }
 
@@ -1297,6 +1434,64 @@ fn identify_process_exe(pid: u32, db: &NamingDb) -> Option<(String, String)> {
     Some((name.to_string(), exe_str.to_string()))
 }
 
+/// Layer 4 (S6b): find a `lutris-wrapper` ancestor and take the title from
+/// its argv. Evidence-based: same bounded ppid chain as every other walk —
+/// never a guess across trees.
+fn identify_via_lutris_ancestor(pid: u32) -> Option<(String, String)> {
+    let mut current = pid;
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        let cmdline = std::fs::read_to_string(format!("/proc/{current}/cmdline")).ok();
+        if let Some(cmdline) = cmdline {
+            let tokens: Vec<String> = cmdline
+                .split('\0')
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect();
+            if let Some(name) = parse_lutris_wrapper_argv(&tokens) {
+                let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                return Some((name, exe));
+            }
+        }
+        current = read_ppid(current)?;
+        if current <= 1 {
+            return None;
+        }
+    }
+    None
+}
+
+/// Extract the game title from a lutris-wrapper command line.
+///
+/// Shape: `… lutris-wrapper <title…> <children> <watched> <command…>` — the
+/// title is every token between the wrapper and the two counters. Titles may
+/// themselves end in digits ("Left 4 Dead 2"), so the counters are found from
+/// the right: the last adjacent integer pair followed by a non-integer
+/// command token.
+fn parse_lutris_wrapper_argv(tokens: &[String]) -> Option<String> {
+    let wrapper_idx = tokens.iter().position(|t| {
+        std::path::Path::new(t)
+            .file_name()
+            .is_some_and(|f| f == "lutris-wrapper")
+    })?;
+    let rest = &tokens[wrapper_idx + 1..];
+    if rest.len() < 3 {
+        return None;
+    }
+
+    let is_int = |t: &str| t.parse::<u32>().is_ok();
+    let split = (0..rest.len().saturating_sub(2))
+        .rev()
+        .find(|&i| is_int(&rest[i]) && is_int(&rest[i + 1]) && !is_int(&rest[i + 2]))?;
+    if split == 0 {
+        // No title tokens before the counters.
+        return None;
+    }
+    let title = rest[..split].join(" ").trim().to_string();
+    (!title.is_empty()).then_some(title)
+}
+
 /// Layer 1: identify a wrapper's game from its own cmdline (S4e).
 ///
 /// Launch wrappers carry the game path at the end of their command line:
@@ -1440,6 +1635,23 @@ fn read_children(pid: u32) -> Vec<u32> {
 /// Known non-game wrapper executables. The executable stem of a wrapper
 /// is never a useful game name — clear it so the record shows "(unknown)"
 /// or gets a name from detectable.json.
+/// Whether an activity's name is a default (empty, or the executable stem) —
+/// i.e. nothing curated has named it yet. The stem comparison mirrors the
+/// wrapper-clearing logic in `apply_naming`.
+fn name_is_default(activity: &Activity) -> bool {
+    if activity.name.is_empty() {
+        return true;
+    }
+    if activity.executable.is_empty() {
+        return false;
+    }
+    std::path::Path::new(&activity.executable)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .as_deref()
+        == Some(activity.name.to_lowercase().as_str())
+}
+
 fn is_wrapper_executable(executable: &str) -> bool {
     let filename = std::path::Path::new(executable)
         .file_name()
@@ -1779,6 +1991,272 @@ mod tests {
     }
 
     #[test]
+    fn scan_adopts_lutris_keyed_processes_into_existing_groups() {
+        // The Far Cry Primal shape: a group exists under a lutris key (born
+        // from GameMode evidence), and the actual game process carries only
+        // LUTRIS_GAME_UUID — SteamAppId=default. The scan must adopt it.
+        let uuid = format!("test-{}", std::process::id());
+        let key = format!("lutris:{uuid}");
+
+        let mut game = std::process::Command::new("sleep")
+            .arg("30")
+            .env("LUTRIS_GAME_UUID", &uuid)
+            .env("SteamAppId", "default")
+            .spawn()
+            .unwrap();
+        let game_pid = game.id();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut e = Enricher::with_naming(None);
+        // Group born from (simulated) GameMode evidence, rep = a fake pid
+        // that is not alive; the scan pass must still adopt the live one.
+        e.grouped_update(
+            &key,
+            game_pid,
+            group_member(MemberClass::Helper),
+            None,
+            gamemode_activity(game_pid),
+            None,
+        );
+        // Forget the pid mapping to force the adoption path, as if the
+        // process had never registered with GameMode.
+        e.pid_to_group.remove(&game_pid);
+        e.groups.get_mut(&key).unwrap().members.clear();
+        e.groups.get_mut(&key).unwrap().members.insert(
+            game_pid + 1_000_000, // dead placeholder rep
+            Member {
+                gamemode: true,
+                scan: false,
+                class: MemberClass::Helper,
+                depth: 0,
+                start_time: None,
+                alive: true,
+            },
+        );
+        e.groups.get_mut(&key).unwrap().rep = game_pid + 1_000_000;
+
+        let _ = e.reconcile_groups();
+        let adopted = e
+            .groups
+            .get(&key)
+            .is_some_and(|g| g.members.contains_key(&game_pid));
+        let _ = game.kill();
+        let _ = game.wait();
+        assert!(
+            adopted,
+            "scan failed to adopt a lutris-keyed process into its existing group"
+        );
+    }
+
+    #[test]
+    fn lutris_wrapper_argv_parses_titles() {
+        let t = |v: &[&str]| {
+            parse_lutris_wrapper_argv(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        // The live Ubisoft Connect shape (Flatpak Lutris).
+        assert_eq!(
+            t(&[
+                "python3",
+                "/app/share/lutris/bin/lutris-wrapper",
+                "Ubisoft",
+                "Connect",
+                "0",
+                "0",
+                "gamemoderun",
+                "/x/umu-run"
+            ])
+            .as_deref(),
+            Some("Ubisoft Connect")
+        );
+        // A title that ends in digits must keep them: the counters are the
+        // LAST integer pair before the command.
+        assert_eq!(
+            t(&[
+                "python3",
+                "lutris-wrapper",
+                "Left",
+                "4",
+                "Dead",
+                "2",
+                "0",
+                "0",
+                "sh",
+                "-c",
+                "run"
+            ])
+            .as_deref(),
+            Some("Left 4 Dead 2")
+        );
+        assert_eq!(
+            t(&["lutris-wrapper", "Brotato", "1", "2", "wine", "brotato.exe"]).as_deref(),
+            Some("Brotato")
+        );
+        // Not a lutris-wrapper cmdline at all.
+        assert_eq!(t(&["python3", "umu-run", "Game.exe"]), None);
+        // No title before the counters.
+        assert_eq!(t(&["lutris-wrapper", "0", "0", "cmd"]), None);
+        // Too short to carry counters + command.
+        assert_eq!(t(&["lutris-wrapper", "Solo"]), None);
+    }
+
+    #[test]
+    fn lutris_ancestor_names_a_wrapped_process() {
+        // Faithful tree: like the real lutris-wrapper, the script KEEPS its
+        // argv (title + counters) and runs the game as a child. The walker
+        // starts at the child and must find the title one hop up.
+        let dir = std::env::temp_dir().join(format!("gamebus-lutris-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("lutris-wrapper");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30 &\nwait\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Retried: in a parallel test harness another thread can fork while
+        // the just-written script's fd is briefly held, and the exec then
+        // fails ETXTBSY. Transient by nature.
+        let mut wrapper = None;
+        for _ in 0..40 {
+            match std::process::Command::new(&script)
+                .args(["Test", "Game", "0", "0", "sleep", "30"])
+                .spawn()
+            {
+                Ok(child) => {
+                    wrapper = Some(child);
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => panic!("wrapper spawn failed: {e}"),
+            }
+        }
+        let mut wrapper = wrapper.expect("wrapper spawn kept hitting ETXTBSY");
+        let wrapper_pid = wrapper.id();
+
+        // Find the sleep child by scanning /proc for ppid == wrapper.
+        let mut child_pid = None;
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            child_pid = std::fs::read_dir("/proc").ok().and_then(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+                    .find(|&pid| read_ppid(pid) == Some(wrapper_pid))
+            });
+            if child_pid.is_some() {
+                break;
+            }
+        }
+        let child = child_pid.expect("wrapper never spawned its child");
+
+        let found = identify_via_lutris_ancestor(child);
+        let _ = wrapper.kill();
+        let _ = wrapper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (name, _exe) = found.expect("layer 4 failed to find the lutris-wrapper ancestor");
+        assert_eq!(name, "Test Game");
+    }
+
+    #[test]
+    fn hint_replaces_default_names_only() {
+        let mut e = Enricher::with_naming(None);
+        e.name_hints.insert(42, "Cool Game".to_string());
+
+        // Empty name (stem-cleared) → hint applies.
+        let mut empty = Activity::new("pid_42");
+        empty.process_id = 42;
+        e.apply_naming(&mut empty);
+        assert_eq!(empty.name, "Cool Game");
+
+        // The executable stem is a *default* name, not a curated one — this
+        // is the Brotato.x86_64 case, and the hint must beat it.
+        let mut stem = Activity::new("pid_42");
+        stem.process_id = 42;
+        stem.executable = "/games/Brotato.x86_64".to_string();
+        stem.name = "Brotato".to_string(); // == file_stem, set by from_gamemode
+        e.apply_naming(&mut stem);
+        assert_eq!(stem.name, "Cool Game");
+
+        // A curated name → hint never touches it.
+        let mut named = Activity::new("pid_42");
+        named.process_id = 42;
+        named.executable = "/games/Brotato.x86_64".to_string();
+        named.name = "Curated Name".to_string();
+        e.apply_naming(&mut named);
+        assert_eq!(named.name, "Curated Name");
+    }
+
+    #[test]
+    fn hint_loses_to_detectable_json() {
+        let json = r#"[{"name": "DB Name", "executables": [{"name": "game.exe"}], "third_party_skus": []}]"#;
+        let db = NamingDb::parse(json).unwrap();
+        let mut e = Enricher::with_naming(Some(db));
+        e.name_hints.insert(7, "Hint Name".to_string());
+
+        let mut activity = Activity::new("pid_7");
+        activity.process_id = 7;
+        activity.executable = "C:/Games/game.exe".to_string();
+        e.apply_naming(&mut activity);
+        // detectable.json wins; the hint is one rung below it.
+        assert_eq!(activity.name, "DB Name");
+    }
+
+    #[test]
+    fn hint_never_applies_to_pid_zero() {
+        let mut e = Enricher::with_naming(None);
+        e.name_hints.insert(0, "Ghost".to_string());
+        let mut activity = Activity::new("discord_0");
+        activity.process_id = 0;
+        e.apply_naming(&mut activity);
+        assert!(activity.name.is_empty());
+    }
+
+    #[test]
+    fn name_hint_event_is_swallowed_when_no_group_matches() {
+        let mut e = Enricher::with_naming(None);
+        // No groups, no tracked pids: the hint is stored, nothing is emitted,
+        // and the correlator never sees a NameHint.
+        let out = e.process(SourceEvent::NameHint {
+            pid: 999_999,
+            name: "Player".to_string(),
+        });
+        assert!(out.is_empty());
+        assert_eq!(
+            e.name_hints.get(&999_999).map(String::as_str),
+            Some("Player")
+        );
+    }
+
+    #[test]
+    fn group_member_hint_names_the_representative() {
+        use crate::group::{GameGroup, Member, MemberClass};
+        let mut e = Enricher::with_naming(None);
+
+        // A group with rep 100 and member 101; only the member has a hint.
+        let mut g = GameGroup::new("steam:555", 1_000);
+        let member = |gm| Member {
+            gamemode: gm,
+            scan: false,
+            class: MemberClass::Plain,
+            depth: 1,
+            start_time: None,
+            alive: true,
+        };
+        g.upsert(100, member(true), false);
+        g.upsert(101, member(true), false);
+        e.pid_to_group.insert(100, "steam:555".to_string());
+        e.pid_to_group.insert(101, "steam:555".to_string());
+        e.groups.insert("steam:555".to_string(), g);
+        e.name_hints.insert(101, "Member Hint".to_string());
+
+        assert_eq!(
+            e.group_hint("steam:555").as_deref(),
+            Some("Member Hint"),
+            "a member's hint must be reachable for the rep's record"
+        );
+    }
+
+    #[test]
     fn naming_never_overrides_discord_name() {
         let json = r#"[{"name": "Wrong Name", "executables": [{"name": "eldenring.exe"}], "third_party_skus": []}]"#;
         let db = NamingDb::parse(json).unwrap();
@@ -1899,7 +2377,14 @@ mod tests {
             gamemode_activity(101),
             None,
         );
-        assert!(events.is_empty(), "equal class is absorbed silently");
+        // The only event is the defensive cleanup for a cache-adopted
+        // record under this pid (no-op on the bus when none exists) — the
+        // member itself is never published.
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], SourceEvent::Removed { id, source: Source::GameMode } if id == "pid_101"),
+            "absorb emits only the cache-adoption cleanup: {events:?}"
+        );
 
         let events = e.process(SourceEvent::Removed {
             id: "pid_101".to_string(),
@@ -1981,7 +2466,13 @@ mod tests {
             gamemode_activity(own),
             None,
         );
-        assert!(events.is_empty(), "own pid is absorbed");
+        // Absorb emits exactly the defensive removal for a possible
+        // cache-adopted record — bus-invisible when nothing was published.
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], SourceEvent::Removed { id, source: Source::GameMode } if *id == format!("pid_{own}")),
+            "absorb must emit only the cache-adoption cleanup: {events:?}"
+        );
         e.unresolved_wrappers.insert(own);
 
         // identify_wrapper resolves via our own cmdline (layer 1).

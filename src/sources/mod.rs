@@ -7,6 +7,7 @@
 
 pub mod discord;
 pub mod gamemode;
+pub mod mpris;
 
 use crate::dbus::types::{Activity, Source};
 
@@ -19,4 +20,8 @@ pub enum SourceEvent {
     Removed { id: String, source: Source },
     /// A source disappeared; all records backed by it must be removed.
     SourceLost { source: Source },
+    /// A naming hint for a pid (S6, MPRIS). Consumed entirely by the
+    /// enricher — it never reaches the correlator, creates no record, and
+    /// appears in no `Sources` list.
+    NameHint { pid: u32, name: String },
 }
