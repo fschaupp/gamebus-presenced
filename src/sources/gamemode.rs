@@ -10,7 +10,8 @@
 
 use crate::dbus::types::{Activity, Source};
 use crate::sources::SourceEvent;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 use zbus::export::futures_util::StreamExt;
 use zbus::zvariant::OwnedObjectPath;
@@ -107,13 +108,39 @@ async fn resolve_game(conn: &Connection, pid: i32, game_path: &OwnedObjectPath) 
     (executable, since)
 }
 
+/// Emit `Updated` for every currently registered game (the `ListGames` seed
+/// loop). Shared between session start and the tick-driven reseed: re-emitting
+/// a registration is idempotent because the correlator drops identical
+/// re-publishes.
+async fn seed_games(
+    conn: &Connection,
+    proxy: &GameModeProxy<'_>,
+    tx: &mpsc::Sender<SourceEvent>,
+) -> zbus::Result<usize> {
+    let games = proxy.list_games().await?;
+    let count = games.len();
+    for (pid, game_path) in games {
+        let (executable, since) = resolve_game(conn, pid, &game_path).await;
+        send(
+            tx,
+            SourceEvent::Updated(Box::new(Activity::from_gamemode(pid, &executable, since))),
+        )
+        .await;
+    }
+    Ok(count)
+}
+
 /// Run the GameMode watcher task.
 ///
 /// Loops forever: connects when gamemoded is reachable, forwards events, and
 /// emits [`GameModeEvent::SourceLost`] when the daemon disappears. Never
 /// returns an error to the caller - a missing source degrades the record,
 /// never the daemon.
-pub async fn watch(conn: Connection, tx: mpsc::Sender<SourceEvent>) {
+///
+/// `reseed` is signalled by the main loop's periodic tick: each notification
+/// re-runs the `ListGames` seed loop so state wiped mid-session (e.g. groups
+/// dropped after a transient SourceLost) is rebuilt without a restart.
+pub async fn watch(conn: Connection, tx: mpsc::Sender<SourceEvent>, reseed: Arc<Notify>) {
     let fdo = match fdo::DBusProxy::new(&conn).await {
         Ok(proxy) => proxy,
         Err(e) => {
@@ -135,7 +162,7 @@ pub async fn watch(conn: Connection, tx: mpsc::Sender<SourceEvent>) {
     };
 
     loop {
-        match session(&conn, &tx, &mut owner_changes).await {
+        match session(&conn, &tx, &mut owner_changes, &reseed).await {
             Ok(()) => {
                 info!("GameMode session ended: gamemoded left the bus");
             }
@@ -161,6 +188,7 @@ async fn session(
     conn: &Connection,
     tx: &mpsc::Sender<SourceEvent>,
     owner_changes: &mut fdo::NameOwnerChangedStream<'_>,
+    reseed: &Notify,
 ) -> zbus::Result<()> {
     let proxy = GameModeProxy::new(conn).await?;
 
@@ -172,16 +200,8 @@ async fn session(
 
     // Seed current games. This call also triggers D-Bus activation of
     // gamemoded if the service is installed but not running.
-    let games = proxy.list_games().await?;
-    info!(count = games.len(), "Seeded games from GameMode");
-    for (pid, game_path) in games {
-        let (executable, since) = resolve_game(conn, pid, &game_path).await;
-        send(
-            tx,
-            SourceEvent::Updated(Box::new(Activity::from_gamemode(pid, &executable, since))),
-        )
-        .await;
-    }
+    let count = seed_games(conn, &proxy, tx).await?;
+    info!(count, "Seeded games from GameMode");
 
     loop {
         tokio::select! {
@@ -242,6 +262,15 @@ async fn session(
                         Err(e) => warn!(error = %e, "Failed to parse NameOwnerChanged signal"),
                     },
                     None => return Ok(()),
+                }
+            }
+            _ = reseed.notified() => {
+                // Tick-driven reseed: re-emit every registered pid through the
+                // normal path. Failure is non-fatal - the next tick retries,
+                // and until then behaviour degrades to the pre-reseed daemon.
+                match seed_games(conn, &proxy, tx).await {
+                    Ok(count) => debug!(count, "Reseeded games from GameMode"),
+                    Err(e) => debug!(error = %e, "GameMode reseed failed"),
                 }
             }
         }

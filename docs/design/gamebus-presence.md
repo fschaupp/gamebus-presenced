@@ -204,7 +204,15 @@ Design rules worth stating so they do not erode:
    what they get.
 2. **A property never regresses to unknown while a source still asserts it.**
    Losing Discord does not blank the name if GameMode still holds the pid.
-3. **The record dies with the last source.** No lingering "last played".
+3. **The record dies with the last evidence for the game.** No lingering
+   "last played". For grouped records (a merge key joining several pids) the
+   unit of evidence is the *game*, not one pid: helper processes come and go
+   without bus traffic, and the record ends — exactly one `ActivityRemoved` —
+   when the last registered or scanned member is gone. At most one
+   publish-first `ActivityAdded`/`ActivityRemoved` migration pair can occur
+   per session when a better anchor process appears; consumers should read
+   `ProcessId` from the property rather than parsing pids out of object
+   paths.
 4. **Read-only.** Writing presence *to* Discord is a different program's job
    and is an explicit non-goal (below).
 

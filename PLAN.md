@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4e done and verified. S5 landed 2026-08-06, STAGED.
+## Status: S0-S4f done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -215,6 +215,46 @@ a real `~/.local` with the daemon starting from the installed unit; D-Bus
 activation starting it on demand; autostart surviving a logout; the `--target
 system` path and its `pkexec` escalation, which has never run; and the
 `ETXTBSY` reinstall-over-a-running-binary case against a real running daemon.
+
+### S4f — Game groups: reliable identity under helper churn (DONE 2026-08-06)
+
+Two live failures forced this. Brotato (native, Steam): "deepest pid wins"
+migrated the record onto a transient pressure-vessel helper that exited 0.3ms
+later, and the record died with it while GameMode still held two live ancestor
+registrations — the 15s rescan could not recover it because `identify_process`
+required a NamingDb hit and Discord's entry lists only the Windows
+`brotato.exe`. Amnesia (Lutris/umu): the merge replaced an *identified* record
+("Amnesia: The Bunker") with an unidentified `i386-linux-gnu-inspect-library`
+helper, twice, ending with an empty bus while the game ran. Root cause: depth
+overrode identification, and every helper was a full-strength merge candidate
+because libgamemodeauto registers them all with GameMode.
+
+The fix (designed by a three-way competition — surgical / game-identity /
+defensive — judged from consumer and maintainer personas): **game groups** in
+the new pure `src/group.rs`. All pids probing to one merge key form a group;
+members carry a class (Helper < Plain < IdentifiedWrapper < GameProcess,
+wrapper list consulted on the *raw* exe); the first member becomes
+representative and only a strictly-greater class dethrones it (one
+publish-first Migrate pair, at most once per session). Equal-or-lower
+candidates are **absorbed** — they never reach the correlator, so helper churn
+produces zero bus traffic. A dead representative does not kill the record
+while any member still holds evidence (**deferred migration**: the sweep
+re-elects at the next tick); removal happens only when the last evidence goes,
+Steam partial first so the record degrades in place and dies with its last
+source — exactly one ActivityRemoved per session (a recorded deviation from
+the spec's literal removal order, in favour of its own no-flapping promise).
+Identity is monotone: a resolved name is never overwritten by an unidentified
+member. The rescan re-seeds from ListGames (a `Notify` into the gamemode
+source) and its new-group gate accepts `/steamapps/` + a resolving appid, so
+native binaries with `.exe`-only detectable entries recover without a restart.
+The correlator gained publish-dedup (no-op republishes emit nothing);
+`pid_<pid>` identity per ADR-007 is unchanged — consumers need no changes.
+
+Verified: 150 tests including truth-table units for every group rule and two
+private-bus integration tests (`helper_churn_never_reaches_bus`,
+`record_survives_rep_death`); three adversarial audits, four confirmed
+findings fixed (wrapper cmdline inflation, removal order, grouped steam-partial
+reap, scan-group Since pinning); live against the running Amnesia session.
 
 ## Open decisions
 - **MPRIS as a source** — deliberately deferred. It is already a good standard
