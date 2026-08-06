@@ -380,7 +380,10 @@ stays network-free.
 `gamebus-setup umu-misses` lists the stash for review;
 `--export` emits submission-shaped CSV matching the database's own header.
 Low-confidence and unresolved entries are listed but excluded from export.
-A setup-TUI review pane is the natural next extension.
+The setup TUI shows the same stash as its third view (Tab cycles to
+"umu misses"): per-entry resolution evidence, verification verdict, and
+drafted id — read-only, with the network-touching flows named as the CLI
+commands they are.
 
 ### S9b — verify, draft, and export umu-database submissions (2026-08-07)
 

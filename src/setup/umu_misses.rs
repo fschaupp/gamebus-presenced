@@ -805,7 +805,8 @@ fn list(report: &UmuReport) {
     );
 }
 
-fn basis_label(basis: DraftBasis) -> &'static str {
+/// Shared with the TUI's misses pane (`super::ui`).
+pub(crate) fn basis_label(basis: DraftBasis) -> &'static str {
     match basis {
         DraftBasis::SteamSku => "the game's Steam appid (detectable.json sku)",
         DraftBasis::StoreId => "the store's own codename",
@@ -813,7 +814,8 @@ fn basis_label(basis: DraftBasis) -> &'static str {
     }
 }
 
-fn confidence_label(c: Option<Confidence>) -> &'static str {
+/// Shared with the TUI's misses pane (`super::ui`).
+pub(crate) fn confidence_label(c: Option<Confidence>) -> &'static str {
     match c {
         Some(Confidence::High) => "high",
         Some(Confidence::Medium) => "medium",

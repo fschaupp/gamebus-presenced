@@ -14,12 +14,18 @@ use ratatui::Frame;
 use super::actions::{Action, Plan};
 use super::paths::Target;
 use super::status::{self, Health, Row, Status};
+use super::umu_misses::{basis_label, confidence_label};
 use crate::client::ActivityView;
+use crate::umu_report::{Miss, VerificationState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Status,
     Monitor,
+    /// The umu-database miss stash (S9b): what the daemon collected, what
+    /// verification made of it. Read-only — verifying and exporting talk to
+    /// the network, so they stay explicit CLI invocations.
+    Misses,
 }
 
 /// Which pane has the keyboard.
@@ -59,6 +65,10 @@ pub struct App {
     pub actions: ListState,
     pub activities: Vec<ActivityView>,
     pub monitor: ListState,
+    /// The umu-miss stash, newest first. Loaded off the render path like
+    /// everything else and arriving as a message.
+    pub misses: Vec<Miss>,
+    pub miss_list: ListState,
     pub output: Vec<Line<'static>>,
     pub confirm: Option<Confirm>,
     /// Set while a mutating action is running. Also the mutual-exclusion gate
@@ -87,6 +97,8 @@ impl Default for App {
             actions,
             activities: Vec::new(),
             monitor: ListState::default(),
+            misses: Vec::new(),
+            miss_list: ListState::default(),
             output: Vec::new(),
             confirm: None,
             busy: None,
@@ -162,6 +174,7 @@ impl App {
         let action_count = self.action_list().len();
         let (state, len) = match (self.view, self.focus) {
             (View::Monitor, _) => (&mut self.monitor, self.activities.len()),
+            (View::Misses, _) => (&mut self.miss_list, self.misses.len()),
             (_, Focus::Checks) => (&mut self.checks, self.rows.len()),
             (_, Focus::Actions) => (&mut self.actions, action_count),
         };
@@ -211,7 +224,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         KeyCode::Tab => {
             app.view = match app.view {
                 View::Status => View::Monitor,
-                View::Monitor => View::Status,
+                View::Monitor => View::Misses,
+                View::Misses => View::Status,
             };
             Intent::None
         }
@@ -274,6 +288,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     match app.view {
         View::Status => render_status(f, chunks[1], app),
         View::Monitor => render_monitor(f, chunks[1], app),
+        View::Misses => render_misses(f, chunks[1], app),
     }
     render_output(f, chunks[2], app);
     render_footer(f, chunks[3], app);
@@ -498,6 +513,158 @@ fn render_monitor(f: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
+/// The umu-miss review pane: what the daemon collected, one entry per game,
+/// with the verification verdict and drafted id once `--verify` has run.
+/// Read-only by design — verify/fetch/export reach the network, so they stay
+/// explicit `gamebus-setup umu-misses` invocations, named in the pane.
+fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
+    if app.misses.is_empty() {
+        let text = "No umu-database misses recorded.\n\n\
+            The daemon writes one entry per game that umu launched without a\n\
+            database entry (GAMEID=umu-0), together with the title it resolved.\n\
+            Review them here, then verify and export from the shell:\n\n\
+            \u{20}   gamebus-setup umu-misses --fetch --verify\n\
+            \u{20}   gamebus-setup umu-misses --export-md";
+        f.render_widget(
+            Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL).title(" umu misses ")),
+            area,
+        );
+        return;
+    }
+
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    let items: Vec<ListItem> = app
+        .misses
+        .iter()
+        .map(|m| {
+            let (glyph, style) = miss_state(m);
+            ListItem::new(vec![
+                Line::from(vec![
+                    Span::styled(format!("{glyph} "), style),
+                    Span::styled(
+                        m.title.clone().unwrap_or_else(|| "(unresolved)".into()),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    format!(
+                        "  {} · {} · seen {}",
+                        m.store,
+                        confidence_label(m.confidence),
+                        m.last_seen
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+        })
+        .collect();
+    if app.miss_list.selected().is_none() {
+        app.miss_list.select(Some(0));
+    }
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" umu misses "))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(list, panes[0], &mut app.miss_list);
+
+    let Some(m) = app.miss_list.selected().and_then(|i| app.misses.get(i)) else {
+        return;
+    };
+    let mut detail = vec![
+        field("Title", m.title.as_deref().unwrap_or("(unresolved)")),
+        field("Store", &m.store),
+        field("Codename", m.codename.as_deref().unwrap_or("-")),
+        field("Reported", &m.umu_id),
+    ];
+    if let Some(source) = &m.title_source {
+        detail.push(field(
+            "Resolved by",
+            &format!("{source} ({} confidence)", confidence_label(m.confidence)),
+        ));
+    }
+    if let Some(exe) = &m.executable {
+        detail.push(field("Executable", exe));
+    }
+    detail.push(field(
+        "Seen",
+        &format!("{} – {}", m.first_seen, m.last_seen),
+    ));
+    match &m.verification {
+        Some(v) => {
+            let verdict = match v.state {
+                VerificationState::AlreadyInDatabase => format!(
+                    "already in the database as {} — the launcher missed, not the database",
+                    v.umu_id.as_deref().unwrap_or("?")
+                ),
+                VerificationState::CrossStoreId => format!(
+                    "known under another store as {}",
+                    v.umu_id.as_deref().unwrap_or("?")
+                ),
+                VerificationState::ConfirmedMissing => "missing from the database".into(),
+            };
+            detail.push(field(
+                "Verified",
+                &format!("{verdict} (checked {})", v.checked),
+            ));
+            if let Some(note) = &v.note {
+                detail.push(field("Note", note));
+            }
+        }
+        None => detail.push(field(
+            "Verified",
+            "not yet — run: gamebus-setup umu-misses --fetch --verify",
+        )),
+    }
+    if let Some(d) = &m.drafted_id {
+        detail.push(field(
+            "Drafted id",
+            &format!(
+                "{} — from {}, collision-checked {}",
+                d.id,
+                basis_label(d.basis),
+                d.collision_checked
+            ),
+        ));
+    }
+    if let Some(pr) = &m.possible_pr {
+        detail.push(field("Submitted?", pr));
+    }
+    detail.push(Line::from(""));
+    detail.push(Line::from(Span::styled(
+        "Export a submission: gamebus-setup umu-misses --export-md",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    f.render_widget(
+        Paragraph::new(detail)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title(" Detail ")),
+        panes[1],
+    );
+}
+
+/// One glyph summarizing where an entry stands, for the list column.
+fn miss_state(m: &Miss) -> (&'static str, Style) {
+    if m.possible_pr.is_some() {
+        return ("↷", Style::default().fg(Color::Magenta));
+    }
+    match &m.verification {
+        Some(v) => match v.state {
+            VerificationState::AlreadyInDatabase => ("✓", Style::default().fg(Color::Green)),
+            VerificationState::CrossStoreId => ("≈", Style::default().fg(Color::Cyan)),
+            VerificationState::ConfirmedMissing if m.drafted_id.is_some() => {
+                ("+", Style::default().fg(Color::Yellow))
+            }
+            VerificationState::ConfirmedMissing => ("∅", Style::default().fg(Color::Yellow)),
+        },
+        None => ("·", Style::default().fg(Color::DarkGray)),
+    }
+}
+
 fn field(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -521,9 +688,10 @@ fn render_output(f: &mut Frame, area: Rect, app: &App) {
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let keys = match app.view {
         View::Status => {
-            "↑↓ select · ←→ pane · ⏎ run · u/s target · tab monitor · r refresh · q quit"
+            "↑↓ select · ←→ pane · ⏎ run · u/s target · tab next view · r refresh · q quit"
         }
-        View::Monitor => "↑↓ select · tab status · r refresh · q quit",
+        View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
+        View::Misses => "↑↓ select · tab next view · r refresh · q quit",
     };
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
@@ -774,13 +942,49 @@ mod tests {
     }
 
     #[test]
-    fn tab_toggles_the_view_and_q_quits() {
+    fn tab_cycles_the_views_and_q_quits() {
         let mut app = app_with_rows();
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.view, View::Monitor);
         handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.view, View::Misses);
+        handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.view, View::Status);
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
+    #[test]
+    fn the_misses_view_owns_the_selection_keys() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.misses = vec![
+            sample_miss("Control"),
+            sample_miss("Far Cry Primal"),
+            sample_miss("Brotato"),
+        ];
+        // No selection yet: the first ↓ lands on an entry and wraps cleanly.
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.miss_list.selected(), Some(1));
+        handle_key(&mut app, key(KeyCode::Up));
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(app.miss_list.selected(), Some(2), "wrap-around broke");
+    }
+
+    fn sample_miss(title: &str) -> Miss {
+        Miss {
+            title: Some(title.to_string()),
+            store: "egs".into(),
+            codename: None,
+            umu_id: "umu-0".into(),
+            title_source: Some("heroic-config".into()),
+            confidence: None,
+            executable: None,
+            first_seen: "2026-08-07".into(),
+            last_seen: "2026-08-07".into(),
+            verification: None,
+            drafted_id: None,
+            possible_pr: None,
+        }
     }
 
     #[test]

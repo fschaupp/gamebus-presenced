@@ -150,6 +150,7 @@ enum Msg {
     Input(ratatui::crossterm::event::Event),
     Probed(Box<Status>),
     Activities(Vec<client::ActivityView>),
+    Misses(Vec<umu_report::Miss>),
     Done(Action, Vec<actions::StepOutcome>),
     Tick,
 }
@@ -197,6 +198,7 @@ async fn cmd_tui() -> ExitCode {
     app.log("Probing…");
     app.probing = true;
     spawn_probe(&tx, &dirs);
+    spawn_misses(&tx);
 
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -216,14 +218,25 @@ async fn cmd_tui() -> ExitCode {
                 None => break,
             },
             _ = ticker.tick() => Msg::Tick,
-            _ = monitor_tick.tick(), if app.view == ui::View::Monitor => {
-                if monitor_conn.is_none() {
-                    monitor_conn = tokio::time::timeout(BUS_TIMEOUT, zbus::Connection::session())
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok());
+            _ = monitor_tick.tick(),
+                if matches!(app.view, ui::View::Monitor | ui::View::Misses) =>
+            {
+                if app.view == ui::View::Monitor {
+                    if monitor_conn.is_none() {
+                        monitor_conn =
+                            tokio::time::timeout(BUS_TIMEOUT, zbus::Connection::session())
+                                .await
+                                .ok()
+                                .and_then(|r| r.ok());
+                    }
+                    spawn_activities(&tx, monitor_conn.clone());
+                } else {
+                    // The stash is a small local file, but the convention
+                    // holds: nothing on the render path does I/O, so it too
+                    // arrives as a message. Refreshed while watched — the
+                    // daemon appends on its own schedule.
+                    spawn_misses(&tx);
                 }
-                spawn_activities(&tx, monitor_conn.clone());
                 Msg::Tick
             }
         };
@@ -261,6 +274,21 @@ fn spawn_activities(tx: &tokio::sync::mpsc::Sender<Msg>, conn: Option<zbus::Conn
         {
             let _ = tx.send(Msg::Activities(activities)).await;
         }
+    });
+}
+
+/// Refresh the umu-miss pane from the stash file.
+fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let report = umu_report::UmuReport::load();
+        let mut misses: Vec<umu_report::Miss> = report.entries().values().cloned().collect();
+        misses.sort_by(|a, b| {
+            b.last_seen
+                .cmp(&a.last_seen)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        let _ = tx.blocking_send(Msg::Misses(misses));
     });
 }
 
@@ -408,6 +436,7 @@ async fn handle(
             app.probing = false;
         }
         Msg::Activities(activities) => app.activities = activities,
+        Msg::Misses(misses) => app.misses = misses,
         Msg::Done(action, outcomes) => {
             for outcome in &outcomes {
                 let style = if outcome.ok {
@@ -436,6 +465,7 @@ async fn handle(
                 ui::Intent::Refresh => {
                     app.probing = true;
                     spawn_probe(tx, dirs);
+                    spawn_misses(tx);
                 }
                 ui::Intent::Run(action) => {
                     if app.busy.is_some() {
