@@ -78,6 +78,12 @@ pub struct Enricher {
     /// Naming database for detectable.json lookups (S4b).
     /// `None` if no database file was found — naming enrichment is disabled.
     naming: Option<NamingDb>,
+    /// Ungrouped GameMode records withheld from the bus because nothing has
+    /// named them yet (S7). The monitor would show "(unknown)" — instead the
+    /// bus sees nothing until any evidence names the record, which also makes
+    /// the µs-lived keyless-helper corpses fully silent. Stored whole so the
+    /// authoritative `since` survives until publication.
+    withheld: HashMap<u32, Activity>,
     /// pid → MPRIS player Identity (S6). The weakest naming evidence: fills a
     /// name only when Discord, the group identity, and detectable.json have
     /// all left it empty. Pruned for dead pids on the tick; applied names are
@@ -99,6 +105,7 @@ impl Enricher {
             unresolved_wrappers: HashSet::new(),
             naming: None,
             name_hints: HashMap::new(),
+            withheld: HashMap::new(),
         }
     }
 
@@ -146,7 +153,14 @@ impl Enricher {
         if name.is_empty() {
             return Vec::new();
         }
-        self.name_hints.insert(pid, name);
+        self.name_hints.insert(pid, name.clone());
+
+        // S7: a withheld record publishes the moment a hint names it — with
+        // its original, authoritative `since`.
+        if let Some(mut w) = self.withheld.remove(&pid) {
+            w.name = name;
+            return vec![SourceEvent::Updated(Box::new(w))];
+        }
 
         // A hint can arrive after the record published under a stem-cleared
         // (empty) name. If the hinted pid belongs to a group whose identity
@@ -278,8 +292,40 @@ impl Enricher {
             }
         }
 
+        // S7: publish-once-named. An ungrouped GameMode record whose name is
+        // empty after all enrichment — a known wrapper whose stem was
+        // cleared, or an unreadable exe — is withheld rather than published
+        // as "(unknown)". It publishes the moment anything names it (hint,
+        // late identification, Discord, or the 15s reseed after the naming
+        // DB resolves). Grouped records are never withheld: a merge key is
+        // game evidence in itself. Stem names still publish — pid+executable
+        // presence is the S1 contract.
+        if source == Source::GameMode
+            && pid > 0
+            && activity.name.is_empty()
+            && steam_activity.is_none()
+            && !self
+                .active_sources
+                .get(&pid)
+                .is_some_and(|s| s.contains(&Source::Discord))
+        {
+            tracing::debug!(pid, exe = %activity.executable, "withholding nameless record");
+            self.withheld.insert(pid, activity);
+            return Vec::new();
+        }
         // Ungrouped path: forward the original event and the Steam partial.
-        let mut events = Vec::with_capacity(2);
+        let mut events = Vec::with_capacity(3);
+        // A withheld GameMode record flushes FIRST when evidence arrives for
+        // its pid: Discord names the merge, so the bus sees one
+        // PublishNew(pid_<pid>) followed by the joining update — never an
+        // absorb pair, and never a silently dropped record.
+        if let Some(w) = self.withheld.remove(&pid) {
+            if source != Source::GameMode {
+                events.push(SourceEvent::Updated(Box::new(w)));
+            }
+            // A GameMode event for the pid IS the withheld record's
+            // successor — superseded, not flushed.
+        }
         events.push(SourceEvent::Updated(Box::new(activity)));
         if let Some(sa) = steam_activity {
             let steam_id = sa.id.clone();
@@ -612,6 +658,10 @@ impl Enricher {
         // monotone, so this never un-names a published record.
         self.name_hints
             .retain(|pid, _| std::path::Path::new(&format!("/proc/{pid}")).exists());
+        // S7: a withheld wrapper that died without an unregister (missed
+        // signal) must not leak.
+        self.withheld
+            .retain(|pid, _| std::path::Path::new(&format!("/proc/{pid}")).exists());
         let mut events = self.retry_unresolved();
         events.extend(self.reconcile_groups());
         events
@@ -653,8 +703,16 @@ impl Enricher {
                     out.extend(self.emit_rep_refresh(&key, rep));
                 }
                 None => {
-                    let mut activity = Activity::from_gamemode(pid as i32, &exe, 0);
+                    // S7: a withheld record identified late publishes with
+                    // its original `since`, not a fabricated zero.
+                    let mut activity = match self.withheld.remove(&pid) {
+                        Some(w) => w,
+                        None => Activity::from_gamemode(pid as i32, &exe, 0),
+                    };
                     activity.name = name;
+                    if !exe.is_empty() {
+                        activity.executable = exe.clone();
+                    }
                     out.push(SourceEvent::Updated(Box::new(activity)));
                 }
             }
@@ -1099,6 +1157,20 @@ impl Enricher {
                 if let Some(key) = self.pid_to_group.get(&pid).cloned() {
                     return self.grouped_removal(&key, pid);
                 }
+                // S7: a withheld record was never on the bus — its death is
+                // fully silent. Neither the GameMode Removed nor the
+                // Steam-partial removal below may fire for it. This is what
+                // makes the µs-lived keyless helpers produce zero traffic.
+                if self.withheld.remove(&pid).is_some() {
+                    self.unresolved_wrappers.remove(&pid);
+                    if let Some(set) = self.active_sources.get_mut(&pid) {
+                        set.remove(&Source::GameMode);
+                        if set.is_empty() {
+                            self.active_sources.remove(&pid);
+                        }
+                    }
+                    return Vec::new();
+                }
             }
         }
 
@@ -1232,6 +1304,8 @@ impl Enricher {
         // records to Steam-only on SourceLost; the rest are dropped here
         // (bookkeeping) and their Steam partials reaped by the loop below.
         if source == Source::GameMode {
+            // S7: withheld records were GameMode-only by construction.
+            self.withheld.clear();
             for group in self.groups.values_mut() {
                 for member in group.members.values_mut() {
                     member.gamemode = false;
@@ -1307,17 +1381,27 @@ fn probe_merge_key(pid: u32) -> Option<String> {
 /// Parse the best available merge key from an environ string (see
 /// [`probe_merge_key`]). Split out so the scan's single environ read serves
 /// both the appid and the key probe.
+/// A usable Steam appid: numeric, non-empty, and not the `0` Steam sets for
+/// non-Steam titles. The single definition of validity — `find_steam_appid`
+/// and `merge_key_from_environ` both use it, because the last time they had
+/// separate checks they diverged: the merge key accepted `SteamAppId=0` and
+/// pooled every non-Steam game into one shared `steam:0` group whose members
+/// dethroned each other all evening (journal, 2026-08-06).
+fn valid_steam_appid(v: &str) -> bool {
+    !v.is_empty() && v != "0" && v.chars().all(|c| c.is_ascii_digit())
+}
+
 fn merge_key_from_environ(environ: &str) -> Option<String> {
     let mut steam_appid = None;
     let mut lutris_uuid = None;
     let mut umu_id = None;
     for entry in environ.split('\0') {
         if let Some(v) = entry.strip_prefix("SteamAppId=") {
-            if v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty() {
+            if valid_steam_appid(v) {
                 steam_appid = Some(format!("steam:{v}"));
             }
         } else if let Some(v) = entry.strip_prefix("SteamGameId=") {
-            if steam_appid.is_none() && v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty() {
+            if steam_appid.is_none() && valid_steam_appid(v) {
                 steam_appid = Some(format!("steam:{v}"));
             }
         } else if let Some(v) = entry.strip_prefix("LUTRIS_GAME_UUID=") {
@@ -1325,7 +1409,7 @@ fn merge_key_from_environ(environ: &str) -> Option<String> {
                 lutris_uuid = Some(format!("lutris:{v}"));
             }
         } else if let Some(v) = entry.strip_prefix("UMU_ID=umu-") {
-            if v != "default" && !v.is_empty() {
+            if v != "default" && v != "0" && !v.is_empty() {
                 umu_id = Some(format!("umu:{v}"));
             }
         }
@@ -1385,17 +1469,17 @@ fn find_steam_appid(environ: &str) -> Option<String> {
     for entry in environ.split('\0') {
         if let Some(value) = entry.strip_prefix("UMU_ID=umu-") {
             // umu-launcher: numeric N implies steam appid N
-            if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() && value != "0" {
+            if valid_steam_appid(value) {
                 return Some(value.to_string());
             }
         }
         if let Some(value) = entry.strip_prefix("SteamAppId=") {
-            if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() && value != "0" {
+            if valid_steam_appid(value) {
                 return Some(value.to_string());
             }
         }
         if let Some(value) = entry.strip_prefix("SteamGameId=") {
-            if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() && value != "0" {
+            if valid_steam_appid(value) {
                 return Some(value.to_string());
             }
         }
@@ -1632,9 +1716,89 @@ fn read_children(pid: u32) -> Vec<u32> {
         .collect()
 }
 
-/// Known non-game wrapper executables. The executable stem of a wrapper
-/// is never a useful game name — clear it so the record shows "(unknown)"
-/// or gets a name from detectable.json.
+/// Known non-game wrapper, helper, and plumbing executables. Their stems are
+/// never useful game names, and they must never be classified as the game.
+///
+/// Three rules over a backslash-aware lowercase basename (Wine paths like
+/// `C:\windows\system32\services.exe` contain no `/`):
+/// 1. literal basenames — shells, launchers, Wine service processes;
+/// 2. prefix families — the pressure-vessel / steam-runtime-tools crowd,
+///    which ships dozens of helpers (`pv-verify`, `srt-logger`,
+///    `x86_64-linux-gnu-check-vulkan`, …) that appear and vanish around a
+///    launch, all preloaded into GameMode by libgamemodeauto;
+/// 3. version-suffixed interpreters — `/usr/bin/python3.13` must match like
+///    `python3` did (observed live: a python3.13 wrapper identified as a
+///    game exe because the bare-literal list missed it).
+///
+/// Deliberately OFF the list, both load-bearing:
+/// - `wine64-preloader` / `wine-preloader` / `wine64` — Wine games are only
+///   identifiable through the cmdline layer, which `classify_member`
+///   restricts for listed wrappers;
+/// - `sleep` — the integration fixtures register real `sleep` processes and
+///   assert their stem publishes.
+fn wrapper_basename(executable: &str) -> Option<String> {
+    let base = executable.rsplit(['/', '\\']).next()?;
+    (!base.is_empty()).then(|| base.to_lowercase())
+}
+
+fn is_wrapper_executable(executable: &str) -> bool {
+    let Some(name) = wrapper_basename(executable) else {
+        return false;
+    };
+
+    const LITERALS: &[&str] = &[
+        // Shells and launch plumbing.
+        "env",
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "dash",
+        "ash",
+        "reaper",
+        "bwrap",
+        "umu-run",
+        "umu-shim",
+        "gamemoderun",
+        "lutris-wrapper",
+        // Wine service processes — prefix-shaped like games, never the game.
+        "wineserver",
+        "services.exe",
+        "winedevice.exe",
+        "explorer.exe",
+        "rpcss.exe",
+        "plugplay.exe",
+        "conhost.exe",
+        "start.exe",
+        "tabtip.exe",
+        "svchost.exe",
+        // Steam client plumbing.
+        "steamwebhelper",
+    ];
+    if LITERALS.contains(&name.as_str()) {
+        return true;
+    }
+
+    const PREFIXES: &[&str] = &[
+        "steam-runtime-",
+        "pressure-vessel-",
+        "pv-",
+        "srt-",
+        "i386-linux-gnu-",
+        "x86_64-linux-gnu-",
+    ];
+    if PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return true;
+    }
+
+    // `python3.13` → `python`; a name that merely CONTAINS an interpreter
+    // name ("pythia") or ends in digits of its own ("portal2") never trims
+    // to an exact interpreter match.
+    const INTERPRETERS: &[&str] = &["python", "perl", "ruby", "node"];
+    let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    INTERPRETERS.contains(&trimmed)
+}
+
 /// Whether an activity's name is a default (empty, or the executable stem) —
 /// i.e. nothing curated has named it yet. The stem comparison mirrors the
 /// wrapper-clearing logic in `apply_naming`.
@@ -1650,43 +1814,6 @@ fn name_is_default(activity: &Activity) -> bool {
         .map(|s| s.to_string_lossy().to_lowercase())
         .as_deref()
         == Some(activity.name.to_lowercase().as_str())
-}
-
-fn is_wrapper_executable(executable: &str) -> bool {
-    let filename = std::path::Path::new(executable)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_lowercase());
-    matches!(
-        filename.as_deref(),
-        Some(
-            "env"
-                | "bash"
-                | "sh"
-                | "zsh"
-                | "fish"
-                | "dash"
-                | "ash"
-                | "python"
-                | "python3"
-                | "python2"
-                | "perl"
-                | "ruby"
-                | "node"
-                | "steam-runtime-launch-client"
-                | "steam-runtime-supervisor"
-                | "reaper"
-                | "srt-bwrap"
-                | "pv-adverb"
-                | "bwrap"
-                | "umu-run"
-                | "umu-shim"
-                | "gamemoderun"
-                | "lutris-wrapper"
-                | "i386-linux-gnu-inspect-library"
-                | "x86_64-linux-gnu-inspect-library"
-                | "steam-runtime-check-requirements"
-        )
-    )
 }
 
 /// Extract the Steam appid from a Steam activity.
@@ -1763,6 +1890,166 @@ mod tests {
         assert_eq!(extract_pid("no_pid"), None);
         assert_eq!(extract_pid("pid_"), None);
         assert_eq!(extract_pid(""), None);
+    }
+
+    /// A nameless ungrouped record: GameMode source, wrapper exe whose stem
+    /// apply_naming clears, no merge key. The S7 withhold shape.
+    fn nameless_activity(pid: u32) -> Activity {
+        Activity::from_gamemode(pid as i32, "/usr/bin/bash", 1_700_000_500)
+    }
+
+    #[test]
+    fn nameless_ungrouped_gamemode_is_withheld() {
+        let mut e = Enricher::with_naming(None);
+        let out = e.process(SourceEvent::Updated(Box::new(nameless_activity(4242))));
+        assert!(out.is_empty(), "nameless record must not publish: {out:?}");
+        let held = e.withheld.get(&4242).expect("record must be withheld");
+        assert_eq!(held.since, 1_700_000_500, "authoritative since preserved");
+    }
+
+    #[test]
+    fn withheld_publishes_on_name_hint() {
+        let mut e = Enricher::with_naming(None);
+        e.process(SourceEvent::Updated(Box::new(nameless_activity(4242))));
+        let out = e.process(SourceEvent::NameHint {
+            pid: 4242,
+            name: "Cool Game".to_string(),
+        });
+        assert_eq!(out.len(), 1);
+        let SourceEvent::Updated(a) = &out[0] else {
+            panic!("expected Updated, got {out:?}");
+        };
+        assert_eq!(a.name, "Cool Game");
+        assert_eq!(a.since, 1_700_000_500, "original since survives");
+        assert!(e.withheld.is_empty());
+    }
+
+    #[test]
+    fn withheld_publishes_on_reseed_once_named() {
+        let mut e = Enricher::with_naming(None);
+        e.process(SourceEvent::Updated(Box::new(nameless_activity(4242))));
+        // A second nameless reseed stays silent.
+        let out = e.process(SourceEvent::Updated(Box::new(nameless_activity(4242))));
+        assert!(out.is_empty(), "still nameless, still withheld");
+        // A hint arrives out of band; the next reseed publishes named.
+        e.name_hints.insert(4242, "Named Now".to_string());
+        let out = e.process(SourceEvent::Updated(Box::new(nameless_activity(4242))));
+        assert_eq!(out.len(), 1, "named reseed must publish: {out:?}");
+        let SourceEvent::Updated(a) = &out[0] else {
+            panic!("expected Updated");
+        };
+        assert_eq!(a.name, "Named Now");
+        assert!(e.withheld.is_empty());
+    }
+
+    #[test]
+    fn withheld_removal_is_silent() {
+        let mut e = Enricher::with_naming(None);
+        e.process(SourceEvent::Updated(Box::new(nameless_activity(4242))));
+        let out = e.process(SourceEvent::Removed {
+            id: "pid_4242".to_string(),
+            source: Source::GameMode,
+        });
+        assert!(out.is_empty(), "never published, never removed: {out:?}");
+        assert!(e.withheld.is_empty());
+        assert!(!e.active_sources.contains_key(&4242));
+    }
+
+    #[test]
+    fn withheld_flushes_when_discord_joins() {
+        let mut e = Enricher::with_naming(None);
+        e.process(SourceEvent::Updated(Box::new(nameless_activity(4242))));
+
+        let mut discord = Activity::new("discord_4242");
+        discord.sources = vec![Source::Discord];
+        discord.name = "Rich Presence Game".to_string();
+        discord.process_id = 4242;
+        let out = e.process(SourceEvent::Updated(Box::new(discord)));
+
+        // GameMode record first (PublishNew pid_4242), then the Discord
+        // update that joins it — never an absorb pair, never a drop.
+        assert_eq!(out.len(), 2, "{out:?}");
+        let SourceEvent::Updated(first) = &out[0] else {
+            panic!("expected Updated");
+        };
+        assert_eq!(first.id, "pid_4242");
+        let SourceEvent::Updated(second) = &out[1] else {
+            panic!("expected Updated");
+        };
+        assert_eq!(second.id, "discord_4242");
+        assert!(e.withheld.is_empty());
+    }
+
+    #[test]
+    fn wrapper_patterns_match_live_inventory() {
+        // Positives drawn from the real pressure-vessel inventory, the Wine
+        // service set, and the live journal's python3.13 incident.
+        for name in [
+            "/x/pv-verify",
+            "/x/srt-logger",
+            "/x/steam-runtime-launcher-service",
+            "/x/steam-runtime-system-info",
+            "/x/steam-runtime-launch-client",
+            "/x/pressure-vessel-wrap",
+            "/x/i386-linux-gnu-check-vulkan",
+            "/x/x86_64-linux-gnu-capsule-capture-libs",
+            "/x/x86_64-linux-gnu-detect-platform",
+            "/x/x86_64-linux-gnu-inspect-library",
+            "/usr/bin/python3.13",
+            "/usr/bin/python3",
+            "/usr/bin/perl5.36.0",
+            "/usr/bin/node22",
+            "/x/wineserver",
+            "C:\\windows\\system32\\services.exe",
+            "C:\\windows\\system32\\winedevice.exe",
+            "C:\\windows\\system32\\conhost.exe",
+            "/x/steamwebhelper",
+        ] {
+            assert!(is_wrapper_executable(name), "{name} must be a wrapper");
+        }
+    }
+
+    #[test]
+    fn wrapper_patterns_keep_games_and_preloader_off() {
+        for (name, guards) in [
+            // Wine games are only identifiable via the cmdline layer, which
+            // classify_member restricts for listed wrappers.
+            ("/x/wine64-preloader", "wine cmdline identification"),
+            ("/x/wine-preloader", "wine cmdline identification"),
+            ("/x/wine64", "wine cmdline identification"),
+            // Integration fixtures register real sleeps and assert the stem.
+            ("/usr/bin/sleep", "test fixture"),
+            // Real games with digits or interpreter-ish substrings.
+            ("/games/Brotato.x86_64", "real game"),
+            ("Z:\\game\\Portal2.exe", "trailing digits are not a version"),
+            ("/games/pythia", "contains an interpreter name"),
+            ("/games/eldenring.exe", "real game"),
+        ] {
+            assert!(
+                !is_wrapper_executable(name),
+                "{name} must stay off ({guards})"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_key_rejects_zero_and_default() {
+        // SteamAppId=0 is what Steam sets for non-Steam titles; accepting it
+        // pooled unrelated games into one shared `steam:0` group.
+        assert_eq!(merge_key_from_environ("SteamAppId=0\0"), None);
+        assert_eq!(merge_key_from_environ("SteamGameId=0\0"), None);
+        assert_eq!(merge_key_from_environ("SteamAppId=default\0"), None);
+        assert_eq!(merge_key_from_environ("UMU_ID=umu-0\0"), None);
+        // The fallthrough is the point of the fix: a zero Steam id must not
+        // shadow the real Lutris key.
+        assert_eq!(
+            merge_key_from_environ("SteamAppId=0\0LUTRIS_GAME_UUID=abc\0").as_deref(),
+            Some("lutris:abc")
+        );
+        assert_eq!(
+            merge_key_from_environ("SteamAppId=480\0").as_deref(),
+            Some("steam:480")
+        );
     }
 
     #[test]

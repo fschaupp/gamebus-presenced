@@ -230,7 +230,20 @@ impl Correlator {
     /// the bus, no effects are emitted — the ListGames reseed and the tick
     /// sweep re-derive identical records by design, and re-publishing them
     /// would ripple no-op PropertiesChanged to every consumer.
-    fn publish(&mut self, pid: u32, merged: Activity) -> Vec<Effect> {
+    fn publish(&mut self, pid: u32, mut merged: Activity) -> Vec<Effect> {
+        // Design rule 2, enforced here for the name: "a property never
+        // regresses to unknown while a source still asserts it". At game
+        // close the dying process can re-emit with an unreadable exe and an
+        // empty name; carrying the published name forward keeps the record
+        // truthful until its single ActivityRemoved instead of flashing
+        // "(unknown)" (observed live, 2026-08-06).
+        if merged.name.is_empty() {
+            if let Some((_, cached)) = self.published.get(&pid) {
+                if !cached.name.is_empty() {
+                    merged.name = cached.name.clone();
+                }
+            }
+        }
         let new_id = merged.id.clone();
         match self.published.get(&pid) {
             None => {
@@ -388,6 +401,31 @@ mod tests {
         a.since = 1_700_000_000;
         a.party_size = 2;
         a
+    }
+
+    /// Design rule 2 at the name level: at game close the dying process can
+    /// re-emit with an unreadable exe (empty name); the published name must
+    /// carry forward until the record's single removal, not flash "(unknown)".
+    #[test]
+    fn published_name_never_regresses_to_empty() {
+        let mut c = Correlator::new();
+        let mut named = Activity::from_gamemode(42, "/games/Brotato.x86_64", 100);
+        named.name = "Brotato".to_string();
+        c.on_updated(named);
+
+        // Teardown-shaped update: exe unreadable, name empty.
+        let nameless = Activity::from_gamemode(42, "", 100);
+        assert!(nameless.name.is_empty(), "precondition");
+        let effects = c.on_updated(nameless);
+
+        for effect in &effects {
+            if let Effect::UpdateInPlace(a) | Effect::PublishNew(a) = effect {
+                assert_eq!(a.name, "Brotato", "published name regressed: {effects:?}");
+            }
+        }
+        // And the cached published record keeps the name for the next merge.
+        let (_, cached) = c.published.get(&42).unwrap();
+        assert_eq!(cached.name, "Brotato");
     }
 
     #[test]
