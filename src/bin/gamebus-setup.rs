@@ -564,7 +564,7 @@ async fn handle(
                         .unwrap_or_else(|| unsafe { libc::geteuid() });
                     let needs_root = actions::needs_root(&plan, euid);
                     app.confirm = Some(ui::Confirm {
-                        explanation: actions::explain(action, &plan),
+                        explanation: actions::explain(&plan),
                         scope: actions::scope_note(&plan, &dirs.home),
                         details: false,
                         action,
@@ -641,7 +641,7 @@ fn cmd_plan(args: &[String], flags: &Flags) -> ExitCode {
     let plan = actions::plan(action, &dirs, &source);
 
     println!("{} will:", action.label());
-    for line in actions::explain(action, &plan) {
+    for line in actions::explain(&plan) {
         println!("  • {line}");
     }
     println!();

@@ -13,8 +13,9 @@
 # for tests and one-off runs.
 
 [discord]
-# Discord's own public endpoint for the game-detection database. Fetched
-# at build time and by `gamebus-setup apply fetch-detectable`.
+# Discord's own public endpoint for the game-detection database. Fetched by
+# `gamebus-presence fetch-detectable`; the setup tool runs that as the last
+# install step. Never fetched at build time - builds are network-free.
 detectable = "https://discord.com/api/v9/applications/detectable"
 
 [umu]

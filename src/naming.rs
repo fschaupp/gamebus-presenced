@@ -1,14 +1,14 @@
 //! Naming enrichment: maps executables and Steam appids to human-readable
 //! game names using Discord's `detectable.json` database.
 //!
-//! The database is fetched at build time by `build.rs` and ships as an
-//! installation data file (not embedded in the binary). At runtime, the
-//! daemon looks for it in this order:
+//! The database is never fetched at build time and never embedded in the
+//! binary: `gamebus-presence fetch-detectable` downloads it (the setup tool
+//! runs that as an install step), keeping builds network-free and
+//! reproducible. At runtime, the daemon looks for it in this order:
 //!
 //! 1. `$XDG_CACHE_HOME/gamebus-presenced/detectable.json` (CLI-refreshed)
 //! 2. `$XDG_DATA_HOME/gamebus-presenced/detectable.json` (user-installed)
 //! 3. `/usr/share/gamebus-presenced/detectable.json` (system-installed)
-//! 4. `OUT_DIR/detectable.json` (build-time, for development)
 //!
 //! If no database is found, naming enrichment is silently disabled - the
 //! daemon works without it ("no network, no naming, everything else still
@@ -210,9 +210,6 @@ fn find_detectable_json() -> Option<PathBuf> {
             .into_iter()
             .map(|d| d.join("gamebus-presenced/detectable.json")),
     );
-
-    // Build-time output directory (development)
-    candidates.push(PathBuf::from(concat!(env!("OUT_DIR"), "/detectable.json")));
 
     candidates.into_iter().find(|p| p.exists())
 }
