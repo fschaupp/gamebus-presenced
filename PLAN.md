@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4f, S6, S7, and S8 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
+## Status: S0-S4f and S6-S9 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -362,6 +362,88 @@ umu-database — it is protonfixes-scoped and does not know this game
 (`codename=Calluna` → `[]`, verified live), and `GAMEID=umu-0` is by
 definition the umu-miss case; its one useful mapping (numeric umu id ⇒ Steam
 appid) has been implemented since S4.
+
+### S9 — umu-database miss report (DONE 2026-08-07)
+
+Every launch that goes through umu without a database entry (`GAMEID=umu-0`,
+`UMU_ID=umu-default`) is a gap in the shared umu-database — and by the time a
+session ends, this daemon has usually worked out what the game was. S9 turns
+that into a contribution pipeline (owner's idea): the enricher stashes each
+miss at `$XDG_DATA_HOME/gamebus-presenced/umu-misses.json` — store guess
+(`HEROIC_APP_SOURCE`, else install-path heuristics, else `none`), codename
+(`HEROIC_APP_NAME` — for EGS exactly the App Name the database wants), the
+resolved title with its source and a confidence label (high: launcher config
+or detectable hit; medium: wrapper layers; low: hints/stems), and the game
+exe. Resolutions only upgrade, never downgrade; writes are atomic; the daemon
+stays network-free.
+
+`gamebus-setup umu-misses` lists the stash for review;
+`--export` emits submission-shaped CSV matching the database's own header.
+Low-confidence and unresolved entries are listed but excluded from export.
+The setup TUI shows the same stash as its third view (a tab bar under the
+header names all three; Tab cycles them): per-entry resolution evidence,
+verification verdict, and drafted id. The pane drives the flows on labeled
+keypresses — `v` fetch+verify (the one network verb, labeled as such in
+the footer), `s` cycles a store correction (stored as a setup-owned
+override so the daemon's writes never revert it; verification and exports
+read the effective store), `a` assigns a umu id by hand, which passes the
+same mandatory collision check as every draft before it saves. Exporting
+stays a CLI invocation.
+
+### S9b — verify, draft, and export umu-database submissions (2026-08-07)
+
+The stash becomes a real contribution pipeline, all of it in `gamebus-setup`
+(the daemon stays network-free). The file now has TWO writers, each owning
+half of every entry — the daemon the resolution half, the setup tool the
+annotation half (verification, drafted id, PR mark) — and every persist
+merges the other writer's half from disk first, so neither a launch after
+`--verify` nor a `--verify` during a session loses the other's work. A
+stash that fails to parse is reported and never written over.
+
+- **`--verify`** checks every miss against the database, local copy first —
+  `--db <file>` or `GAMEBUS_UMU_DB` (the git checkout's CSV or the API's
+  JSON dump both parse), else the `--fetch` cache — then confirms whatever
+  the local copy did not settle against the public API
+  (https://umu.openwinecomponents.org/umu_api.php, overridable via
+  `GAMEBUS_UMU_API` for tests and self-hosting; all remote endpoints —
+  Discord's public detectable endpoint, the umu API, the upstream repo and
+  its open-PRs URL — live in `endpoints.toml`, shipped with the install and
+  overridable per-key from `~/.config/gamebus-presenced/`, so an upstream
+  API change is a config edit; build.rs reads the same file). Three
+  verdicts, persisted
+  into the stash: `already-in-database` (store+codename found — the launcher
+  missed, not the database), `cross-store-id` (the title exists under
+  another store; the id to reuse), `confirmed-missing`. No local copy *and*
+  no API is an honest error with the stash untouched. Caveat found live:
+  the API's title lookup substring-matches (`?title=Control` returns Ground
+  Control's ids) and returns no title to compare against, so API title hits
+  are advisory notes only — `cross-store-id` comes exclusively from exact
+  local-title matches and the drafting collision check.
+- **Id drafting** for confirmed-missing entries, per the database's own
+  rules, strongest basis first: the title's Steam appid from
+  detectable.json's `third_party_skus` → `umu-<appid>`; else a codename
+  that carries at least one letter → `umu-<codename>` (Proton parses a
+  numeric second part as a SteamAppId, so pure-numeric GOG codenames never
+  become ids); else the standalone slug `umu-<lowercased-title>`. Every
+  draft is collision-checked against the full database — a mandatory step,
+  which is why no local database means no drafts: a same-title collision IS
+  the cross-store id (used as such), a different-title collision discards
+  the draft and records the conflict.
+- **`--fetch`** refreshes the cached full dump
+  (`$XDG_CACHE_HOME/gamebus-presenced/umu-database.json`) — one request to
+  the bare endpoint, validated by parsing before it replaces the cache,
+  never implicit.
+- **`--export`** now prefills verified/drafted ids (the NOTE column says
+  which basis and when it was collision-checked); `umu-FIXME` remains only
+  where nothing could be drafted safely. Launcher-side misses and
+  possibly-already-submitted entries are held back and listed with reasons.
+- **`--export-md [file]`** writes a slim merge request: title line, one
+  paragraph of provenance, the CSV rows in a fenced block, a per-entry
+  evidence list, and a checklist mirroring the README's rules.
+- **`--check-prs`** (opt-in, best-effort) scans open upstream merge requests
+  via the unauthenticated GitHub API for rows matching our entries —
+  matched entries are annotated and held back from exports. Failures are
+  reported and non-fatal.
 
 ## Open decisions
 - **MPRIS as a source** — the *naming* half landed as S6 (2026-08-06): player

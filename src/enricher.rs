@@ -25,6 +25,7 @@ use crate::dbus::types::{Activity, Source};
 use crate::group::{GameGroup, GroupEffect, Identity, IdentityClass, Member, MemberClass};
 use crate::naming::NamingDb;
 use crate::sources::SourceEvent;
+use crate::umu_report::{self, Confidence, UmuReport};
 use std::collections::{HashMap, HashSet};
 
 /// Maximum ppid-chain depth for the ancestor walk (S4d).
@@ -78,6 +79,13 @@ pub struct Enricher {
     /// Naming database for detectable.json lookups (S4b).
     /// `None` if no database file was found — naming enrichment is disabled.
     naming: Option<NamingDb>,
+    /// umu-database misses and their resolutions (S9): raw material for a
+    /// user-reviewed submission upstream. In-memory no-op until
+    /// [`load_umu_report`] attaches the on-disk stash.
+    umu_report: UmuReport,
+    /// merge key → (store guess, codename) for keys born from a umu-miss
+    /// launch, so later title resolutions can find their stash entry.
+    umu_miss_keys: HashMap<String, (String, Option<String>)>,
     /// Ungrouped GameMode records withheld from the bus because nothing has
     /// named them yet (S7). The monitor would show "(unknown)" — instead the
     /// bus sees nothing until any evidence names the record, which also makes
@@ -106,6 +114,8 @@ impl Enricher {
             naming: None,
             name_hints: HashMap::new(),
             withheld: HashMap::new(),
+            umu_report: UmuReport::default(),
+            umu_miss_keys: HashMap::new(),
         }
     }
 
@@ -115,6 +125,22 @@ impl Enricher {
         Self {
             naming,
             ..Self::new()
+        }
+    }
+
+    /// Attach the persistent umu-miss stash (S9). Called from main after
+    /// sources spawn; tests keep the in-memory default so they never touch
+    /// the user's data.
+    pub fn load_umu_report(&mut self) {
+        self.umu_report = UmuReport::load();
+        if let Some(e) = self.umu_report.load_error() {
+            // The stash keeps the accumulated umu-miss knowledge; refusing
+            // to write over an unreadable file is the report's job, saying
+            // so out loud is ours.
+            tracing::warn!(
+                error = e,
+                "umu-miss stash unreadable; not recording misses this session"
+            );
         }
     }
 
@@ -277,7 +303,20 @@ impl Enricher {
         // key's group; the group decides what (if anything) reaches the
         // correlator. Pids with no key follow the ungrouped path, untouched.
         if source == Source::GameMode && pid > 0 {
-            if let Some(key) = probe_merge_key(pid) {
+            let environ =
+                std::fs::read_to_string(format!("/proc/{pid}/environ")).unwrap_or_default();
+            if let Some(key) = merge_key_from_environ(&environ) {
+                // S9: a launch that went through umu without a database entry
+                // is a gap worth recording — together with whatever this
+                // daemon later works out about it.
+                if let Some(missed_id) = umu_miss_id(&environ) {
+                    let heroic_source = env_value(&environ, "HEROIC_APP_SOURCE");
+                    let codename = env_value(&environ, "HEROIC_APP_NAME");
+                    let store = umu_report::guess_store(heroic_source.as_deref(), &raw_exe);
+                    self.umu_report
+                        .note_launch(&store, codename.as_deref(), missed_id, &key);
+                    self.umu_miss_keys.insert(key.clone(), (store, codename));
+                }
                 let (class, mut identity) =
                     self.classify_member(pid, &raw_exe, &key, identified.as_ref());
                 // S8: a Heroic group whose members prove nothing themselves
@@ -289,6 +328,17 @@ impl Enricher {
                 {
                     if let Some(app) = key.strip_prefix("heroic:") {
                         if let Some(title) = heroic_title(app) {
+                            if let Some((store, code)) = self.umu_miss_keys.get(&key).cloned() {
+                                self.umu_report.note_title(
+                                    &store,
+                                    code.as_deref(),
+                                    &key,
+                                    &title,
+                                    "heroic-config",
+                                    Confidence::High,
+                                    None,
+                                );
+                            }
                             identity = Some(Identity {
                                 name: title,
                                 exe: raw_exe.clone(),
@@ -435,6 +485,28 @@ impl Enricher {
         mut activity: Activity,
         steam_activity: Option<Activity>,
     ) -> Vec<SourceEvent> {
+        // S9: any identity reaching a umu-missed group is a resolution worth
+        // stashing. GameProcess identities are curated-database hits; wrapper
+        // layers are human-set titles. note_title never downgrades, so the
+        // heroic-config High note (recorded at its creation site) survives
+        // this generic Wrapper-class note.
+        if let Some(id) = &identity {
+            if let Some((store, code)) = self.umu_miss_keys.get(key).cloned() {
+                let (source_label, confidence) = match id.class {
+                    IdentityClass::GameProcess => ("detectable", Confidence::High),
+                    IdentityClass::Wrapper => ("wrapper-layer", Confidence::Medium),
+                };
+                self.umu_report.note_title(
+                    &store,
+                    code.as_deref(),
+                    key,
+                    &id.name,
+                    source_label,
+                    confidence,
+                    Some(&id.exe),
+                );
+            }
+        }
         let via_gamemode = member.gamemode;
 
         // Discord pin (spec §1.2): a rep carrying a joined Discord partial
@@ -1406,6 +1478,30 @@ fn probe_merge_key(pid: u32) -> Option<String> {
 /// dethroned each other all evening (journal, 2026-08-06).
 fn valid_steam_appid(v: &str) -> bool {
     !v.is_empty() && v != "0" && v.chars().all(|c| c.is_ascii_digit())
+}
+
+/// The umu id of a launch that went through umu WITHOUT a database entry:
+/// `GAMEID=umu-0` (Heroic's shape) or `UMU_ID=umu-default`/`umu-0` (Lutris).
+/// A real entry would have produced a usable id — and a merge key.
+fn umu_miss_id(environ: &str) -> Option<&'static str> {
+    for entry in environ.split('\0') {
+        match entry {
+            "GAMEID=umu-0" | "UMU_ID=umu-0" => return Some("umu-0"),
+            "UMU_ID=umu-default" | "GAMEID=umu-default" => return Some("umu-default"),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One environment value out of a raw `/proc/<pid>/environ` blob.
+fn env_value(environ: &str, var: &str) -> Option<String> {
+    let prefix = format!("{var}=");
+    environ
+        .split('\0')
+        .find_map(|e| e.strip_prefix(prefix.as_str()))
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 fn merge_key_from_environ(environ: &str) -> Option<String> {

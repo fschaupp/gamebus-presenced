@@ -53,6 +53,11 @@ pub struct NamingDb {
     by_executable: HashMap<String, Vec<(String, String)>>,
     /// steam appid → game name
     by_steam_appid: HashMap<String, String>,
+    /// game name (lowercase) → steam appid — the reverse direction, used by
+    /// gamebus-setup to draft umu ids from a resolved title (S9b). Dead in
+    /// the daemon's copy of this shared module, live in gamebus-setup's.
+    #[allow(dead_code)]
+    appid_by_title: HashMap<String, String>,
 }
 
 impl NamingDb {
@@ -69,6 +74,7 @@ impl NamingDb {
         let entries: Vec<DetectableEntry> = serde_json::from_str(json).ok()?;
         let mut by_executable: HashMap<String, Vec<(String, String)>> = HashMap::new();
         let mut by_steam_appid = HashMap::new();
+        let mut appid_by_title: HashMap<String, String> = HashMap::new();
 
         for entry in entries {
             for exe in &entry.executables {
@@ -88,6 +94,9 @@ impl NamingDb {
                         by_steam_appid
                             .entry(id.clone())
                             .or_insert_with(|| entry.name.clone());
+                        appid_by_title
+                            .entry(entry.name.to_lowercase())
+                            .or_insert_with(|| id.clone());
                     }
                 }
             }
@@ -96,6 +105,7 @@ impl NamingDb {
         Some(Self {
             by_executable,
             by_steam_appid,
+            appid_by_title,
         })
     }
 
@@ -135,6 +145,17 @@ impl NamingDb {
     /// Look up a game name by Steam appid.
     pub fn lookup_by_steam_appid(&self, appid: &str) -> Option<&str> {
         self.by_steam_appid.get(appid).map(|s| s.as_str())
+    }
+
+    /// The reverse: a Steam appid for an exact (case-insensitive) title.
+    /// This is Discord's curated sku data — an offline source for the
+    /// umu-database rule "on Steam → umu-<appid>" (S9b drafting).
+    /// Dead in the daemon's copy, live in gamebus-setup's (see the field).
+    #[allow(dead_code)]
+    pub fn steam_appid_for_title(&self, title: &str) -> Option<&str> {
+        self.appid_by_title
+            .get(&title.to_lowercase())
+            .map(|s| s.as_str())
     }
 
     /// Number of entries in the database.
@@ -226,6 +247,17 @@ mod tests {
             "third_party_skus": []
         }
     ]"#;
+
+    #[test]
+    fn steam_appid_for_title_is_exact_and_case_insensitive() {
+        let db = NamingDb::parse(SAMPLE_JSON).unwrap();
+        assert_eq!(db.steam_appid_for_title("Elden Ring"), Some("1245620"));
+        assert_eq!(db.steam_appid_for_title("elden ring"), Some("1245620"));
+        assert_eq!(db.steam_appid_for_title("Overwatch"), Some("2357570"));
+        // No sku, no appid — and no fuzzy matching.
+        assert_eq!(db.steam_appid_for_title("No Exe Game"), None);
+        assert_eq!(db.steam_appid_for_title("Elden"), None);
+    }
 
     #[test]
     fn parse_and_lookup_by_executable() {
