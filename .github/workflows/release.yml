@@ -1,0 +1,68 @@
+# Build and publish a release bundle from every v* tag.
+#
+# The tag must match Cargo.toml's version (v0.1.0 <-> version = "0.1.0") or
+# the bundle step refuses. Releases are created with the runner's own `gh`,
+# no third-party release actions. Builds are network-free by design: the
+# naming database is fetched at runtime, never at build time.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup picks up the repo's rust-toolchain pin (channel + components).
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # The integration tests run against a private session bus and skip
+      # gracefully where the runner lacks gamemoded or a Discord client.
+      - name: Session bus for integration tests
+        run: sudo apt-get update && sudo apt-get install -y dbus dbus-user-session
+
+      - name: Gate
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --release -- -D warnings
+          cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Bundle
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"$VERSION\"" Cargo.toml || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version" >&2
+            exit 1
+          }
+          BUNDLE="gamebus-presenced-$VERSION-x86_64-linux"
+          mkdir -p "dist/$BUNDLE"
+          cp target/release/gamebus-presenced \
+             target/release/gamebus-presence \
+             target/release/gamebus-setup "dist/$BUNDLE/"
+          cp -r data "dist/$BUNDLE/"
+          for f in endpoints.toml README.md LICENSE NOTICE; do
+            [ -f "$f" ] && cp "$f" "dist/$BUNDLE/"
+          done
+          tar -C dist -czf "dist/$BUNDLE.tar.gz" "$BUNDLE"
+          (cd dist && sha256sum "$BUNDLE.tar.gz" > "$BUNDLE.tar.gz.sha256")
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*.tar.gz dist/*.sha256
