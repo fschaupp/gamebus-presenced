@@ -13,4 +13,5 @@ pub mod actions;
 pub mod paths;
 pub mod status;
 pub mod ui;
+pub mod umu_misses;
 pub mod units;

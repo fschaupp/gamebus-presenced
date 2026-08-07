@@ -12,8 +12,18 @@ use std::sync::Arc;
 
 #[path = "../client.rs"]
 mod client;
+#[path = "../endpoints.rs"]
+mod endpoints;
+// The daemon's naming database, compiled into this tool for the umu-id
+// drafting (title → Steam appid). Only that direction is live here - the
+// rest of the shared module is the daemon's, hence the module-wide allow.
+#[allow(dead_code)]
+#[path = "../naming.rs"]
+mod naming;
 #[path = "../setup/mod.rs"]
 mod setup;
+#[path = "../umu_report.rs"]
+mod umu_report;
 
 use setup::actions::{self, Action, Plan, Source, Step};
 use setup::paths::{Dirs, Target};
@@ -29,6 +39,8 @@ fn usage() {
     eprintln!("  status                    Print system status as plain text");
     eprintln!("  plan <action> [options]   Print what an action would do, change nothing");
     eprintln!("  apply <action> [options]  Perform an action non-interactively");
+    eprintln!("  umu-misses [options]      Games umu had no database entry for, and what");
+    eprintln!("                            this machine resolved them to");
     eprintln!("  help                      Show this help");
     eprintln!();
     eprintln!("Actions:");
@@ -39,6 +51,23 @@ fn usage() {
     eprintln!("  --target user|system      Install target (default: user)");
     eprintln!("  --privileged-only         Run only the steps that need root");
     eprintln!("  --confirm                 Required by 'apply' - it writes to disk");
+    eprintln!();
+    eprintln!("umu-misses options:");
+    eprintln!("  --verify                  Check every miss against the umu database");
+    eprintln!("                            (local copy first, then the public API) and");
+    eprintln!("                            draft collision-checked umu ids");
+    eprintln!("  --fetch                   Refresh the cached database (one request)");
+    eprintln!("  --db <file>               Database to verify against (CSV checkout or");
+    eprintln!("                            JSON dump; also via GAMEBUS_UMU_DB)");
+    eprintln!("  --export                  Submission-shaped CSV on stdout");
+    eprintln!("  --export-md [file]        Ready-to-paste merge-request text, written");
+    eprintln!("                            to <file> - without one, printed to stdout");
+    eprintln!("  --check-prs               Also scan open upstream merge requests for");
+    eprintln!("                            already-submitted entries (best-effort)");
+    eprintln!();
+    eprintln!("Every remote endpoint the tools talk to is configured in endpoints.toml");
+    eprintln!("(~/.config/gamebus-presenced/ overrides the installed copy in the data");
+    eprintln!("directory - see that file for the full order and the defaults).");
 }
 
 #[tokio::main]
@@ -50,6 +79,7 @@ async fn main() -> ExitCode {
         Some("status") => cmd_status().await,
         Some("plan") => cmd_plan(&args, &flags),
         Some("apply") => cmd_apply(&args, &flags),
+        Some("umu-misses") => setup::umu_misses::run(&args),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             ExitCode::SUCCESS
@@ -127,7 +157,11 @@ enum Msg {
     Input(ratatui::crossterm::event::Event),
     Probed(Box<Status>),
     Activities(Vec<client::ActivityView>),
+    Misses(Vec<(String, umu_report::Miss)>),
     Done(Action, Vec<actions::StepOutcome>),
+    /// A umu flow (verify / assign / store cycle) finished: its log lines
+    /// and whether it completed. Clears `busy` and refreshes the pane.
+    UmuOutcome(Vec<String>, bool),
     Tick,
 }
 
@@ -174,6 +208,7 @@ async fn cmd_tui() -> ExitCode {
     app.log("Probing…");
     app.probing = true;
     spawn_probe(&tx, &dirs);
+    spawn_misses(&tx);
 
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -193,14 +228,25 @@ async fn cmd_tui() -> ExitCode {
                 None => break,
             },
             _ = ticker.tick() => Msg::Tick,
-            _ = monitor_tick.tick(), if app.view == ui::View::Monitor => {
-                if monitor_conn.is_none() {
-                    monitor_conn = tokio::time::timeout(BUS_TIMEOUT, zbus::Connection::session())
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok());
+            _ = monitor_tick.tick(),
+                if matches!(app.view, ui::View::Monitor | ui::View::Misses) =>
+            {
+                if app.view == ui::View::Monitor {
+                    if monitor_conn.is_none() {
+                        monitor_conn =
+                            tokio::time::timeout(BUS_TIMEOUT, zbus::Connection::session())
+                                .await
+                                .ok()
+                                .and_then(|r| r.ok());
+                    }
+                    spawn_activities(&tx, monitor_conn.clone());
+                } else {
+                    // The stash is a small local file, but the convention
+                    // holds: nothing on the render path does I/O, so it too
+                    // arrives as a message. Refreshed while watched - the
+                    // daemon appends on its own schedule.
+                    spawn_misses(&tx);
                 }
-                spawn_activities(&tx, monitor_conn.clone());
                 Msg::Tick
             }
         };
@@ -238,6 +284,45 @@ fn spawn_activities(tx: &tokio::sync::mpsc::Sender<Msg>, conn: Option<zbus::Conn
         {
             let _ = tx.send(Msg::Activities(activities)).await;
         }
+    });
+}
+
+/// Refresh the umu-miss pane from the stash file. Rows carry their stash
+/// key so the UI can keep the selection on the same game across reorders,
+/// and the key is the final sort tie-break - same-day unresolved entries
+/// would otherwise land in HashMap iteration order, which reshuffles on
+/// every load.
+fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let report = umu_report::UmuReport::load();
+        let mut misses: Vec<(String, umu_report::Miss)> = report
+            .entries()
+            .iter()
+            .map(|(k, m)| (k.clone(), m.clone()))
+            .collect();
+        misses.sort_by(|a, b| {
+            // Dismissed entries park at the bottom, out of the way.
+            (a.1.dismissed.is_some())
+                .cmp(&b.1.dismissed.is_some())
+                .then_with(|| b.1.last_seen.cmp(&a.1.last_seen))
+                .then_with(|| a.1.title.cmp(&b.1.title))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let _ = tx.blocking_send(Msg::Misses(misses));
+    });
+}
+
+/// Run one of the misses pane's blocking flows (network and disk) off the
+/// render path, delivering its log lines as a message.
+fn spawn_umu_flow(
+    tx: &tokio::sync::mpsc::Sender<Msg>,
+    flow: impl FnOnce() -> (Vec<String>, bool) + Send + 'static,
+) {
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let (lines, ok) = flow();
+        let _ = tx.blocking_send(Msg::UmuOutcome(lines, ok));
     });
 }
 
@@ -385,6 +470,22 @@ async fn handle(
             app.probing = false;
         }
         Msg::Activities(activities) => app.activities = activities,
+        Msg::Misses(misses) => app.set_misses(misses),
+        Msg::UmuOutcome(lines, ok) => {
+            for line in lines {
+                app.log_styled(
+                    format!("  {line}"),
+                    if ok {
+                        Style::default().fg(Color::Reset)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    },
+                );
+            }
+            app.busy = None;
+            // Show what the flow changed without waiting for the next tick.
+            spawn_misses(tx);
+        }
         Msg::Done(action, outcomes) => {
             for outcome in &outcomes {
                 let style = if outcome.ok {
@@ -413,6 +514,41 @@ async fn handle(
                 ui::Intent::Refresh => {
                     app.probing = true;
                     spawn_probe(tx, dirs);
+                    spawn_misses(tx);
+                }
+                // The misses pane's flows share the busy gate with the
+                // install actions: one mutating thing at a time.
+                ui::Intent::UmuVerify => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("fetching + verifying umu misses".into());
+                    app.log_styled(
+                        "Fetching the umu database and verifying the stash…",
+                        Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                    );
+                    spawn_umu_flow(tx, setup::umu_misses::tui_fetch_and_verify);
+                }
+                ui::Intent::UmuAssign { key, id } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("checking the assigned id".into());
+                    spawn_umu_flow(tx, move || setup::umu_misses::tui_assign_id(&key, &id));
+                }
+                ui::Intent::UmuStore { key } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("updating the store".into());
+                    spawn_umu_flow(tx, move || setup::umu_misses::tui_cycle_store(&key));
+                }
+                ui::Intent::UmuDismiss { key } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("updating the entry".into());
+                    spawn_umu_flow(tx, move || setup::umu_misses::tui_toggle_dismiss(&key));
                 }
                 ui::Intent::Run(action) => {
                     if app.busy.is_some() {

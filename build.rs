@@ -9,7 +9,37 @@
 
 use std::path::Path;
 
+/// Fallback if endpoints.toml is unreadable - kept in step with it.
 const DETECTABLE_URL: &str = "https://discord.com/api/v9/applications/detectable";
+
+/// The URL comes from the shipped endpoints.toml (single source of truth;
+/// the runtime tools read the same file via `src/endpoints.rs`).
+fn detectable_url() -> String {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let raw =
+        std::fs::read_to_string(Path::new(&manifest).join("endpoints.toml")).unwrap_or_default();
+    let mut in_discord = false;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_discord = line == "[discord]";
+        } else if in_discord {
+            if let Some(value) = line
+                .strip_prefix("detectable")
+                .and_then(|l| l.trim_start().strip_prefix('='))
+            {
+                if let Some(url) = value
+                    .trim()
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                {
+                    return url.to_string();
+                }
+            }
+        }
+    }
+    DETECTABLE_URL.to_string()
+}
 
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -18,11 +48,13 @@ fn main() {
     // Only re-fetch if the file doesn't exist yet (cached across rebuilds).
     if dest.exists() {
         println!("cargo:rerun-if-changed=build.rs");
+        println!("cargo:rerun-if-changed=endpoints.toml");
         return;
     }
 
-    println!("cargo:warning=Fetching detectable.json from {DETECTABLE_URL}");
-    match ureq::get(DETECTABLE_URL).call() {
+    let detectable_url = detectable_url();
+    println!("cargo:warning=Fetching detectable.json from {detectable_url}");
+    match ureq::get(&detectable_url).call() {
         Ok(response) => {
             let mut body = response.into_reader();
             let mut file = std::fs::File::create(&dest).unwrap();
@@ -38,4 +70,5 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=endpoints.toml");
 }

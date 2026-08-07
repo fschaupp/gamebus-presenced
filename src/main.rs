@@ -16,6 +16,7 @@ mod error;
 mod group;
 mod naming;
 mod sources;
+mod umu_report;
 
 use crate::cache::CachedRecord;
 use crate::correlator::{Correlator, Effect};
@@ -118,6 +119,7 @@ async fn main() -> Result<()> {
     // Load the naming database now that sources are running.
     // Blocking (~100ms for 12MB JSON), but the listeners are already up.
     enricher.load_naming();
+    enricher.load_umu_report();
 
     // Periodically retry identification for wrappers whose game hasn't
     // launched yet (Battle.net launcher → actual game starts minutes later).

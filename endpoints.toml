@@ -1,0 +1,30 @@
+# Every remote endpoint the gamebus tooling talks to, in one place, so an
+# upstream API change is a config edit, not an archaeology dig through the
+# sources. The daemon itself never reads this file: it is network-free by
+# design; only the CLI tools (gamebus-setup, gamebus-presence) fetch.
+#
+# Lookup order, first hit wins, missing keys fall back to the next source:
+#   1. $XDG_CONFIG_HOME/gamebus-presenced/endpoints.toml  (your overrides)
+#   2. $XDG_DATA_HOME/gamebus-presenced/endpoints.toml    (installed copy)
+#   3. /usr/local/share and /usr/share gamebus-presenced/ (system install)
+#   4. the defaults bundled into the binaries from this very file
+#
+# The GAMEBUS_UMU_API environment variable still overrides umu.api on top,
+# for tests and one-off runs.
+
+[discord]
+# Discord's own public endpoint for the game-detection database. Fetched
+# at build time and by `gamebus-setup apply fetch-detectable`.
+detectable = "https://discord.com/api/v9/applications/detectable"
+
+[umu]
+# The umu-database query API. ?store=X&codename=Y and ?title=T look up
+# entries; the bare endpoint returns the full database as JSON.
+api = "https://umu.openwinecomponents.org/umu_api.php"
+
+# Where umu-database submissions go, printed in exports and hints.
+repository = "https://github.com/Open-Wine-Components/umu-database"
+
+# Open merge requests of that repository (unauthenticated GitHub API), for
+# the opt-in --check-prs duplicate scan.
+open_prs = "https://api.github.com/repos/Open-Wine-Components/umu-database/pulls?state=open"
