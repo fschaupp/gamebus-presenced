@@ -31,10 +31,14 @@ use crate::umu_report::{
     Verification, VerificationState,
 };
 
-const DEFAULT_API: &str = "https://umu.openwinecomponents.org/umu_api.php";
-const OPEN_PRS_URL: &str =
-    "https://api.github.com/repos/Open-Wine-Components/umu-database/pulls?state=open";
-const SUBMIT_URL: &str = "https://github.com/Open-Wine-Components/umu-database";
+use crate::endpoints::Endpoints;
+
+/// The endpoints, from endpoints.toml (user config over installed copy over
+/// bundled defaults) — loaded once per process.
+fn endpoints() -> &'static Endpoints {
+    static CACHE: std::sync::OnceLock<Endpoints> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Endpoints::load)
+}
 const CSV_HEADER: &str =
     "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)";
 /// GitHub rejects requests without a User-Agent.
@@ -183,7 +187,7 @@ impl Opts {
 }
 
 fn api_base() -> String {
-    std::env::var("GAMEBUS_UMU_API").unwrap_or_else(|_| DEFAULT_API.to_string())
+    std::env::var("GAMEBUS_UMU_API").unwrap_or_else(|_| endpoints().umu_api.clone())
 }
 
 /// The local database, from the first source that exists: `--db`, the
@@ -698,11 +702,12 @@ fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
         title: String,
         diff_url: String,
     }
-    let prs: Vec<OpenPr> = ureq::get(OPEN_PRS_URL)
+    let open_prs_url = &endpoints().umu_open_prs;
+    let prs: Vec<OpenPr> = ureq::get(open_prs_url)
         .set("User-Agent", USER_AGENT)
         .timeout(HTTP_TIMEOUT)
         .call()
-        .map_err(|e| format!("{OPEN_PRS_URL}: {e}"))?
+        .map_err(|e| format!("{open_prs_url}: {e}"))?
         .into_json()
         .map_err(|e| format!("unexpected GitHub response: {e}"))?;
     println!(
@@ -931,7 +936,7 @@ fn csv_line(row: &SubmissionRow<'_>) -> String {
 fn export_csv(report: &UmuReport) {
     let (rows, held) = partition(report);
     println!("# umu-database submission draft — review before submitting!");
-    println!("# Rules: {SUBMIT_URL}#readme");
+    println!("# Rules: {}#readme", endpoints().umu_repository);
     println!("# umu-FIXME means no id could be drafted safely — resolve by hand.");
     println!("{CSV_HEADER}");
     for row in &rows {
@@ -1033,7 +1038,7 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
                 plural_y(rows.len()),
                 path.display()
             );
-            println!("Submit at: {SUBMIT_URL}");
+            println!("Submit at: {}", endpoints().umu_repository);
         }
         None => {
             let mut out = std::io::stdout().lock();

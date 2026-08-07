@@ -111,6 +111,8 @@ fn planning_a_user_install_names_every_destination() {
         assert!(text.contains(&expected), "plan missing {expected}:\n{text}");
     }
     assert!(text.contains("systemctl --user daemon-reload"), "{text}");
+    // The endpoint configuration ships with the install.
+    assert!(text.contains("endpoints.toml"), "{text}");
 }
 
 /// The whole point of a dry run.
@@ -401,6 +403,34 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
         "absolute path leaked into the export:\n{text}"
     );
     assert!(text.contains("Game.exe"), "{text}");
+}
+
+#[test]
+fn endpoints_come_from_the_config_file_not_only_the_env() {
+    let home = TempHome::new("umu-endpoints");
+    write_s9b_fixtures(&home);
+    // A user override in ~/.config points the umu API at a closed port; NO
+    // env var and no --db. Verify must try that URL — and fail honestly —
+    // proving the file was read. With the compiled default it would reach
+    // the real API instead.
+    let conf_dir = home.path().join(".config/gamebus-presenced");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    std::fs::write(
+        conf_dir.join("endpoints.toml"),
+        "[umu]\napi = \"http://127.0.0.1:1\"\n",
+    )
+    .unwrap();
+
+    let out = run(&home, &["umu-misses", "--verify"]);
+    assert!(
+        !out.status.success(),
+        "verify should have hit the closed port"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("127.0.0.1:1"),
+        "config file was ignored:\n{err}"
+    );
 }
 
 #[test]

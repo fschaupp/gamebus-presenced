@@ -483,6 +483,15 @@ fn plan_install(layout: &Layout, source: &Source) -> Plan {
         });
     }
 
+    // The endpoint configuration ships as a reference copy in the data dir
+    // (bundled content, rewritten on every install); user overrides live in
+    // the config dir, which install never touches.
+    privileged.push(Step::WriteFile {
+        to: layout.endpoints_file(),
+        contents: include_str!("../../endpoints.toml").to_string(),
+        mode: 0o644,
+    });
+
     let exec = layout.daemon_bin();
     privileged.push(Step::WriteFile {
         to: layout.unit_file(),
@@ -510,6 +519,7 @@ fn plan_uninstall(layout: &Layout) -> Plan {
     privileged.push(Step::Remove(layout.unit_file()));
     privileged.push(Step::Remove(layout.dbus_service_file()));
     privileged.push(Step::Remove(layout.detectable_file()));
+    privileged.push(Step::Remove(layout.endpoints_file()));
 
     Plan {
         // Stop and disable before the files go, or systemd is left holding a
@@ -857,7 +867,8 @@ mod tests {
                 path.display()
             );
         }
-        // Both generated files, both naming the user-level binary.
+        // Three generated files: the two unit files naming the user-level
+        // binary, and the endpoint configuration (bundled content).
         let written: Vec<_> = plan
             .privileged
             .iter()
@@ -866,9 +877,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(written.len(), 2);
-        for (_, contents) in &written {
-            assert!(contents.contains("/home/tester/.local/bin/gamebus-presenced"));
+        assert_eq!(written.len(), 3);
+        for (to, contents) in &written {
+            if to.ends_with(crate::endpoints::ENDPOINTS_NAME) {
+                assert!(contents.contains("[umu]"), "endpoints content wrong");
+            } else {
+                assert!(contents.contains("/home/tester/.local/bin/gamebus-presenced"));
+            }
         }
     }
 

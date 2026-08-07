@@ -124,6 +124,13 @@ impl Layout {
     pub fn detectable_file(&self) -> PathBuf {
         self.data_dir.join(DETECTABLE_NAME)
     }
+
+    /// The installed reference copy of the endpoint configuration. User
+    /// overrides belong in the config dir, not here — install rewrites this
+    /// one with the bundled content.
+    pub fn endpoints_file(&self) -> PathBuf {
+        self.data_dir.join(crate::endpoints::ENDPOINTS_NAME)
+    }
     /// The three binaries, in install order.
     pub fn binaries(&self) -> [(&'static str, PathBuf); 3] {
         [

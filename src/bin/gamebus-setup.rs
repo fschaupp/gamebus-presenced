@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 #[path = "../client.rs"]
 mod client;
+#[path = "../endpoints.rs"]
+mod endpoints;
 // The daemon's naming database, compiled into this tool for the S9b umu-id
 // drafting (title → Steam appid). Only that direction is live here — the
 // rest of the shared module is the daemon's, hence the module-wide allow.
@@ -62,6 +64,10 @@ fn usage() {
     eprintln!("                            to <file> — without one, printed to stdout");
     eprintln!("  --check-prs               Also scan open upstream merge requests for");
     eprintln!("                            already-submitted entries (best-effort)");
+    eprintln!();
+    eprintln!("Every remote endpoint the tools talk to is configured in endpoints.toml");
+    eprintln!("(~/.config/gamebus-presenced/ overrides the installed copy in the data");
+    eprintln!("directory — see that file for the full order and the defaults).");
 }
 
 #[tokio::main]

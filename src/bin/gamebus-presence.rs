@@ -8,8 +8,8 @@ use zbus::Connection;
 
 #[path = "../client.rs"]
 mod client;
-
-const DETECTABLE_URL: &str = "https://discord.com/api/v9/applications/detectable";
+#[path = "../endpoints.rs"]
+mod endpoints;
 
 #[tokio::main]
 async fn main() {
@@ -100,8 +100,9 @@ fn fetch_detectable() {
     let dest_dir = cache_dir.join("gamebus-presenced");
     let dest = dest_dir.join("detectable.json");
 
-    println!("Fetching {DETECTABLE_URL}...");
-    let response = match ureq::get(DETECTABLE_URL).call() {
+    let url = endpoints::Endpoints::load().discord_detectable;
+    println!("Fetching {url}...");
+    let response = match ureq::get(&url).call() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Fetch failed: {e}");

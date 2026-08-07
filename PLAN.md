@@ -405,7 +405,12 @@ stash that fails to parse is reported and never written over.
   JSON dump both parse), else the `--fetch` cache — then confirms whatever
   the local copy did not settle against the public API
   (https://umu.openwinecomponents.org/umu_api.php, overridable via
-  `GAMEBUS_UMU_API` for tests and self-hosting). Three verdicts, persisted
+  `GAMEBUS_UMU_API` for tests and self-hosting; all remote endpoints —
+  Discord's public detectable endpoint, the umu API, the upstream repo and
+  its open-PRs URL — live in `endpoints.toml`, shipped with the install and
+  overridable per-key from `~/.config/gamebus-presenced/`, so an upstream
+  API change is a config edit; build.rs reads the same file). Three
+  verdicts, persisted
   into the stash: `already-in-database` (store+codename found — the launcher
   missed, not the database), `cross-store-id` (the title exists under
   another store; the id to reuse), `confirmed-missing`. No local copy *and*
