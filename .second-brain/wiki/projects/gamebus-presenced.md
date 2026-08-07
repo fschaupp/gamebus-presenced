@@ -2,7 +2,7 @@
 date: 2026-08-04
 type: project
 status: in-progress
-updated: 2026-08-06
+updated: 2026-08-07
 tags: [project, rust, d-bus, discord, gamemode]
 related-people: []
 related-projects: []
@@ -14,7 +14,7 @@ ai-first: true
 
 ## For future Claude
 
-`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), S4d (ancestor-walk join), S4e (game identification + scan), and S4f (game groups, 2026-08-06) are COMPLETE; S5 (gamebus-setup TUI) landed 2026-08-06, STAGED. Authoritative detail for S4f/S5 is the repo (PLAN.md) until vault records exist. This note tracks the project's status, decisions, and recent activity.
+`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), S4d (ancestor-walk join), S4e (game identification + scan), S4f (game groups, 2026-08-06), S6/S6b (MPRIS hints + Lutris wrapper titles, 2026-08-06), S7 (publication hygiene, 2026-08-06), S8 (Heroic detection, 2026-08-06), and S9 (umu-miss stash, 2026-08-07) are COMPLETE; S5 (gamebus-setup TUI) landed 2026-08-06, STAGED. S9 and S9b (umu-database contribution pipeline) landed on master 2026-08-07 via --no-ff merge 58afefd (branch `feat/s9-umu-miss-report` kept, 9 commits 4c8a16e through b638404; pushed to gitea). Authoritative detail for S4f/S5 is the repo (PLAN.md) until vault records exist. This note tracks the project's status, decisions, and recent activity.
 
 ## Overview
 
@@ -44,7 +44,7 @@ Steam probe → registry.vdf + /proc environ
 
 ## Status
 
-**S0 through S4f implementation completed; S5 landed (STAGED). (Corrected 2026-08-06 — this line had stopped at S4d while the note's own S4e section below said done.)**
+**S0 through S9b implementation completed and on master (S6-S8 merged 2026-08-06; S9/S9b merged 2026-08-07 as --no-ff 58afefd, branch kept); S5 landed (STAGED). master pushed to gitea. (as of 2026-08-07)**
 
 - Repo created: 2026-08-03
 - Design doc: `docs/design/gamebus-presence.md` (complete)
@@ -132,6 +132,12 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 - Runtime cache keyed by pid + process start-time from `/proc/<pid>/stat` (field 22)
 - On startup, re-adopt records whose process is still alive AND start-time still matches
 
+### S9/S9b umu-Miss Pipeline (2026-08-07)
+- umu-miss stash is split into two writer-owned halves — daemon owns misses, setup tool owns annotations — killing the two-writer lost-update found in adversarial review. See [[wiki/decisions/adr-009-umu-miss-stash-two-writer-owned-halves]] (2026-08-07)
+- umu API title lookup is substring-fuzzy → advisory-only, never a verdict (2026-08-07)
+- User deletions are the annotation-half `dismissed` flag, never key removal (2026-08-07)
+- All remote endpoints live in the shipped `endpoints.toml`; the daemon reads none of it (2026-08-07)
+
 ## Open Decisions
 
 - **MPRIS as a source** — deliberately deferred. Already a good standard with its own consumers; wrapping it mostly duplicates. Move into S4 if needed.
@@ -147,10 +153,27 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 
 ## Recent Activity
 
+- 2026-08-07: S9b — umu-miss verification/drafting/export pipeline in
+  gamebus-setup (`--verify`/`--fetch`/`--export`/`--export-md`/`--check-prs`),
+  TWO adversarial review rounds (18 + 9 agents; 10 confirmed findings, all
+  fixed — worst: two-writer stash lost-update, see
+  [[wiki/decisions/adr-009-umu-miss-stash-two-writer-owned-halves]]),
+  interactive TUI misses pane (tab bar; `v` fetch+verify, `a` assign id, `s`
+  store correction, `d` dismiss), and `endpoints.toml` (all remote URLs in
+  one shipped config). All on branch `feat/s9-umu-miss-report` (9 commits,
+  4c8a16e→b638404; merged to master the same morning as --no-ff 58afefd and pushed). See
+  [[wiki/logs/2026-08-07 - gamebus-presenced S9b umu Contribution Pipeline]].
+- 2026-08-06: S6 MPRIS hints, S6b Lutris argv titles + any-key scan adoption
+  (5a620e9, 70d84e4), S7 publish hygiene — withhold nameless, wrapper pattern
+  blacklist, name monotonicity (489e7fd, c1904e5), S8 Heroic detection
+  (186c427, 27473ac), all on master; S9 umu-miss stash landed just past
+  midnight (4c8a16e, 2026-08-07 00:09, on the S9b branch). See
+  [[wiki/logs/2026-08-06 - gamebus-presenced S6-S9 Naming Layers and umu Stash]].
 - 2026-08-06: S4f (game groups: class-elected sticky representative, deferred
   migration, ListGames reseed — fixes the Brotato/Amnesia record losses) and
   S5 (gamebus-setup TUI, STAGED) landed on master (merge e56bbb8, fix
-  18cb92b). Vault dev logs/ADRs for both are pending; see repo PLAN.md and
+  18cb92b). The S6-S9 dev log now exists (see above); S5 and S4f dev logs +
+  a setup-tool ADR are STILL pending — see repo PLAN.md and
   [[wiki/concepts/2026-08-06 - Learnings Review]].
 
 - 2026-08-04: S4d implementation completed - ancestor-walk join for wrapper-tree dedup. Enricher tracks `{pid: steam_appid}`, `is_ancestor()` ppid-chain walk (bounded to 10 hops), descendant absorbs ancestor. Three bugs found during live Brotato testing: merge direction reversed, cache-adopted records couldn't be removed (correlator `drop_partial` fix), `SteamAppId=default` false positive (numeric-only appids). Also fixed: naming precedence (Steam's detectable.json-enriched name beats GameMode's executable stem). See [[wiki/logs/2026-08-04 - gamebus-presenced S4]].
@@ -160,9 +183,9 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 - 2026-08-04: S2 implementation completed - standalone Discord IPC listener. `discord-ipc-0` bound with stale-socket handling, handshake/READY, lock-step echo, `SET_ACTIVITY` via pinned `rsrpc` crate payload model, `SO_PEERCRED` pid, `discord_<pid>` objects, mutable `ActivityInterface` with `PropertiesChanged`. See [[wiki/logs/2026-08-04 - gamebus-presenced S2]] and [[wiki/decisions/adr-006-rsrpc-crate-dependency]].
 - 2026-08-04: S1 implementation completed - GameMode source feeding the D-Bus surface. Watcher with `NameOwnerChanged` availability tracking, per-activity objects at `.../Activity/pid_<pid>`, `ActivityAdded`/`ActivityRemoved` signals, `HasActivity` change emission, `ListActivities` as `ao`. Two live discoveries recorded in [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]]. Verified by integration test + busctl acceptance. See [[wiki/logs/2026-08-04 - gamebus-presenced S1]] for details.
 - 2026-08-04: S0 implementation completed - D-Bus interface foundation (`org.gamebus.Presence.v1.Manager` with `ListActivities`, `HasActivity`, `Version` properties; `Activity` type; zbus v4 bindings; service verified on session bus). See [[wiki/logs/2026-08-04 - gamebus-presenced S0]] for details.
-- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]], [[wiki/logs/2026-08-04 - gamebus-presenced S3]], [[wiki/logs/2026-08-04 - gamebus-presenced S4]] (S4f/S5 logs pending — repo PLAN.md is authoritative)
+- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]], [[wiki/logs/2026-08-04 - gamebus-presenced S3]], [[wiki/logs/2026-08-04 - gamebus-presenced S4]], [[wiki/logs/2026-08-06 - gamebus-presenced S6-S9 Naming Layers and umu Stash]], [[wiki/logs/2026-08-07 - gamebus-presenced S9b umu Contribution Pipeline]] (S4f/S5 logs pending — repo PLAN.md is authoritative)
 - Kanban board: [[boards/gamebus-presenced]]
-- ADRs: [[wiki/decisions/adr-001-zbus-v4-tokio-runtime]], [[wiki/decisions/adr-002-simplified-activity-type]], [[wiki/decisions/adr-003-d-bus-service-naming]], [[wiki/decisions/adr-004-manager-and-activity-interfaces]], [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]], [[wiki/decisions/adr-006-rsrpc-crate-dependency]], [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]], [[wiki/decisions/adr-008-appid-records-one-record-per-merge-key]]
+- ADRs: [[wiki/decisions/adr-001-zbus-v4-tokio-runtime]], [[wiki/decisions/adr-002-simplified-activity-type]], [[wiki/decisions/adr-003-d-bus-service-naming]], [[wiki/decisions/adr-004-manager-and-activity-interfaces]], [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]], [[wiki/decisions/adr-006-rsrpc-crate-dependency]], [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]], [[wiki/decisions/adr-008-appid-records-one-record-per-merge-key]], [[wiki/decisions/adr-009-umu-miss-stash-two-writer-owned-halves]]
 
 ## Dependencies
 

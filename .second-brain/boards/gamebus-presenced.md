@@ -8,13 +8,25 @@ ai-first: true
 
 ## For future Claude
 
-Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S5 (as of 2026-08-06 — S4f and S5 added by reconcile; see repo PLAN.md). Slices complete: S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment), S4b (naming), S4c (packaging), S4d (ancestor-walk), S4e (game identification + Steam scan + appid_records simplification). Final verification: 1 record per game, 61 unit + 6 integration tests pass, clippy clean.
+Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S9b (as of 2026-08-07). S0-S8 complete on master: S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment), S4b (naming), S4c (packaging), S4d (ancestor-walk), S4e (game identification + Steam scan + appid_records simplification), S4f (game groups), S5 (setup TUI, STAGED), S6/S6b (MPRIS + Lutris naming hints), S7 (publication hygiene), S8 (Heroic). S9 (umu-miss stash) + S9b (umu-database contribution pipeline) landed on master 2026-08-07 via --no-ff merge 58afefd (branch feat/s9-umu-miss-report kept, 9 commits 4c8a16e→b638404); master pushed to gitea.
 
 ## gamebus-presenced Kanban Board
 
 ### 📥 Backlog
 
+	9 commits ready (4c8a16e→b638404), gates green. [[wiki/projects/gamebus-presenced]]
+
+- [ ] 🟢 **Owed vault records: S5 dev log + setup-tool ADR, S4f dev log + ADR**
+- [ ] 🟡 **Live-verify S9b against a real umu-miss launch**
+	Stash is empty until the next Heroic/Lutris umu game starts.
+
 ### ✅ Done
+- [x] ~~🟡 **Merge feat/s9-umu-miss-report to master (--no-ff, branch kept) + push to gitea**~~ ✅ 2026-08-07 (merge 58afefd, by owner)
+- [x] ~~🟡 **S9b: verify/draft/export pipeline + 2 adversarial review rounds (10 findings fixed) + interactive TUI pane + endpoints.toml**~~ ✅ 2026-08-07 (branch feat/s9-umu-miss-report through b638404)
+- [x] ~~🟡 **S9: umu-miss stash written by the daemon**~~ ✅ 2026-08-07 (4c8a16e at 00:09, on feat/s9-umu-miss-report)
+- [x] ~~🟡 **S8: Heroic Epic/GOG detection via HEROIC_APP_NAME + legendary install records**~~ ✅ 2026-08-06 (186c427, 27473ac)
+- [x] ~~🟡 **S7: publish hygiene — wrapper pattern blacklist, withhold nameless, teardown name monotonicity**~~ ✅ 2026-08-06 (489e7fd, c1904e5)
+- [x] ~~🟡 **S6/S6b: MPRIS naming hints + Lutris wrapper titles + any-key scan adoption**~~ ✅ 2026-08-06 (commits 5a620e9, 70d84e4)
 - [x] ~~🟡 **S4e: detectable.json path-prefixed entries (83% of DB) — basename-bucketed index with path-suffix matching + backslash normalisation**~~ ✅ 2026-08-04
 - [x] ~~🟡 **S4e: Three-layer game identification (wrapper cmdline / descendant walk / umu tmpdir sandbox-family scan)**~~ ✅ 2026-08-04
 - [x] ~~🟡 **S4e: Unresolved-wrapper retry tick (15s) for delayed game launches**~~ ✅ 2026-08-04
