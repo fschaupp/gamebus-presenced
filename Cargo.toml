@@ -54,8 +54,5 @@ ratatui = { version = "0.30", optional = true, default-features = false, feature
     "underline-color",
 ] }
 
-[build-dependencies]
-ureq = { version = "2", features = ["json"] }
-
 [dev-dependencies]
 discord-rich-presence = "1"

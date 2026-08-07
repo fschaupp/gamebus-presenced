@@ -519,8 +519,7 @@ async fn probe_gamemode(dbus: &zbus::fdo::DBusProxy<'_>) -> GameModeState {
 }
 
 fn probe_detectable(dirs: &Dirs) -> Option<(DetectableTier, FileFact)> {
-    let out_dir = PathBuf::from(env!("OUT_DIR"));
-    detectable_candidates(dirs, Some(&out_dir))
+    detectable_candidates(dirs)
         .into_iter()
         .map(|(tier, path)| (tier, stat(&path)))
         .find(|(_, fact)| fact.exists)
@@ -779,17 +778,6 @@ pub fn rows(s: &Status) -> Vec<Row> {
 
     // --- Naming database ---------------------------------------------------
     rows.push(match &s.detectable {
-        Some((DetectableTier::BuildDir, fact)) => Row {
-            label: "Naming DB",
-            health: Health::Warn,
-            value: format!("build tree only ({})", human_size(fact.len)),
-            hint: Some(
-                "only found because this is running from the build directory; \
-                 an installed daemon will have no game names"
-                    .to_string(),
-            ),
-            remedy: Some(Action::Install(target)),
-        },
         Some((tier, fact)) => {
             let stale = age(fact.mtime)
                 .filter(|d| d.as_secs() > 90 * 86_400)
@@ -1232,23 +1220,6 @@ mod tests {
         assert_eq!(discord.health, Health::Warn);
         assert!(discord.value.contains("Discord"), "{}", discord.value);
         assert_eq!(discord.remedy, Some(Action::Restart));
-    }
-
-    #[test]
-    fn the_build_tree_naming_database_is_a_warning_not_a_pass() {
-        let mut s = status(true);
-        s.detectable = Some((
-            DetectableTier::BuildDir,
-            FileFact {
-                exists: true,
-                len: 12_000_000,
-                ..Default::default()
-            },
-        ));
-        let rows = rows(&s);
-        let db = row(&rows, "Naming DB");
-        assert_eq!(db.health, Health::Warn);
-        assert_eq!(db.remedy, Some(Action::Install(Target::User)));
     }
 
     #[test]
