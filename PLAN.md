@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4f and S6-S9 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
+## Status: S0-S4f and S6-S10 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -108,6 +108,8 @@ ancestor-walk decision. Integration test: `sleep` spawned with
 endpoint (23858 entries, 12.3MB); ships as an installation data file
 (`$PREFIX/share/gamebus-presenced/detectable.json`, not binary-embedded).
 `gamebus-presence fetch-detectable` CLI refreshes to `$XDG_CACHE_HOME`.
+(Superseded by S10: no build-time fetch at all — the install plan runs the
+freshly installed CLI's `fetch-detectable` as its last, best-effort step.)
 Naming precedence: Discord name > detectable.json lookup (by appid or
 executable) > executable stem. Anti-goal: never overrides a more
 authoritative source. umu-database as cached secondary (protonfixes-scoped,
@@ -444,6 +446,28 @@ stash that fails to parse is reported and never written over.
   via the unauthenticated GitHub API for rows matching our entries —
   matched entries are annotated and held back from exports. Failures are
   reported and non-fatal.
+
+#### S10 — Release pipeline (DONE 2026-08-07)
+
+Builds are network-free and reproducible: `build.rs` is gone (it existed only
+to fetch `detectable.json`), and with it the `OUT_DIR` search tier in both
+the daemon (`find_detectable_json`) and the setup tool (`DetectableTier::
+BuildDir`). The naming database is fetched exclusively at runtime:
+`gamebus-presence fetch-detectable` on demand, and the install plan appends
+that same command — via the freshly **installed** CLI, never the build tree —
+as its last, best-effort step. An offline install still succeeds; the daemon
+degrades to executable names and the status screen offers the fetch as a
+one-key fix. The plain-language plan summary names the download whenever any
+plan contains it, and the scope note reserves the "rewrites your cache"
+headline for the fetch-only plan (an install leads with its write scope).
+
+`.github/workflows/release.yml` builds and publishes a release from every
+`v*` tag: gate (fmt, clippy `-D warnings`, tests — integration tests skip
+gracefully where the runner lacks gamemoded), release build, tarball bundle
+(three binaries, `data/` units, `endpoints.toml`, README, plus LICENSE and
+NOTICE where present), sha256 checksum, and a GitHub release created with the
+runner's own `gh` — no third-party release actions. The tag must match
+`Cargo.toml`'s version or the workflow refuses to bundle.
 
 ## Open decisions
 - **MPRIS as a source** — the *naming* half landed as S6 (2026-08-06): player

@@ -1,6 +1,6 @@
 //! Where everything goes, for each install target. Pure path arithmetic.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub const DAEMON_BIN: &str = "gamebus-presenced";
 pub const CLI_BIN: &str = "gamebus-presence";
@@ -188,9 +188,6 @@ pub enum DetectableTier {
     UserData,
     /// A system data directory from `XDG_DATA_DIRS` — a system install.
     SystemData,
-    /// The build tree. Works only while running from `target/`; an installed
-    /// copy of the same binary finds nothing here.
-    BuildDir,
 }
 
 impl DetectableTier {
@@ -199,19 +196,12 @@ impl DetectableTier {
             DetectableTier::Cache => "cache",
             DetectableTier::UserData => "user data",
             DetectableTier::SystemData => "system data",
-            DetectableTier::BuildDir => "build tree",
         }
     }
 }
 
 /// The naming database search path, highest priority first.
-///
-/// `out_dir` is the daemon's compile-time `OUT_DIR`; pass `None` when it is not
-/// known (a binary built elsewhere).
-pub fn detectable_candidates(
-    dirs: &Dirs,
-    out_dir: Option<&Path>,
-) -> Vec<(DetectableTier, PathBuf)> {
+pub fn detectable_candidates(dirs: &Dirs) -> Vec<(DetectableTier, PathBuf)> {
     let mut candidates = vec![
         (
             DetectableTier::Cache,
@@ -232,9 +222,6 @@ pub fn detectable_candidates(
             d.join("gamebus-presenced").join(DETECTABLE_NAME),
         )
     }));
-    if let Some(out) = out_dir {
-        candidates.push((DetectableTier::BuildDir, out.join(DETECTABLE_NAME)));
-    }
     candidates
 }
 
@@ -313,7 +300,7 @@ mod tests {
 
     #[test]
     fn detectable_search_order_matches_the_daemon() {
-        let c = detectable_candidates(&dirs("/home/tester"), Some(Path::new("/build/out")));
+        let c = detectable_candidates(&dirs("/home/tester"));
         let tiers: Vec<_> = c.iter().map(|(t, _)| *t).collect();
         assert_eq!(
             tiers,
@@ -323,7 +310,6 @@ mod tests {
                 // One per XDG_DATA_DIRS entry, in order.
                 DetectableTier::SystemData,
                 DetectableTier::SystemData,
-                DetectableTier::BuildDir,
             ]
         );
         assert_eq!(

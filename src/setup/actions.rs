@@ -236,7 +236,7 @@ impl Plan {
 /// drift from what actually happens — that is the whole reason the steps are
 /// data rather than a sequence of calls. The exact list stays one keypress
 /// away; this is the layer on top of it, not a replacement for it.
-pub fn explain(action: Action, plan: &Plan) -> Vec<String> {
+pub fn explain(plan: &Plan) -> Vec<String> {
     let mut lines = Vec::new();
 
     let programs: Vec<&PathBuf> = plan
@@ -312,7 +312,9 @@ pub fn explain(action: Action, plan: &Plan) -> Vec<String> {
         }
     }
 
-    if matches!(action, Action::FetchDetectable) {
+    if plan.all_steps().any(
+        |s| matches!(s, Step::Run { args, .. } if args.iter().any(|a| a == "fetch-detectable")),
+    ) {
         lines.push("download the latest game-name database (about 12 MB)".to_string());
     }
 
@@ -328,10 +330,13 @@ pub fn scope_note(plan: &Plan, home: &Path) -> String {
     // Named explicitly rather than inferred: the download writes into the
     // cache via a subprocess, so no Step carries the path. Saying "nothing
     // changes" next to "download 12 MB" would break this module's own rule
-    // that the plain layer cannot promise what the steps do not do.
-    if plan.all_steps().any(
+    // that the plain layer cannot promise what the steps do not do. Only when
+    // the fetch is the whole plan, though — an install's write scope is the
+    // headline, and its own summary line already names the download.
+    let has_fetch = plan.all_steps().any(
         |s| matches!(s, Step::Run { args, .. } if args.iter().any(|a| a == "fetch-detectable")),
-    ) {
+    );
+    if has_fetch && plan.all_steps().all(|s| s.write_target().is_none()) {
         return "Rewrites the game-name database in your cache directory.".to_string();
     }
     // A command in the privileged block writes outside the home by
@@ -358,8 +363,6 @@ pub fn scope_note(plan: &Plan, home: &Path) -> String {
 pub struct Source {
     /// Directory holding the freshly built binaries.
     pub bin_dir: PathBuf,
-    /// The naming database from the build tree, when it exists.
-    pub detectable: Option<PathBuf>,
     /// An already-installed `gamebus-presence`, for `fetch-detectable`.
     pub cli: Option<PathBuf>,
 }
@@ -372,11 +375,6 @@ impl Source {
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // The build script writes the naming database here. Baked in at compile
-        // time, so it is only meaningful while running from the build tree —
-        // which is exactly when an install needs it.
-        let out_dir = PathBuf::from(env!("OUT_DIR")).join(DETECTABLE_NAME);
-
         let cli = [
             bin_dir.join(super::paths::CLI_BIN),
             dirs.home.join(".local/bin").join(super::paths::CLI_BIN),
@@ -385,11 +383,7 @@ impl Source {
         .into_iter()
         .find(|p| p.exists());
 
-        Self {
-            bin_dir,
-            detectable: out_dir.exists().then_some(out_dir),
-            cli,
-        }
+        Self { bin_dir, cli }
     }
 }
 
@@ -473,16 +467,6 @@ fn plan_install(layout: &Layout, source: &Source) -> Plan {
         }
     }
 
-    // Moves the naming database out of the build tree, where only a binary run
-    // from `target/` can find it, into a search path an installed binary uses.
-    if let Some(detectable) = &source.detectable {
-        privileged.push(Step::InstallFile {
-            from: detectable.clone(),
-            to: layout.detectable_file(),
-            mode: 0o644,
-        });
-    }
-
     // The endpoint configuration ships as a reference copy in the data dir
     // (bundled content, rewritten on every install); user overrides live in
     // the config dir, which install never touches.
@@ -504,10 +488,21 @@ fn plan_install(layout: &Layout, source: &Source) -> Plan {
         mode: 0o644,
     });
 
+    // The naming database is never baked into a build: the freshly installed
+    // CLI downloads it into the cache tier as the last step. Best effort — an
+    // offline install still succeeds, the daemon degrades to executable
+    // names, and the status screen offers the fetch as a one-key fix.
+    let mut after = reload_steps();
+    after.push(Step::Run {
+        program: layout.cli_bin().display().to_string(),
+        args: vec!["fetch-detectable".to_string()],
+        best_effort: true,
+    });
+
     Plan {
         before: Vec::new(),
         privileged,
-        after: reload_steps(),
+        after,
     }
 }
 
@@ -851,7 +846,6 @@ mod tests {
             // Nothing exists at this path, so no InstallFile steps are planned
             // for the binaries — that is the point of the second test below.
             bin_dir: PathBuf::from("/build/target/release"),
-            detectable: None,
             cli: None,
         }
     }
@@ -885,6 +879,50 @@ mod tests {
                 assert!(contents.contains("/home/tester/.local/bin/gamebus-presenced"));
             }
         }
+    }
+
+    #[test]
+    fn install_ends_with_a_best_effort_fetch_by_the_installed_cli() {
+        // The naming database is never fetched at build time, so the install
+        // itself must produce it — via the copy of the CLI it just installed,
+        // never the build-tree one, and without failing an offline install.
+        for target in [Target::User, Target::System] {
+            let plan = plan(Action::Install(target), &dirs(), &source());
+            let fetch = plan
+                .after
+                .last()
+                .expect("install plan has session-scoped steps");
+            match fetch {
+                Step::Run {
+                    program,
+                    args,
+                    best_effort,
+                } => {
+                    let cli = layout(&dirs(), target).cli_bin();
+                    assert_eq!(program, &cli.display().to_string());
+                    assert_eq!(args, &vec!["fetch-detectable".to_string()]);
+                    assert!(best_effort, "an offline install must still succeed");
+                }
+                other => panic!("last install step is not the fetch: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn install_scope_note_still_leads_with_the_write_scope() {
+        // The fetch inside an install must not hijack the headline — the
+        // cache-rewrite wording is reserved for the fetch-only plan.
+        let home = PathBuf::from("/home/tester");
+        let install = plan(Action::Install(Target::User), &dirs(), &source());
+        assert!(
+            scope_note(&install, &home).contains("home directory"),
+            "install scope note lost its write scope"
+        );
+        let fetch_only = plan(Action::FetchDetectable, &dirs(), &source());
+        assert!(
+            scope_note(&fetch_only, &home).contains("cache directory"),
+            "fetch-only plan lost its cache wording"
+        );
     }
 
     #[test]
@@ -1032,7 +1070,7 @@ mod tests {
     #[test]
     fn a_user_install_is_explained_without_a_single_command() {
         let plan = plan(Action::Install(Target::User), &dirs(), &source());
-        let lines = explain(Action::Install(Target::User), &plan);
+        let lines = explain(&plan);
 
         // Plain language: no paths-with-flags, no shell verbs.
         for line in &lines {
@@ -1061,12 +1099,12 @@ mod tests {
     #[test]
     fn autostart_and_uninstall_explain_their_consequence() {
         let enable = plan(Action::EnableAutostart(Target::User), &dirs(), &source());
-        assert!(explain(Action::EnableAutostart(Target::User), &enable)
+        assert!(explain(&enable)
             .iter()
             .any(|l| l.contains("after a logout")));
 
         let uninstall = plan(Action::Uninstall(Target::User), &dirs(), &source());
-        let lines = explain(Action::Uninstall(Target::User), &uninstall);
+        let lines = explain(&uninstall);
         assert!(lines.iter().any(|l| l.contains("delete")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("autostart")), "{lines:?}");
     }
@@ -1076,10 +1114,7 @@ mod tests {
     #[test]
     fn an_empty_plan_is_explained_as_doing_nothing() {
         let empty = Plan::default();
-        assert_eq!(
-            explain(Action::Start, &empty),
-            vec!["nothing — there is no work to do"]
-        );
+        assert_eq!(explain(&empty), vec!["nothing — there is no work to do"]);
         assert_eq!(
             scope_note(&empty, Path::new("/home/tester")),
             "Nothing on disk changes."
