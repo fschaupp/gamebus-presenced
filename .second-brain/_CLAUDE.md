@@ -64,6 +64,20 @@ consequential findings the author and test suite had both missed.
 
 ---
 
+## Section 0.8 - Commit Trailer: Assisted-by, not Co-Authored-By
+
+Claude-assisted commits end with the trailer
+`Assisted-by: Claude Fable 5 <noreply@anthropic.com>` instead of any
+`Co-Authored-By:` tag. Owner's rule (2026-08-07): the wording is an EU AI Act
+transparency disclosure, not an authorship claim - a human reviews, tests,
+and ships every change. Applies to all branches (internal and public).
+Commits the owner makes or runs themselves (e.g. `.scripts/release.sh`
+release commits) carry no trailer. On the `public` branch the tweet-size
+message rule covers the prose only, never the trailer. The public README
+carries a matching one-line disclosure above "Prior art it stands on".
+
+---
+
 ## Vault Identity
 
 - **Owner:** Florian

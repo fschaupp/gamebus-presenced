@@ -14,7 +14,7 @@ ai-first: true
 
 ## For future Claude
 
-`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), S4d (ancestor-walk join), S4e (game identification + scan), S4f (game groups, 2026-08-06), S6/S6b (MPRIS hints + Lutris wrapper titles, 2026-08-06), S7 (publication hygiene, 2026-08-06), S8 (Heroic detection, 2026-08-06), and S9 (umu-miss stash, 2026-08-07) are COMPLETE; S5 (gamebus-setup TUI) landed 2026-08-06, STAGED. S9 and S9b (umu-database contribution pipeline) landed on master 2026-08-07 via --no-ff merge 58afefd (branch `feat/s9-umu-miss-report` kept, 9 commits 4c8a16e through b638404; pushed to gitea). Authoritative detail for S4f/S5 is the repo (PLAN.md) until vault records exist. This note tracks the project's status, decisions, and recent activity.
+`gamebus-presenced` is a Rust project implementing a unified "what is this machine playing" presence on the Linux session bus. It collects fragments from multiple sources (GameMode for pid/executable, Discord IPC for title/chapter text, Steam for appid) and correlates them by pid into a single activity record published via D-Bus interface `org.gamebus.Presence.v1`. S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment via Enricher middleware), S4b (naming via detectable.json), S4c (packaging: CLI + systemd), S4d (ancestor-walk join), S4e (game identification + scan), S4f (game groups, 2026-08-06), S6/S6b (MPRIS hints + Lutris wrapper titles, 2026-08-06), S7 (publication hygiene, 2026-08-06), S8 (Heroic detection, 2026-08-06), and S9 (umu-miss stash, 2026-08-07) are COMPLETE; S5 (gamebus-setup TUI) landed 2026-08-06, STAGED. S9 and S9b (umu-database contribution pipeline) landed on master 2026-08-07 via --no-ff merge 58afefd (branch `feat/s9-umu-miss-report` kept, 9 commits 4c8a16e through b638404; pushed to gitea). A publishable branch `public` now exists (2026-08-07 evening): 13 re-composed Apache-2.0-licensed feature commits, every one compiling, scrubbed of internal references — see [[wiki/logs/2026-08-07 - gamebus-presenced Public Branch Re-Composition]]. **v0.1.0 was RELEASED the same night** at https://github.com/fschaupp/gamebus-presenced via the S10 release pipeline (network-free builds, `.github/workflows/release.yml`, `.scripts/release.sh`); the history was then rewritten to carry `Assisted-by:` trailers + a README AI note (EU AI Act), so a one-time force-push + re-tag is pending — see [[wiki/logs/2026-08-07 - gamebus-presenced v0.1.0 Release]]. Authoritative detail for S4f/S5 is the repo (PLAN.md) until vault records exist. This note tracks the project's status, decisions, and recent activity.
 
 ## Overview
 
@@ -44,7 +44,7 @@ Steam probe → registry.vdf + /proc environ
 
 ## Status
 
-**S0 through S9b implementation completed and on master (S6-S8 merged 2026-08-06; S9/S9b merged 2026-08-07 as --no-ff 58afefd, branch kept); S5 landed (STAGED). master pushed to gitea. (as of 2026-08-07)**
+**S0 through S9b on master; S5 landed (STAGED). v0.1.0 RELEASED 2026-08-07 (night) from branch `public` at https://github.com/fschaupp/gamebus-presenced — the GitHub workflow built, bundled, and published it. S10 (network-free builds + release workflow) merged to master 2026-08-07 late night as --no-ff `d6adb69` (branch `feat/release-pipeline` kept, trailers switched to Assisted-by, gate green). Pending: force-push + re-tag of the Assisted-by-disclosed public history; master push to gitea (owner's call). (as of 2026-08-07)**
 
 - Repo created: 2026-08-03
 - Design doc: `docs/design/gamebus-presence.md` (complete)
@@ -138,11 +138,18 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 - User deletions are the annotation-half `dismissed` flag, never key removal (2026-08-07)
 - All remote endpoints live in the shipped `endpoints.toml`; the daemon reads none of it (2026-08-07)
 
+### Public Branch (2026-08-07)
+- Public branch style rules: commit messages max 200 chars, no Co-Authored-By trailers, no em-dashes anywhere (code, docs, messages), no internal references (S-phase tags, spec § refs, ADR numbers, diary dates), sizeable feature commits, and every commit must pass `cargo check --all-targets`. See [[wiki/logs/2026-08-07 - gamebus-presenced Public Branch Re-Composition]] (2026-08-07)
+- License: Apache-2.0 single license (was "MIT OR Apache-2.0 (proposed)"), canonical LICENSE file + NOTICE with "Copyright 2026 Florian Schaupp"; LICENSE appendix placeholders stay verbatim; no email in copyright lines (2026-08-07)
+- Git author identity on the public branch stays the alias `fschaupp <spritzwine.absently488@passinbox.com>` — a deliberate privacy relay; copyright name and git identity are independent (2026-08-07)
+- **`Assisted-by:` replaces `Co-Authored-By:` everywhere** (2026-08-07, EU AI Act transparency): Claude-assisted commits end with `Assisted-by: Claude Fable 5 <noreply@anthropic.com>`; on `public` all 17 commits carry it and the README discloses AI assistance in one line above "Prior art it stands on" (present from the first commit). Human-run release commits (`.scripts/release.sh`) carry no trailer. The tweet-size rule covers the prose, not the trailer. (2026-08-07)
+- Releases are cut with `.scripts/release.sh` (gate → set version → `release: vX.Y.Z` commit → annotated tag; never pushes) and published by `.github/workflows/release.yml` on the pushed tag; builds are network-free since S10 — `detectable.json` is fetched at install/on demand, never at build time (2026-08-07)
+
 ## Open Decisions
 
 - **MPRIS as a source** — deliberately deferred. Already a good standard with its own consumers; wrapping it mostly duplicates. Move into S4 if needed.
 - **arRPC-compatible bridge on 1337** — would let this replace arRPC for Vesktop users. Cheap once S2 exists; not currently in scope.
-- **Licence** — MIT OR Apache-2.0 proposed in the design doc.
+- ~~**Licence** — MIT OR Apache-2.0 proposed in the design doc.~~ RESOLVED 2026-08-07: Apache-2.0 single license (see Key Decisions → Public Branch).
 
 ## Non-Goals
 
@@ -153,6 +160,24 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 
 ## Recent Activity
 
+- 2026-08-07 (night): **v0.1.0 released** — S10 on `feat/release-pipeline`
+  (build.rs deleted, builds network-free, install fetches detectable.json
+  best-effort via the installed CLI; `.github/workflows/release.yml`),
+  `.scripts/release.sh` dogfooded for the release commit + tag, owner pushed
+  to https://github.com/fschaupp/gamebus-presenced and the workflow published
+  the release. Then all 17 public commits rewritten with `Assisted-by:`
+  trailers + README AI note (force-push pending), and two Mastodon
+  announcement posts drafted (main + umu-credit follow-up). See
+  [[wiki/logs/2026-08-07 - gamebus-presenced v0.1.0 Release]].
+- 2026-08-07 (evening): Public branch re-composition — the owner's 17
+  cherry-picked commits became 13 publishable feature commits on branch
+  `public` (worktree `gamebus-presenced.worktrees/public`), every one passing
+  `cargo check --all-targets`; ~340 em-dashes and ~150 internal references
+  scrubbed from every commit via `git filter-branch --tree-filter` with
+  replace-or-die scripts; Apache-2.0 LICENSE + NOTICE threaded through the
+  whole history; original kept as ref `public-original`. Push pending. See
+  [[wiki/logs/2026-08-07 - gamebus-presenced Public Branch Re-Composition]]
+  and [[wiki/concepts/Deterministic History Re-Composition with Tree Filters]].
 - 2026-08-07: S9b — umu-miss verification/drafting/export pipeline in
   gamebus-setup (`--verify`/`--fetch`/`--export`/`--export-md`/`--check-prs`),
   TWO adversarial review rounds (18 + 9 agents; 10 confirmed findings, all
@@ -183,7 +208,7 @@ See `docs/design/gamebus-presence.md` § The D-Bus surface for full details.
 - 2026-08-04: S2 implementation completed - standalone Discord IPC listener. `discord-ipc-0` bound with stale-socket handling, handshake/READY, lock-step echo, `SET_ACTIVITY` via pinned `rsrpc` crate payload model, `SO_PEERCRED` pid, `discord_<pid>` objects, mutable `ActivityInterface` with `PropertiesChanged`. See [[wiki/logs/2026-08-04 - gamebus-presenced S2]] and [[wiki/decisions/adr-006-rsrpc-crate-dependency]].
 - 2026-08-04: S1 implementation completed - GameMode source feeding the D-Bus surface. Watcher with `NameOwnerChanged` availability tracking, per-activity objects at `.../Activity/pid_<pid>`, `ActivityAdded`/`ActivityRemoved` signals, `HasActivity` change emission, `ListActivities` as `ao`. Two live discoveries recorded in [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]]. Verified by integration test + busctl acceptance. See [[wiki/logs/2026-08-04 - gamebus-presenced S1]] for details.
 - 2026-08-04: S0 implementation completed - D-Bus interface foundation (`org.gamebus.Presence.v1.Manager` with `ListActivities`, `HasActivity`, `Version` properties; `Activity` type; zbus v4 bindings; service verified on session bus). See [[wiki/logs/2026-08-04 - gamebus-presenced S0]] for details.
-- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]], [[wiki/logs/2026-08-04 - gamebus-presenced S3]], [[wiki/logs/2026-08-04 - gamebus-presenced S4]], [[wiki/logs/2026-08-06 - gamebus-presenced S6-S9 Naming Layers and umu Stash]], [[wiki/logs/2026-08-07 - gamebus-presenced S9b umu Contribution Pipeline]] (S4f/S5 logs pending — repo PLAN.md is authoritative)
+- Dev logs: [[wiki/logs/2026-08-04 - gamebus-presenced S0]], [[wiki/logs/2026-08-04 - gamebus-presenced S1]], [[wiki/logs/2026-08-04 - gamebus-presenced S2]], [[wiki/logs/2026-08-04 - gamebus-presenced S3]], [[wiki/logs/2026-08-04 - gamebus-presenced S4]], [[wiki/logs/2026-08-06 - gamebus-presenced S6-S9 Naming Layers and umu Stash]], [[wiki/logs/2026-08-07 - gamebus-presenced S9b umu Contribution Pipeline]], [[wiki/logs/2026-08-07 - gamebus-presenced Public Branch Re-Composition]], [[wiki/logs/2026-08-07 - gamebus-presenced v0.1.0 Release]] (S4f/S5 logs pending — repo PLAN.md is authoritative)
 - Kanban board: [[boards/gamebus-presenced]]
 - ADRs: [[wiki/decisions/adr-001-zbus-v4-tokio-runtime]], [[wiki/decisions/adr-002-simplified-activity-type]], [[wiki/decisions/adr-003-d-bus-service-naming]], [[wiki/decisions/adr-004-manager-and-activity-interfaces]], [[wiki/decisions/adr-005-activity-object-ids-and-gamemode-game-objects]], [[wiki/decisions/adr-006-rsrpc-crate-dependency]], [[wiki/decisions/adr-007-correlator-merge-rules-and-proxy]], [[wiki/decisions/adr-008-appid-records-one-record-per-merge-key]], [[wiki/decisions/adr-009-umu-miss-stash-two-writer-owned-halves]]
 

@@ -8,7 +8,7 @@ ai-first: true
 
 ## For future Claude
 
-Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S9b (as of 2026-08-07). S0-S8 complete on master: S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment), S4b (naming), S4c (packaging), S4d (ancestor-walk), S4e (game identification + Steam scan + appid_records simplification), S4f (game groups), S5 (setup TUI, STAGED), S6/S6b (MPRIS + Lutris naming hints), S7 (publication hygiene), S8 (Heroic). S9 (umu-miss stash) + S9b (umu-database contribution pipeline) landed on master 2026-08-07 via --no-ff merge 58afefd (branch feat/s9-umu-miss-report kept, 9 commits 4c8a16e→b638404); master pushed to gitea.
+Kanban board for the gamebus-presenced project. Tracks all tasks across slices S0-S9b (as of 2026-08-07). S0-S8 complete on master: S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC listener), S3 (proxy + correlator + restart cache), S4a (Steam enrichment), S4b (naming), S4c (packaging), S4d (ancestor-walk), S4e (game identification + Steam scan + appid_records simplification), S4f (game groups), S5 (setup TUI, STAGED), S6/S6b (MPRIS + Lutris naming hints), S7 (publication hygiene), S8 (Heroic). S9 (umu-miss stash) + S9b (umu-database contribution pipeline) landed on master 2026-08-07 via --no-ff merge 58afefd (branch feat/s9-umu-miss-report kept, 9 commits 4c8a16e→b638404); master pushed to gitea. Public branch re-composed 2026-08-07 evening (17 cherry-picked commits → 13 clean publishable commits on branch `public`, backup ref `public-original`). **v0.1.0 RELEASED the same night** at https://github.com/fschaupp/gamebus-presenced via S10 (network-free builds + release workflow + `.scripts/release.sh`); the disclosed (`Assisted-by:` + README AI note) history still needs a one-time force-push + re-tag.
 
 ## gamebus-presenced Kanban Board
 
@@ -20,7 +20,17 @@ Kanban board for the gamebus-presenced project. Tracks all tasks across slices S
 - [ ] 🟡 **Live-verify S9b against a real umu-miss launch**
 	Stash is empty until the next Heroic/Lutris umu game starts.
 
+### ⏳ Waiting On
+
+- [ ] 🟡 **Republish the disclosed history (owner's call)**
+	Delete the GitHub release + remote tag v0.1.0, `git push --force github public`, re-push the tag; the workflow republishes from the Assisted-by history. Then delete the `public-original` backup ref, and optionally add the alias email spritzwine.absently488@passinbox.com to the GitHub account so commits attribute. [[wiki/logs/2026-08-07 - gamebus-presenced v0.1.0 Release]]
 ### ✅ Done
+- [x] ~~🟡 **Merge `feat/release-pipeline` to master (--no-ff, branch kept)**~~ ✅ 2026-08-07 (merge d6adb69, parents f0454e6 + a9dfa0e; trailers switched to Assisted-by first; gate green on merged master; master now 3 commits ahead of gitea, push is the owner's call)
+- [x] ~~🟡 **v0.1.0 released: S10 network-free builds + GitHub release workflow + .scripts/release.sh**~~ ✅ 2026-08-07 (night; pushed by owner, workflow published the release)
+	build.rs gone, install fetches detectable.json best-effort via installed CLI; release.sh gates, sets version, commits, tags; exec-bit fixed via update-index (core.filemode=false here). Mastodon posts drafted. All 17 public commits then rewritten with Assisted-by trailers + README AI note. [[wiki/logs/2026-08-07 - gamebus-presenced v0.1.0 Release]]
+- [x] ~~🟡 **Publish/push the `public` branch (owner's call)**~~ ✅ 2026-08-07 (pushed to GitHub, first release live)
+- [x] ~~🟡 **Public branch re-composition: 17 cherry-picked commits → 13 clean publishable commits on `public`**~~ ✅ 2026-08-07 (worktree /media/Data/Projekte/gamebus-presenced.worktrees/public, backup ref `public-original`)
+	All em-dashes and internal references (S-phase tags, spec §, ADR numbers, diary dates) removed from every commit's tree via git filter-branch + deterministic cleanup script; fresh tweet-size messages (max 200 chars, no Co-Authored-By); every commit passes cargo check --all-targets; full licensing set threaded through history (Apache-2.0 LICENSE + NOTICE + "Copyright 2026 Florian Schaupp" + Discord disclaimer + umu prior-art in README). [[wiki/projects/gamebus-presenced]] [[wiki/logs/2026-08-07 - gamebus-presenced Public Branch Re-Composition]]
 - [x] ~~🟡 **Merge feat/s9-umu-miss-report to master (--no-ff, branch kept) + push to gitea**~~ ✅ 2026-08-07 (merge 58afefd, by owner)
 - [x] ~~🟡 **S9b: verify/draft/export pipeline + 2 adversarial review rounds (10 findings fixed) + interactive TUI pane + endpoints.toml**~~ ✅ 2026-08-07 (branch feat/s9-umu-miss-report through b638404)
 - [x] ~~🟡 **S9: umu-miss stash written by the daemon**~~ ✅ 2026-08-07 (4c8a16e at 00:09, on feat/s9-umu-miss-report)
