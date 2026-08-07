@@ -13,7 +13,8 @@
 //!   draft is collision-checked — no exceptions.
 //! - `--fetch`: refresh the cached full dump. One request, only when asked.
 //! - `--export`: submission-shaped CSV on stdout.
-//! - `--export-md [file]`: a slim, ready-to-paste merge-request text.
+//! - `--export-md [file]`: a slim, ready-to-paste merge-request text —
+//!   written to the file, or to stdout when none is given.
 //! - `--check-prs`: best-effort scan of open upstream merge requests for
 //!   entries someone already submitted. Opt-in, non-fatal, clearly labelled.
 
@@ -456,7 +457,9 @@ pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
     match verify(&mut report, db.as_ref()) {
         Ok(mut vlines) => {
             lines.append(&mut vlines);
-            lines.push("Export a submission: gamebus-setup umu-misses --export-md".to_string());
+            lines.push(
+                "Export a submission: gamebus-setup umu-misses --export-md [file] (stdout without a file)".to_string(),
+            );
             (lines, true)
         }
         Err(e) => {
@@ -547,6 +550,37 @@ pub(crate) fn tui_cycle_store(key: &str) -> (Vec<String>, bool) {
     } else {
         report.update(key, |m| m.store_override = Some(next.clone()));
         format!("Store set to {next} (daemon guessed {guessed}) — press v to re-verify.")
+    };
+    report.save();
+    (vec![line], true)
+}
+
+/// The TUI's `d`: dismiss the selected entry, or restore it. A dismissed
+/// entry is parked (bottom of the list, greyed, out of every export), not
+/// deleted — a deleted key would be resurrected by the daemon's merge and
+/// re-recorded on the next launch anyway, and "not wanted" is a judgment
+/// worth being able to reverse.
+pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let Some(m) = report.entries().get(key) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let title = m
+        .title
+        .clone()
+        .unwrap_or_else(|| "(unresolved)".to_string());
+    let line = if m.dismissed.is_some() {
+        report.update(key, |m| m.dismissed = None);
+        format!("{title} restored — back in the list and the exports.")
+    } else {
+        report.update(key, |m| m.dismissed = Some(umu_report::today()));
+        format!("{title} dismissed — kept in the stash, out of the exports (d restores).")
     };
     report.save();
     (vec![line], true)
@@ -781,6 +815,10 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
     entries.sort_by(|a, b| a.last_seen.cmp(&b.last_seen).reverse());
 
     for m in entries {
+        if m.dismissed.is_some() {
+            held.push((m, "dismissed by you (d in the TUI restores it)".to_string()));
+            continue;
+        }
         if let Some(v) = &m.verification {
             if v.state == VerificationState::AlreadyInDatabase {
                 held.push((
@@ -1058,11 +1096,17 @@ fn list(report: &UmuReport) {
         if let Some(pr) = &m.possible_pr {
             println!("  {:<28} possibly already submitted: {pr}", "");
         }
+        if let Some(when) = &m.dismissed {
+            println!(
+                "  {:<28} dismissed {when} — excluded from exports (d in the TUI restores)",
+                ""
+            );
+        }
     }
     println!();
     println!("Verify against the database:  gamebus-setup umu-misses --verify   (--fetch first for a local copy)");
     println!(
-        "Export a submission draft:    gamebus-setup umu-misses --export | --export-md [file]"
+        "Export a submission draft:    gamebus-setup umu-misses --export | --export-md [file]\n                              (both print to stdout; --export-md writes to the file when given one)"
     );
 }
 
@@ -1136,6 +1180,7 @@ mod tests {
             drafted_id: None,
             possible_pr: None,
             store_override: None,
+            dismissed: None,
         }
     }
 

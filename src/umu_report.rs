@@ -82,6 +82,14 @@ pub struct Miss {
     /// [`Miss::effective_store`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_override: Option<String>,
+    /// Set (to the date) when the user dismissed this entry in the setup
+    /// TUI: not wrong, just not wanted — dropped from the exports and
+    /// parked at the bottom of the list. Annotation-half rather than a
+    /// deletion, because the daemon's merge would resurrect a deleted key
+    /// (and the next launch would re-record it anyway); a flag survives
+    /// both. Reversible with the same key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed: Option<String>,
 }
 
 impl Miss {
@@ -244,6 +252,7 @@ impl UmuReport {
             drafted_id: None,
             possible_pr: None,
             store_override: None,
+            dismissed: None,
         });
         entry.last_seen = today;
         self.dirty = true;
@@ -383,6 +392,7 @@ impl UmuReport {
                     ours.drafted_id = theirs.drafted_id;
                     ours.possible_pr = theirs.possible_pr;
                     ours.store_override = theirs.store_override;
+                    ours.dismissed = theirs.dismissed;
                 }
             }
         }

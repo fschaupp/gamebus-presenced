@@ -23,10 +23,10 @@ pub enum View {
     Status,
     Monitor,
     /// The umu-database miss stash (S9b): what the daemon collected, what
-    /// verification made of it. The pane can also drive the flows on
-    /// explicit keypresses — `v` fetches+verifies (network, and the footer
-    /// says so), `a` assigns an id (collision-checked before it saves),
-    /// `s` corrects the store guess.
+    /// verification made of it. The pane drives the flows on explicit
+    /// keypresses — `v` fetches+verifies (network, and the footer says so),
+    /// `a` assigns an id (collision-checked before it saves), `s` corrects
+    /// the store guess, `d` dismisses/restores an entry.
     Misses,
 }
 
@@ -258,6 +258,11 @@ pub enum Intent {
     UmuStore {
         key: String,
     },
+    /// Misses pane `d`: dismiss the selected entry (parked, out of the
+    /// exports) or restore it — a toggle, not a deletion.
+    UmuDismiss {
+        key: String,
+    },
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
@@ -335,6 +340,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         }
         KeyCode::Char('s') if app.view == View::Misses => match app.selected_miss_key() {
             Some(key) => Intent::UmuStore { key },
+            None => Intent::None,
+        },
+        KeyCode::Char('d') if app.view == View::Misses => match app.selected_miss_key() {
+            Some(key) => Intent::UmuDismiss { key },
             None => Intent::None,
         },
         // Pane focus, install target, and Enter act on the Status pane's
@@ -669,8 +678,9 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
             Review them here — v fetches the database and verifies, s corrects\n\
             a store guess, a assigns an id by hand (collision-checked).\n\
-            Export a submission from the shell:\n\n\
-            \u{20}   gamebus-setup umu-misses --export-md";
+            Export a submission from the shell (to stdout, or to a file if\n\
+            you name one):\n\n\
+            \u{20}   gamebus-setup umu-misses --export-md [file]";
         f.render_widget(
             Paragraph::new(text)
                 .block(Block::default().borders(Borders::ALL).title(" umu misses ")),
@@ -721,9 +731,18 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
     let mut detail = vec![field("Title", m.title.as_deref().unwrap_or("(unresolved)"))];
-    // The one line that stops a duplicate submission goes FIRST: at small
+    // The lines that change what a submission means go FIRST: at small
     // terminal sizes the pane clips from the bottom, and a clipped warning
     // is a warning that never happened.
+    if let Some(when) = &m.dismissed {
+        detail.push(Line::from(Span::styled(
+            format!(
+                "{:<11} {when} — out of the exports (d restores)",
+                "Dismissed"
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     if let Some(pr) = &m.possible_pr {
         detail.push(Line::from(vec![
             Span::styled(
@@ -819,6 +838,9 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// One glyph summarizing where an entry stands, for the list column.
 fn miss_state(m: &Miss) -> (&'static str, Style) {
+    if m.dismissed.is_some() {
+        return ("✗", Style::default().fg(Color::DarkGray));
+    }
     if m.possible_pr.is_some() {
         return ("↷", Style::default().fg(Color::Magenta));
     }
@@ -864,7 +886,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         // The export hint lives in the verify output and the empty state —
         // this line carries the pane's own verbs.
         View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
-        View::Misses => "↑↓ · tab view · v fetch+verify (net) · a assign id · s store · r · q quit",
+        View::Misses => "↑↓ · tab view · v verify (net) · a assign · s store · d dismiss · q quit",
     };
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
@@ -1213,6 +1235,12 @@ mod tests {
                 key: "egs:Control".into()
             }
         );
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('d'))),
+            Intent::UmuDismiss {
+                key: "egs:Control".into()
+            }
+        );
     }
 
     #[test]
@@ -1268,6 +1296,7 @@ mod tests {
                 drafted_id: None,
                 possible_pr: None,
                 store_override: None,
+                dismissed: None,
             },
         )
     }

@@ -58,7 +58,8 @@ fn usage() {
     eprintln!("  --db <file>               Database to verify against (CSV checkout or");
     eprintln!("                            JSON dump; also via GAMEBUS_UMU_DB)");
     eprintln!("  --export                  Submission-shaped CSV on stdout");
-    eprintln!("  --export-md [file]        Ready-to-paste merge-request text");
+    eprintln!("  --export-md [file]        Ready-to-paste merge-request text, written");
+    eprintln!("                            to <file> — without one, printed to stdout");
     eprintln!("  --check-prs               Also scan open upstream merge requests for");
     eprintln!("                            already-submitted entries (best-effort)");
 }
@@ -295,8 +296,10 @@ fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
             .map(|(k, m)| (k.clone(), m.clone()))
             .collect();
         misses.sort_by(|a, b| {
-            b.1.last_seen
-                .cmp(&a.1.last_seen)
+            // Dismissed entries park at the bottom, out of the way.
+            (a.1.dismissed.is_some())
+                .cmp(&b.1.dismissed.is_some())
+                .then_with(|| b.1.last_seen.cmp(&a.1.last_seen))
                 .then_with(|| a.1.title.cmp(&b.1.title))
                 .then_with(|| a.0.cmp(&b.0))
         });
@@ -533,6 +536,13 @@ async fn handle(
                     }
                     app.busy = Some("updating the store".into());
                     spawn_umu_flow(tx, move || setup::umu_misses::tui_cycle_store(&key));
+                }
+                ui::Intent::UmuDismiss { key } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("updating the entry".into());
+                    spawn_umu_flow(tx, move || setup::umu_misses::tui_toggle_dismiss(&key));
                 }
                 ui::Intent::Run(action) => {
                     if app.busy.is_some() {

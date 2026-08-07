@@ -404,6 +404,41 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
 }
 
 #[test]
+fn dismissed_entries_stay_in_the_stash_but_out_of_the_exports() {
+    let home = TempHome::new("umu-dismissed");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"egs:Keep":{"title":"Keep Me","store":"egs","codename":"Keep",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-07","last_seen":"2026-08-07"},
+        "egs:Skip":{"title":"Skip Me","store":"egs","codename":"Skip",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-07","last_seen":"2026-08-07",
+            "dismissed":"2026-08-07"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(text.contains("Keep Me"), "{text}");
+    assert!(
+        !text.contains("Skip Me"),
+        "dismissed entry exported:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(err.contains("dismissed by you"), "{err}");
+
+    // Still visible (marked) in the review list — parked, not deleted.
+    let list = run(&home, &["umu-misses"]);
+    let text = stdout(&list);
+    assert!(text.contains("Skip Me"), "{text}");
+    assert!(text.contains("dismissed 2026-08-07"), "{text}");
+}
+
+#[test]
 fn a_corrupt_stash_errors_loudly_and_stays_untouched() {
     let home = TempHome::new("umu-corrupt");
     let stash_dir = home.path().join(".local/share/gamebus-presenced");
