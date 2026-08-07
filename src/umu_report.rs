@@ -76,6 +76,20 @@ pub struct Miss {
     /// entry (S9b `--check-prs`, best-effort).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub possible_pr: Option<String>,
+    /// The user's store correction from the setup TUI. `store` stays the
+    /// daemon's guess (its half of the entry); this override is annotation-
+    /// half, so a daemon write never reverts it. Everything downstream reads
+    /// [`Miss::effective_store`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_override: Option<String>,
+}
+
+impl Miss {
+    /// The store every lookup and export should use: the user's correction
+    /// when present, else the daemon's guess.
+    pub fn effective_store(&self) -> &str {
+        self.store_override.as_deref().unwrap_or(&self.store)
+    }
 }
 
 /// What checking a miss against the database established.
@@ -123,6 +137,9 @@ pub enum DraftBasis {
     /// Made-up per the standalone rule: `umu-<title-slug>`, letters
     /// guaranteed.
     TitleSlug,
+    /// Typed by the user in the setup TUI's misses pane — still
+    /// collision-checked against the database before it is accepted.
+    Manual,
 }
 
 /// The stash: keyed by `store:codename` (or the merge key when no codename
@@ -226,6 +243,7 @@ impl UmuReport {
             verification: None,
             drafted_id: None,
             possible_pr: None,
+            store_override: None,
         });
         entry.last_seen = today;
         self.dirty = true;
@@ -364,6 +382,7 @@ impl UmuReport {
                     ours.verification = theirs.verification;
                     ours.drafted_id = theirs.drafted_id;
                     ours.possible_pr = theirs.possible_pr;
+                    ours.store_override = theirs.store_override;
                 }
             }
         }

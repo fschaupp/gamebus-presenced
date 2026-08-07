@@ -380,10 +380,15 @@ stays network-free.
 `gamebus-setup umu-misses` lists the stash for review;
 `--export` emits submission-shaped CSV matching the database's own header.
 Low-confidence and unresolved entries are listed but excluded from export.
-The setup TUI shows the same stash as its third view (Tab cycles to
-"umu misses"): per-entry resolution evidence, verification verdict, and
-drafted id — read-only, with the network-touching flows named as the CLI
-commands they are.
+The setup TUI shows the same stash as its third view (a tab bar under the
+header names all three; Tab cycles them): per-entry resolution evidence,
+verification verdict, and drafted id. The pane drives the flows on labeled
+keypresses — `v` fetch+verify (the one network verb, labeled as such in
+the footer), `s` cycles a store correction (stored as a setup-owned
+override so the daemon's writes never revert it; verification and exports
+read the effective store), `a` assigns a umu id by hand, which passes the
+same mandatory collision check as every draft before it saves. Exporting
+stays a CLI invocation.
 
 ### S9b — verify, draft, and export umu-database submissions (2026-08-07)
 

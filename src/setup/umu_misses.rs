@@ -93,9 +93,16 @@ pub fn run(args: &[String]) -> ExitCode {
     };
 
     if opts.verify {
-        if let Err(e) = verify(&mut report, db.as_ref()) {
-            eprintln!("Verify failed: {e}");
-            return ExitCode::FAILURE;
+        match verify(&mut report, db.as_ref()) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(e) => {
+                eprintln!("Verify failed: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
     if opts.check_prs {
@@ -131,15 +138,21 @@ struct Opts {
 }
 
 impl Opts {
-    fn parse(args: &[String]) -> Result<Self, String> {
-        let mut opts = Self {
+    /// No flags at all — the TUI flows use the same database resolution as
+    /// a bare CLI invocation (env override, then the fetch cache).
+    fn none() -> Self {
+        Self {
             verify: false,
             fetch: false,
             export: false,
             export_md: None,
             check_prs: false,
             db: None,
-        };
+        }
+    }
+
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut opts = Self::none();
         let mut it = args.iter().peekable();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -229,12 +242,16 @@ struct Verdict {
     drafted: Option<DraftedId>,
 }
 
-fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<(), String> {
+/// Returns the human-readable summary as lines rather than printing: the
+/// CLI prints them, the TUI logs them into its output pane (a `println!`
+/// under raw mode would tear the screen).
+fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<String>, String> {
     let api = api_base();
     let naming = NamingDb::load();
     let today = umu_report::today();
+    let mut lines = Vec::new();
     if db.is_none() {
-        println!("No local database (--db / GAMEBUS_UMU_DB / --fetch cache) — every entry goes to the API, and id drafting is skipped: collisions cannot be checked without the full database.");
+        lines.push("No local database (--db / GAMEBUS_UMU_DB / --fetch cache) — every entry goes to the API, and id drafting is skipped: collisions cannot be checked without the full database.".to_string());
     }
 
     let mut keys: Vec<String> = report.entries().keys().cloned().collect();
@@ -247,7 +264,7 @@ fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<(), String> {
         // Local pass: the exact launch first, then the title.
         if let Some(db) = db {
             if let Some(code) = m.codename.as_deref() {
-                if let Some(hit) = db.find_store_codename(&m.store, code) {
+                if let Some(hit) = db.find_store_codename(m.effective_store(), code) {
                     verdicts.push((
                         key.clone(),
                         Verdict {
@@ -375,11 +392,11 @@ fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<(), String> {
     }
     report.save();
 
-    println!(
+    lines.push(format!(
         "Verified {} entr{} against the database:",
         verdicts.len(),
         plural_y(verdicts.len())
-    );
+    ));
     for (key, verdict) in &verdicts {
         let m = &report.entries()[key.as_str()];
         let title = m.title.as_deref().unwrap_or("(unresolved)");
@@ -399,12 +416,179 @@ fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<(), String> {
             ),
             (VerificationState::ConfirmedMissing, None) => "missing from the database".to_string(),
         };
-        println!("  {title:<28} {line}");
+        lines.push(format!("  {title:<28} {line}"));
         if let Some(note) = &verdict.note {
-            println!("  {:<28} note: {note}", "");
+            lines.push(format!("  {:<28} note: {note}", ""));
         }
     }
-    Ok(())
+    Ok(lines)
+}
+
+/// Everything the TUI misses pane's `v` key does: refresh the cached full
+/// dump, then verify the stash against it (and the live API). Blocking —
+/// run it off the render path. Returns the log lines and whether the flow
+/// completed.
+pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
+    let mut lines = Vec::new();
+    match fetch_full_dump(&api_base()) {
+        Ok((_, n)) => lines.push(format!("Fetched the umu database: {n} entries.")),
+        // Not fatal: verify still has the previous cache and the API.
+        Err(e) => lines.push(format!(
+            "Fetch failed ({e}) — verifying with what is available."
+        )),
+    }
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        lines.push(e.to_string());
+        return (lines, false);
+    }
+    if report.entries().is_empty() {
+        lines.push("No umu-database misses recorded yet.".to_string());
+        return (lines, true);
+    }
+    let db = match load_db(&Opts::none()) {
+        Ok(db) => db,
+        Err(e) => {
+            lines.push(e);
+            return (lines, false);
+        }
+    };
+    match verify(&mut report, db.as_ref()) {
+        Ok(mut vlines) => {
+            lines.append(&mut vlines);
+            lines.push("Export a submission: gamebus-setup umu-misses --export-md".to_string());
+            (lines, true)
+        }
+        Err(e) => {
+            lines.push(format!("Verify failed: {e}"));
+            (lines, false)
+        }
+    }
+}
+
+/// The TUI's manual id assignment: validate the shape, collision-check
+/// against the local database (mandatory — no database, no assignment),
+/// then store it as a [`DraftBasis::Manual`] draft on the entry.
+pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
+    let id = id.trim().to_lowercase();
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let Some(title) = report.entries().get(key).map(|m| m.title.clone()) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let db = match load_db(&Opts::none()) {
+        Ok(Some(db)) => db,
+        Ok(None) => {
+            return (
+                vec![
+                    "No local database to collision-check against — press v to fetch it first."
+                        .to_string(),
+                ],
+                false,
+            );
+        }
+        Err(e) => return (vec![e], false),
+    };
+    let note = match check_assignment(&db, title.as_deref(), &id) {
+        Ok(note) => note,
+        Err(e) => return (vec![e], false),
+    };
+    report.update(key, |m| {
+        m.drafted_id = Some(DraftedId {
+            id: id.clone(),
+            basis: DraftBasis::Manual,
+            collision_checked: umu_report::today(),
+        });
+    });
+    report.save();
+    (vec![format!("Assigned {id}: {note}")], true)
+}
+
+/// Every store id the database actually uses (counted from the upstream
+/// CSV, 2026-08-07), most common first — the TUI's `s` key cycles these.
+pub(crate) const KNOWN_STORES: &[&str] = &[
+    "egs",
+    "gog",
+    "amazon",
+    "ubisoft",
+    "humble",
+    "ea",
+    "zoomplatform",
+    "none",
+];
+
+/// The TUI's store correction: cycle the selected entry's effective store
+/// to the next known id. Cycling onto the daemon's own guess clears the
+/// override (the entry is back to "guessed"). A corrected store is what
+/// makes the next verify's store+codename lookup able to hit.
+pub(crate) fn tui_cycle_store(key: &str) -> (Vec<String>, bool) {
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let Some(m) = report.entries().get(key) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let current = m.effective_store().to_string();
+    let guessed = m.store.clone();
+    let idx = KNOWN_STORES.iter().position(|s| *s == current);
+    let next = KNOWN_STORES[(idx.map_or(0, |i| i + 1)) % KNOWN_STORES.len()].to_string();
+    let line = if next == guessed {
+        report.update(key, |m| m.store_override = None);
+        format!("Store back to the daemon's guess: {guessed}.")
+    } else {
+        report.update(key, |m| m.store_override = Some(next.clone()));
+        format!("Store set to {next} (daemon guessed {guessed}) — press v to re-verify.")
+    };
+    report.save();
+    (vec![line], true)
+}
+
+/// The pure half of a manual assignment: shape rules, then the same
+/// mandatory collision check every draft gets.
+fn check_assignment(db: &UmuDb, title: Option<&str>, id: &str) -> Result<String, String> {
+    let Some(suffix) = id.strip_prefix("umu-").filter(|s| !s.is_empty()) else {
+        return Err(format!(
+            "'{id}' is not a umu id — the database wants umu-<something>."
+        ));
+    };
+    if !suffix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "'{id}' carries characters the database's ids never use."
+        ));
+    }
+    let holders = db.find_umu_id(id);
+    if holders.is_empty() {
+        let steam_note = if suffix.chars().all(|c| c.is_ascii_digit()) {
+            " — numeric, so Proton will treat it as the Steam appid; make sure it is one"
+        } else {
+            ""
+        };
+        Ok(format!(
+            "free in the database, collision-checked{steam_note}."
+        ))
+    } else if title.is_some_and(|t| holders.iter().any(|e| e.title.eq_ignore_ascii_case(t))) {
+        Ok(format!(
+            "already names this very game ({}) — the cross-store id.",
+            holders[0].title
+        ))
+    } else {
+        Err(format!(
+            "{id} already names '{}' in the database — not saved.",
+            holders[0].title
+        ))
+    }
 }
 
 /// The API's two lookups for one entry. Only the store+codename lookup is
@@ -419,10 +603,10 @@ fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
         .as_deref()
         .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("none"))
     {
-        if m.store != "none" {
+        if m.effective_store() != "none" {
             let url = format!(
                 "{api}?store={}&codename={}",
-                urlencode(&m.store),
+                urlencode(m.effective_store()),
                 urlencode(code)
             );
             if let Some(umu_id) = api_umu_ids(&url)?.into_iter().next() {
@@ -641,7 +825,7 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             ),
             _ => ("umu-FIXME".to_string(), None, false),
         };
-        let codename = if m.store == "none" {
+        let codename = if m.effective_store() == "none" {
             "none".to_string()
         } else {
             m.codename.clone().unwrap_or_else(|| "none".into())
@@ -682,7 +866,7 @@ fn csv_line(row: &SubmissionRow<'_>) -> String {
             note.push_str(vn);
         }
     }
-    if m.store == "none" {
+    if m.effective_store() == "none" {
         if let Some(code) = m.codename.as_deref().filter(|c| !c.is_empty()) {
             note.push_str(&format!("; launcher codename was '{code}' (store unknown)"));
         }
@@ -690,7 +874,7 @@ fn csv_line(row: &SubmissionRow<'_>) -> String {
     format!(
         "{},{},{},{},,{},{}",
         csv_field(row.title),
-        m.store.to_lowercase(),
+        m.effective_store().to_lowercase(),
         // Codename comes verbatim from an untrusted process's environment
         // (HEROIC_APP_NAME) — escaped like every other external field, or a
         // comma in it would shift the columns and forge the UMU_ID cell.
@@ -764,7 +948,7 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
         md.push_str(&format!(
             "- **{}** — store `{}`, codename `{}`{}; title from {} ({} confidence); {}.\n",
             row.title,
-            m.store.to_lowercase(),
+            m.effective_store().to_lowercase(),
             row.codename,
             m.executable
                 .as_deref()
@@ -888,6 +1072,7 @@ pub(crate) fn basis_label(basis: DraftBasis) -> &'static str {
         DraftBasis::SteamSku => "the game's Steam appid (detectable.json sku)",
         DraftBasis::StoreId => "the store's own codename",
         DraftBasis::TitleSlug => "the title, standalone-rule slug",
+        DraftBasis::Manual => "manual assignment in the setup TUI",
     }
 }
 
@@ -950,6 +1135,7 @@ mod tests {
             verification: None,
             drafted_id: None,
             possible_pr: None,
+            store_override: None,
         }
     }
 
@@ -978,6 +1164,27 @@ mod tests {
         // Short or placeholder codenames would match everything.
         assert!(!diff_mentions(&diff, &miss(None, Some("none"))));
         assert!(!diff_mentions("...,abc,...", &miss(None, Some("abc"))));
+    }
+
+    #[test]
+    fn manual_ids_are_shape_checked_and_collision_checked() {
+        let db = UmuDb::parse(concat!(
+            "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+            "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+        ))
+        .unwrap();
+        // Shape rules.
+        assert!(check_assignment(&db, Some("X"), "397540").is_err());
+        assert!(check_assignment(&db, Some("X"), "umu-").is_err());
+        assert!(check_assignment(&db, Some("X"), "umu-a b").is_err());
+        // Free id passes; a numeric one warns about the Proton appid rule.
+        assert!(check_assignment(&db, Some("Control"), "umu-870780")
+            .unwrap()
+            .contains("Steam appid"));
+        assert!(check_assignment(&db, Some("Control"), "umu-controlgame").is_ok());
+        // Same-title holder is the cross-store id; different title rejects.
+        assert!(check_assignment(&db, Some("Borderlands 3"), "umu-397540").is_ok());
+        assert!(check_assignment(&db, Some("Not Borderlands"), "umu-397540").is_err());
     }
 
     #[test]

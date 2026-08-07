@@ -23,9 +23,24 @@ pub enum View {
     Status,
     Monitor,
     /// The umu-database miss stash (S9b): what the daemon collected, what
-    /// verification made of it. Read-only — verifying and exporting talk to
-    /// the network, so they stay explicit CLI invocations.
+    /// verification made of it. The pane can also drive the flows on
+    /// explicit keypresses — `v` fetches+verifies (network, and the footer
+    /// says so), `a` assigns an id (collision-checked before it saves),
+    /// `s` corrects the store guess.
     Misses,
+}
+
+impl View {
+    /// Tab-bar order; `Tab` cycles it.
+    pub const ALL: [View; 3] = [View::Status, View::Monitor, View::Misses];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            View::Status => "status",
+            View::Monitor => "monitor",
+            View::Misses => "umu misses",
+        }
+    }
 }
 
 /// Which pane has the keyboard.
@@ -71,6 +86,10 @@ pub struct App {
     /// keep the selection on the same game.
     pub misses: Vec<(String, Miss)>,
     pub miss_list: ListState,
+    /// While `Some`, the misses pane is in id-entry mode and printable keys
+    /// land here instead of the keymap. Committed with Enter (which checks
+    /// the id before anything is saved), cancelled with Esc.
+    pub id_input: Option<String>,
     pub output: Vec<Line<'static>>,
     pub confirm: Option<Confirm>,
     /// Set while a mutating action is running. Also the mutual-exclusion gate
@@ -101,6 +120,7 @@ impl Default for App {
             monitor: ListState::default(),
             misses: Vec::new(),
             miss_list: ListState::default(),
+            id_input: None,
             output: Vec::new(),
             confirm: None,
             busy: None,
@@ -172,6 +192,14 @@ impl App {
         }
     }
 
+    /// The stash key of the currently selected miss, if any.
+    pub fn selected_miss_key(&self) -> Option<String> {
+        self.miss_list
+            .selected()
+            .and_then(|i| self.misses.get(i))
+            .map(|(k, _)| k.clone())
+    }
+
     /// Replace the miss list, keeping the selection on the same entry (by
     /// stash key): the once-a-second refresh may reorder rows — a bump of
     /// `last_seen`, a new miss on top — and a bare index would silently
@@ -217,6 +245,19 @@ pub enum Intent {
     Run(Action),
     ConfirmYes,
     ConfirmNo,
+    /// Misses pane `v`: fetch the database dump and verify the stash.
+    /// Network — the footer labels the key as such.
+    UmuVerify,
+    /// Misses pane, Enter in id-entry mode: collision-check `id` against
+    /// the local database and save it on the entry when it survives.
+    UmuAssign {
+        key: String,
+        id: String,
+    },
+    /// Misses pane `s`: cycle the selected entry's store correction.
+    UmuStore {
+        key: String,
+    },
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
@@ -237,18 +278,65 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         };
     }
 
+    // Id-entry mode owns printable keys next: typing "status" into the id
+    // field must not switch views or quit.
+    if app.view == View::Misses && app.id_input.is_some() {
+        let buffer = app.id_input.as_mut().expect("checked");
+        return match key.code {
+            KeyCode::Esc => {
+                app.id_input = None;
+                Intent::None
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+                Intent::None
+            }
+            KeyCode::Enter => {
+                let id = app.id_input.take().expect("checked");
+                match app.selected_miss_key() {
+                    Some(key) if !id.trim().is_empty() => Intent::UmuAssign { key, id },
+                    _ => Intent::None,
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                buffer.push(c);
+                Intent::None
+            }
+            KeyCode::Char('c') => Intent::Quit, // ctrl-c stays an exit
+            _ => Intent::None,
+        };
+    }
+
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Intent::Quit,
         KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
         KeyCode::Char('r') => Intent::Refresh,
         KeyCode::Tab => {
-            app.view = match app.view {
-                View::Status => View::Monitor,
-                View::Monitor => View::Misses,
-                View::Misses => View::Status,
-            };
+            let idx = View::ALL.iter().position(|v| *v == app.view).unwrap_or(0);
+            app.view = View::ALL[(idx + 1) % View::ALL.len()];
             Intent::None
         }
+        // The misses pane's own verbs.
+        KeyCode::Char('v') if app.view == View::Misses => Intent::UmuVerify,
+        KeyCode::Char('a') if app.view == View::Misses => {
+            if app.selected_miss_key().is_some() {
+                // Prefill with the existing draft so a small correction is
+                // an edit, not a retype.
+                let current = app
+                    .miss_list
+                    .selected()
+                    .and_then(|i| app.misses.get(i))
+                    .and_then(|(_, m)| m.drafted_id.as_ref())
+                    .map(|d| d.id.clone())
+                    .unwrap_or_else(|| "umu-".to_string());
+                app.id_input = Some(current);
+            }
+            Intent::None
+        }
+        KeyCode::Char('s') if app.view == View::Misses => match app.selected_miss_key() {
+            Some(key) => Intent::UmuStore { key },
+            None => Intent::None,
+        },
         // Pane focus, install target, and Enter act on the Status pane's
         // selections — which are invisible from the other views. Gated on
         // the view, or Enter in the read-only misses pane would fire
@@ -304,6 +392,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(8),
             Constraint::Length(8),
             Constraint::Length(1),
@@ -311,17 +400,46 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(f.area());
 
     render_header(f, chunks[0], app);
+    render_tabs(f, chunks[1], app);
     match app.view {
-        View::Status => render_status(f, chunks[1], app),
-        View::Monitor => render_monitor(f, chunks[1], app),
-        View::Misses => render_misses(f, chunks[1], app),
+        View::Status => render_status(f, chunks[2], app),
+        View::Monitor => render_monitor(f, chunks[2], app),
+        View::Misses => render_misses(f, chunks[2], app),
     }
-    render_output(f, chunks[2], app);
-    render_footer(f, chunks[3], app);
+    render_output(f, chunks[3], app);
+    render_footer(f, chunks[4], app);
 
     if app.confirm.is_some() {
         render_confirm(f, app);
     }
+}
+
+/// Where am I, and what else is there — the answer Tab cycles through.
+fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, view) in View::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        }
+        if *view == app.view {
+            spans.push(Span::styled(
+                view.title(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ));
+        } else {
+            spans.push(Span::styled(
+                view.title(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+    spans.push(Span::styled(
+        "   (tab)",
+        Style::default().fg(Color::DarkGray),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
@@ -540,16 +658,18 @@ fn render_monitor(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// The umu-miss review pane: what the daemon collected, one entry per game,
-/// with the verification verdict and drafted id once `--verify` has run.
-/// Read-only by design — verify/fetch/export reach the network, so they stay
-/// explicit `gamebus-setup umu-misses` invocations, named in the pane.
+/// with the verification verdict and drafted id once verification ran.
+/// Its verbs act only on explicit keypresses the footer labels — `v` is the
+/// one that reaches the network, and says so. Exporting stays a CLI
+/// invocation: a submission wants a shell, not a raw-mode terminal.
 fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     if app.misses.is_empty() {
         let text = "No umu-database misses recorded.\n\n\
             The daemon writes one entry per game that umu launched without a\n\
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
-            Review them here, then verify and export from the shell:\n\n\
-            \u{20}   gamebus-setup umu-misses --fetch --verify\n\
+            Review them here — v fetches the database and verifies, s corrects\n\
+            a store guess, a assigns an id by hand (collision-checked).\n\
+            Export a submission from the shell:\n\n\
             \u{20}   gamebus-setup umu-misses --export-md";
         f.render_widget(
             Paragraph::new(text)
@@ -580,7 +700,7 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
                 Line::from(Span::styled(
                     format!(
                         "  {} · {} · seen {}",
-                        m.store,
+                        m.effective_store(),
                         confidence_label(m.confidence),
                         m.last_seen
                     ),
@@ -613,8 +733,12 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled(pr.clone(), Style::default().fg(Color::Magenta)),
         ]));
     }
+    let store_line = match &m.store_override {
+        Some(over) => format!("{over} (corrected by you; daemon guessed {})", m.store),
+        None => format!("{} (guessed — s cycles)", m.store),
+    };
     detail.extend([
-        field("Store", &m.store),
+        field("Store", &store_line),
         field("Codename", m.codename.as_deref().unwrap_or("-")),
         field("Reported", &m.umu_id),
     ]);
@@ -652,10 +776,7 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
                 detail.push(field("Note", note));
             }
         }
-        None => detail.push(field(
-            "Verified",
-            "not yet — run: gamebus-setup umu-misses --fetch --verify",
-        )),
+        None => detail.push(field("Verified", "not yet — press v to fetch + verify")),
     }
     if let Some(d) = &m.drafted_id {
         detail.push(field(
@@ -667,6 +788,26 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
                 d.collision_checked
             ),
         ));
+    }
+    if let Some(buffer) = &app.id_input {
+        detail.push(Line::from(vec![
+            Span::styled(
+                format!("{:<11} ", "Assign id"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{buffer}▏"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  ⏎ check+save · esc cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
     }
     f.render_widget(
         Paragraph::new(detail)
@@ -720,11 +861,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             "↑↓ select · ←→ pane · ⏎ run · u/s target · tab next view · r refresh · q quit"
         }
         View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
-        // The export hint lives here, not at the bottom of the detail pane,
-        // where small terminals would clip it away.
-        View::Misses => {
-            "↑↓ select · tab view · r refresh · q quit · export: umu-misses --export-md"
-        }
+        // The export hint lives in the verify output and the empty state —
+        // this line carries the pane's own verbs.
+        View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
+        View::Misses => "↑↓ · tab view · v fetch+verify (net) · a assign id · s store · r · q quit",
     };
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
@@ -1056,6 +1196,61 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn the_misses_verbs_fire_only_in_the_misses_view() {
+        let mut app = app_with_rows();
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('v'))), Intent::None);
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('v'))),
+            Intent::UmuVerify
+        );
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('s'))),
+            Intent::UmuStore {
+                key: "egs:Control".into()
+            }
+        );
+    }
+
+    #[test]
+    fn id_entry_mode_owns_the_keyboard_and_commits_on_enter() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+
+        // 'a' opens the input, prefilled with "umu-".
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        assert_eq!(app.id_input.as_deref(), Some("umu-"));
+        // Printable keys type — including q and v, which must NOT quit or
+        // verify while the field is open.
+        for c in ['8', '7', 'q', 'v'] {
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
+        }
+        assert_eq!(handle_key(&mut app, key(KeyCode::Backspace)), Intent::None);
+        assert_eq!(handle_key(&mut app, key(KeyCode::Backspace)), Intent::None);
+        assert_eq!(app.id_input.as_deref(), Some("umu-87"));
+        // Enter commits: the intent carries the entry's key and the id.
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuAssign {
+                key: "egs:Control".into(),
+                id: "umu-87".into()
+            }
+        );
+        assert!(app.id_input.is_none(), "input stayed open after commit");
+
+        // Esc cancels without an intent.
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Intent::None);
+        assert!(app.id_input.is_none());
+        // And the pane is back to normal keys.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
     fn sample_miss(title: &str) -> (String, Miss) {
         (
             format!("egs:{title}"),
@@ -1072,6 +1267,7 @@ mod tests {
                 verification: None,
                 drafted_id: None,
                 possible_pr: None,
+                store_override: None,
             },
         )
     }

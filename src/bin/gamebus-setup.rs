@@ -152,6 +152,9 @@ enum Msg {
     Activities(Vec<client::ActivityView>),
     Misses(Vec<(String, umu_report::Miss)>),
     Done(Action, Vec<actions::StepOutcome>),
+    /// A umu flow (verify / assign / store cycle) finished: its log lines
+    /// and whether it completed. Clears `busy` and refreshes the pane.
+    UmuOutcome(Vec<String>, bool),
     Tick,
 }
 
@@ -301,6 +304,19 @@ fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
     });
 }
 
+/// Run one of the misses pane's blocking flows (network and disk) off the
+/// render path, delivering its log lines as a message.
+fn spawn_umu_flow(
+    tx: &tokio::sync::mpsc::Sender<Msg>,
+    flow: impl FnOnce() -> (Vec<String>, bool) + Send + 'static,
+) {
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let (lines, ok) = flow();
+        let _ = tx.blocking_send(Msg::UmuOutcome(lines, ok));
+    });
+}
+
 /// Run a plan that needs no privileges, off the render path. Subprocesses and
 /// the 12 MB download would otherwise freeze the interface for seconds at a
 /// time.
@@ -446,6 +462,21 @@ async fn handle(
         }
         Msg::Activities(activities) => app.activities = activities,
         Msg::Misses(misses) => app.set_misses(misses),
+        Msg::UmuOutcome(lines, ok) => {
+            for line in lines {
+                app.log_styled(
+                    format!("  {line}"),
+                    if ok {
+                        Style::default().fg(Color::Reset)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    },
+                );
+            }
+            app.busy = None;
+            // Show what the flow changed without waiting for the next tick.
+            spawn_misses(tx);
+        }
         Msg::Done(action, outcomes) => {
             for outcome in &outcomes {
                 let style = if outcome.ok {
@@ -475,6 +506,33 @@ async fn handle(
                     app.probing = true;
                     spawn_probe(tx, dirs);
                     spawn_misses(tx);
+                }
+                // The misses pane's flows share the busy gate with the
+                // install actions: one mutating thing at a time.
+                ui::Intent::UmuVerify => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("fetching + verifying umu misses".into());
+                    app.log_styled(
+                        "Fetching the umu database and verifying the stash…",
+                        Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                    );
+                    spawn_umu_flow(tx, setup::umu_misses::tui_fetch_and_verify);
+                }
+                ui::Intent::UmuAssign { key, id } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("checking the assigned id".into());
+                    spawn_umu_flow(tx, move || setup::umu_misses::tui_assign_id(&key, &id));
+                }
+                ui::Intent::UmuStore { key } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("updating the store".into());
+                    spawn_umu_flow(tx, move || setup::umu_misses::tui_cycle_store(&key));
                 }
                 ui::Intent::Run(action) => {
                     if app.busy.is_some() {
