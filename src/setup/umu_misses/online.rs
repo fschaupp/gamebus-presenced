@@ -35,10 +35,24 @@ pub struct EgsBuild {
 /// nothing written. Blocking — run it off the render path.
 pub(crate) fn tui_online_candidates(
     store: &str,
-    title: &str,
+    title: Option<&str>,
+    codename: Option<&str>,
 ) -> Result<Vec<PickCandidate>, String> {
     match store {
         "gog" => {
+            // A numeric codename IS the gogdb product id — the identity is
+            // settled, only the title is in question. One exact GET on the
+            // product record instead of a catalog search by a title that
+            // may be the very thing that is wrong (the Spellcraft
+            // incident: a shared helper exe mis-resolved the title, and a
+            // search by it could never find the real game).
+            if let Some(id) =
+                codename.filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
+            {
+                let url = format!("{}/{}", endpoints().gog_product, id);
+                return parse_gog_product(&http_get(&url)?).map_err(|e| format!("{url}: {e}"));
+            }
+            let title = require_title(title)?;
             let url = format!(
                 "{}?limit=10&query=like:{}&order=desc:score&productType=in:game",
                 endpoints().gog_catalog,
@@ -47,6 +61,7 @@ pub(crate) fn tui_online_candidates(
             parse_gog_catalog(&http_get(&url)?).map_err(|e| format!("{url}: {e}"))
         }
         "egs" => {
+            let title = require_title(title)?;
             let url = format!(
                 "{}?query={}&limit=10",
                 endpoints().egs_search,
@@ -65,6 +80,14 @@ pub(crate) fn tui_online_candidates(
             "No online lookup for the {other} store — only gog and egs have one."
         )),
     }
+}
+
+/// The title searches have nothing to search without a title; refused
+/// before any request could fire.
+fn require_title(title: Option<&str>) -> Result<&str, String> {
+    title
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "No resolved title to look up online.".to_string())
 }
 
 /// The second egs request: the builds of one namespace, fired by Enter on
@@ -123,6 +146,35 @@ fn parse_gog_catalog(raw: &str) -> Result<Vec<PickCandidate>, String> {
             }))
         })
         .collect())
+}
+
+/// api.gog.com/products/<id> answers `{"id":1660194629,"title":"Project
+/// Hospital","game_type":"game","slug":"…"}` (captured live) — one record,
+/// one candidate. A record without a title has nothing to offer: an error,
+/// not an empty list that would read as "no such product".
+fn parse_gog_product(raw: &str) -> Result<Vec<PickCandidate>, String> {
+    #[derive(Deserialize)]
+    struct Resp {
+        id: Option<serde_json::Value>,
+        title: Option<String>,
+        game_type: Option<String>,
+    }
+    let resp: Resp = serde_json::from_str(raw).map_err(|e| format!("not a product record: {e}"))?;
+    // The id arrives as a JSON number; a string would mean the same.
+    let id = match resp.id {
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::String(s)) if !s.is_empty() => s,
+        _ => return Err("product record carries no id".into()),
+    };
+    let title = resp
+        .title
+        .filter(|t| !t.is_empty())
+        .ok_or("product record carries no title")?;
+    Ok(vec![PickCandidate::GogById {
+        id,
+        title,
+        game_type: resp.game_type.unwrap_or_default(),
+    }])
 }
 
 /// api.egdata.app/multisearch/offers answers `{"hits":[{title, namespace,
@@ -215,10 +267,45 @@ mod tests {
 
     #[test]
     fn online_lookup_refuses_store_none_and_unknown_stores() {
-        let err = tui_online_candidates("none", "Some Game").unwrap_err();
+        let err = tui_online_candidates("none", Some("Some Game"), None).unwrap_err();
         assert!(err.contains("cycle s first"), "{err}");
-        let err = tui_online_candidates("ubisoft", "Some Game").unwrap_err();
+        let err = tui_online_candidates("ubisoft", Some("Some Game"), None).unwrap_err();
         assert!(err.contains("only gog and egs"), "{err}");
+    }
+
+    #[test]
+    fn title_searches_refuse_without_a_title_before_any_request() {
+        // A name-shaped gog codename falls to the catalog search, which has
+        // nothing to search — refused before a request could fire. Same for
+        // egs. (The numeric-codename by-id path needs no title at all.)
+        let err = tui_online_candidates("gog", None, Some("witchery")).unwrap_err();
+        assert!(err.contains("No resolved title"), "{err}");
+        let err = tui_online_candidates("egs", None, None).unwrap_err();
+        assert!(err.contains("No resolved title"), "{err}");
+    }
+
+    #[test]
+    fn the_gog_product_record_yields_one_title_candidate() {
+        // Captured live from api.gog.com/products/1660194629 — the
+        // Spellcraft incident's real fix.
+        let raw = r#"{"id":1660194629,"title":"Project Hospital","game_type":"game","slug":"project_hospital"}"#;
+        let hits = parse_gog_product(raw).unwrap();
+        assert_eq!(
+            hits,
+            vec![PickCandidate::GogById {
+                id: "1660194629".into(),
+                title: "Project Hospital".into(),
+                game_type: "game".into(),
+            }]
+        );
+        assert!(
+            hits[0].section_label().contains("1660194629"),
+            "{}",
+            hits[0].section_label()
+        );
+        // A record without a title is an error, not "no such product".
+        assert!(parse_gog_product(r#"{"id":1660194629}"#).is_err());
+        assert!(parse_gog_product("not json").is_err());
     }
 
     // ---- Online response parsing (shapes from the live APIs; the requests

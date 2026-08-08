@@ -36,6 +36,12 @@ open_prs = "https://api.github.com/repos/Open-Wine-Components/umu-database/pulls
 # numeric product id in the results IS the codename the database wants.
 catalog = "https://catalog.gog.com/v1/catalog"
 
+# GOG's products API — the reverse lookup, one record per numeric product
+# id: <product>/<id> answers with the store's own title. The misses pane's
+# `o` uses it when the codename already is that id, instead of a fuzzy
+# catalog search by a possibly mis-resolved title.
+product = "https://api.gog.com/products"
+
 # gogdb.org product pages, the database's GOG codename authority — linked in
 # the exported merge-request evidence, one page per product id.
 gogdb_product = "https://www.gogdb.org/product"

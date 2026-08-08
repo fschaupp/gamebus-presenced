@@ -81,7 +81,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
                     continue;
                 }
             }
-            if let Some(title) = m.title.as_deref() {
+            if let Some(title) = m.effective_title() {
                 if let Some(hit) = db.find_title(title).first() {
                     verdicts.push((
                         key.clone(),
@@ -149,7 +149,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
                 continue;
             }
             let m = &report.entries()[key.as_str()];
-            let Some(title) = m.title.as_deref() else {
+            let Some(title) = m.effective_title() else {
                 continue;
             };
             let appid = naming.as_ref().and_then(|n| n.steam_appid_for_title(title));
@@ -203,7 +203,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
     ));
     for (key, verdict) in &verdicts {
         let m = &report.entries()[key.as_str()];
-        let title = m.title.as_deref().unwrap_or("(unresolved)");
+        let title = m.effective_title().unwrap_or("(unresolved)");
         let line = match (&verdict.state, &verdict.drafted) {
             (VerificationState::AlreadyInDatabase, _) => format!(
                 "already in the database as {} — the launcher missed, not the database",
@@ -298,7 +298,7 @@ fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
             }
         }
     }
-    if let Some(title) = m.title.as_deref() {
+    if let Some(title) = m.effective_title() {
         let url = format!("{api}?title={}", urlencode(title));
         let mut ids = api_umu_ids(&url)?;
         ids.dedup();
@@ -405,8 +405,8 @@ pub(super) fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
     }
     for (key, pr) in hits {
         let title = report.entries()[&key]
-            .title
-            .clone()
+            .effective_title()
+            .map(str::to_string)
             .unwrap_or_else(|| key.clone());
         println!("  {title}: possibly already submitted ({pr})");
         report.update(&key, |m| m.possible_pr = Some(pr.clone()));
@@ -425,7 +425,9 @@ fn diff_mentions(diff_lower: &str, m: &Miss) -> bool {
         .effective_codename()
         .filter(|c| c.len() >= 4 && !c.eq_ignore_ascii_case("none"))
         .is_some_and(|c| diff_lower.contains(&format!(",{},", c.to_lowercase())));
-    let title_hit = m.title.as_deref().is_some_and(|t| {
+    // The effective title is what a submission would carry — the resolver's
+    // guess matters to nobody once the user corrected it.
+    let title_hit = m.effective_title().is_some_and(|t| {
         let plain = format!("\n+{},", t.to_lowercase());
         let quoted = format!("\n+{},", csv_field(t).to_lowercase());
         diff_lower.contains(&plain) || diff_lower.contains(&quoted)
@@ -454,6 +456,7 @@ mod tests {
             possible_pr: None,
             store_override: None,
             codename_override: None,
+            title_override: None,
             dismissed: None,
         }
     }
@@ -531,5 +534,30 @@ mod tests {
         let v = report.entries()[&key].verification.as_ref().unwrap();
         assert_eq!(v.state, VerificationState::AlreadyInDatabase);
         assert_eq!(v.umu_id.as_deref(), Some("umu-witchery1"));
+    }
+
+    #[test]
+    fn verify_looks_up_the_title_with_the_override() {
+        let db = UmuDb::parse(concat!(
+            "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+            "Project Hospital,gog,1660194629,umu-project1,,,\n",
+        ))
+        .unwrap();
+        let (mut report, key) = pick_report("gog", "someothercode");
+        // The resolver's title is wrong (the Spellcraft incident); the
+        // user's correction is what must reach the title lookup — a hit
+        // here keeps the API out of the picture entirely.
+        report.update(&key, |m| {
+            m.title = Some("Spellcraft".into());
+            m.title_override = Some("Project Hospital".into());
+        });
+        let lines = verify(&mut report, Some(&db)).expect("local verify");
+        assert!(
+            lines.iter().any(|l| l.contains("Project Hospital")),
+            "{lines:?}"
+        );
+        let v = report.entries()[&key].verification.as_ref().unwrap();
+        assert_eq!(v.state, VerificationState::CrossStoreId);
+        assert_eq!(v.umu_id.as_deref(), Some("umu-project1"));
     }
 }

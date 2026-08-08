@@ -35,7 +35,7 @@ pub use self::online::{EgsBuild, EgsOffer, GogProduct};
 pub use self::tui::PickCandidate;
 pub(crate) use self::tui::{
     tui_assign_id, tui_cycle_store, tui_fetch_and_verify, tui_pick_candidates, tui_pick_entry,
-    tui_set_identity, tui_toggle_dismiss,
+    tui_set_identity, tui_set_title, tui_toggle_dismiss,
 };
 
 use self::export::{export_csv, export_markdown};
@@ -232,17 +232,26 @@ fn list(report: &UmuReport) {
     let mut rows: Vec<&Miss> = report.entries().values().collect();
     rows.sort_by(|a, b| a.last_seen.cmp(&b.last_seen).reverse());
     for m in rows {
+        // An overridden title is the user's word, not the resolver's — the
+        // bracket must not claim a source/confidence for it.
+        let provenance = if m.title_override.is_some() {
+            "set by you".to_string()
+        } else {
+            format!(
+                "{}{}",
+                confidence_label(m.confidence),
+                m.title_source
+                    .as_deref()
+                    .map(|s| format!(", {s}"))
+                    .unwrap_or_default()
+            )
+        };
         println!(
-            "  {:<28} store: {:<8} codename: {:<16} {} [{}{}] seen {}",
-            m.title.as_deref().unwrap_or("(unresolved)"),
+            "  {:<28} store: {:<8} codename: {:<16} {} [{provenance}] seen {}",
+            m.effective_title().unwrap_or("(unresolved)"),
             m.store,
             m.codename.as_deref().unwrap_or("-"),
             m.umu_id,
-            confidence_label(m.confidence),
-            m.title_source
-                .as_deref()
-                .map(|s| format!(", {s}"))
-                .unwrap_or_default(),
             m.last_seen,
         );
         let status = match (&m.verification, &m.drafted_id) {

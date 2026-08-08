@@ -36,7 +36,8 @@ pub enum View {
     /// `o` looks the title up at its store (network, labelled likewise),
     /// `a` assigns an id (collision-checked before it saves), `p` picks the
     /// matching entry from the local database or the Heroic libraries,
-    /// `s` corrects the store guess, `d` dismisses/restores an entry.
+    /// `s` corrects the store guess, `t` corrects the title,
+    /// `d` dismisses/restores an entry.
     Misses,
 }
 
@@ -116,6 +117,10 @@ pub struct App {
     /// land here instead of the keymap. Committed with Enter (which checks
     /// the id before anything is saved), cancelled with Esc.
     pub id_input: Option<String>,
+    /// While `Some`, the misses pane is in title-entry mode (`t`) — same
+    /// keyboard ownership as `id_input`. Starts empty; the input line shows
+    /// the current effective title beside it.
+    pub title_input: Option<String>,
     /// While `Some`, the misses pane is in pick mode and the candidate list
     /// owns the keyboard: ↑↓/j/k choose, Enter records the pick, Esc
     /// cancels. Remembers the stash key it was opened for; a refresh that
@@ -152,6 +157,7 @@ impl Default for App {
             misses: Vec::new(),
             miss_list: ListState::default(),
             id_input: None,
+            title_input: None,
             pick: None,
             output: Vec::new(),
             confirm: None,
@@ -348,6 +354,15 @@ pub enum Intent {
     UmuStore {
         key: String,
     },
+    /// Misses pane, Enter in title-entry mode or on a GOG product record:
+    /// write the title override onto the annotation half. A title, never a
+    /// verdict.
+    UmuSetTitle {
+        key: String,
+        title: String,
+        /// Where the title came from, for the outcome line.
+        source: String,
+    },
     /// Misses pane `d`: dismiss the selected entry (parked, out of the
     /// exports) or restore it — a toggle, not a deletion.
     UmuDismiss {
@@ -390,6 +405,38 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                 let id = app.id_input.take().expect("checked");
                 match app.selected_miss_key() {
                     Some(key) if !id.trim().is_empty() => Intent::UmuAssign { key, id },
+                    _ => Intent::None,
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                buffer.push(c);
+                Intent::None
+            }
+            KeyCode::Char('c') => Intent::Quit, // ctrl-c stays an exit
+            _ => Intent::None,
+        };
+    }
+
+    // Title-entry mode owns printable keys the same way.
+    if app.view == View::Misses && app.title_input.is_some() {
+        let buffer = app.title_input.as_mut().expect("checked");
+        return match key.code {
+            KeyCode::Esc => {
+                app.title_input = None;
+                Intent::None
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+                Intent::None
+            }
+            KeyCode::Enter => {
+                let title = app.title_input.take().expect("checked");
+                match app.selected_miss_key() {
+                    Some(key) if !title.trim().is_empty() => Intent::UmuSetTitle {
+                        key,
+                        title,
+                        source: "you".into(),
+                    },
                     _ => Intent::None,
                 }
             }
@@ -453,6 +500,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                         codename: p.id.clone(),
                         source: "the GOG catalog".into(),
                     },
+                    // The by-id record answers the opposite question: the
+                    // codename was already right, the title was not.
+                    Some(PickCandidate::GogById { id, title, .. }) => Intent::UmuSetTitle {
+                        key: pick.key,
+                        title: title.clone(),
+                        source: format!("GOG product {id}"),
+                    },
                     Some(PickCandidate::EgsOffer(o)) => match &o.windows_app_name {
                         Some(app_name) => Intent::UmuSetIdentity {
                             key: pick.key,
@@ -501,6 +555,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                     .map(|d| d.id.clone())
                     .unwrap_or_else(|| "umu-".to_string());
                 app.id_input = Some(current);
+            }
+            Intent::None
+        }
+        KeyCode::Char('t') if app.view == View::Misses => {
+            // Empty on purpose, not prefilled with the resolver's title: the
+            // point of the verb is that the resolver got it wrong. The input
+            // line shows the current effective title beside the buffer.
+            if app.selected_miss_key().is_some() {
+                app.title_input = Some(String::new());
             }
             Intent::None
         }
@@ -720,8 +783,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         }
         View::Misses if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
         View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
+        View::Misses if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
         View::Misses => {
-            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · p pick · s store · d dismiss · q quit"
+            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · d dismiss · q quit"
         }
     };
     f.render_widget(
@@ -1153,6 +1217,47 @@ mod tests {
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
     }
 
+    /// Follows the a-verb precedent exactly: the mode owns the keyboard,
+    /// Enter commits, Esc cancels — but the buffer starts EMPTY (the point
+    /// of the verb is that the resolver's title is wrong).
+    #[test]
+    fn title_entry_mode_owns_the_keyboard_and_commits_on_enter() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        assert_eq!(app.title_input.as_deref(), Some(""));
+        // Printable keys type — including q, v and t itself.
+        for c in ['P', 'q', 'v', 't'] {
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
+        }
+        for _ in 0..3 {
+            assert_eq!(handle_key(&mut app, key(KeyCode::Backspace)), Intent::None);
+        }
+        assert_eq!(app.title_input.as_deref(), Some("P"));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuSetTitle {
+                key: "egs:Control".into(),
+                title: "P".into(),
+                source: "you".into(),
+            }
+        );
+        assert!(app.title_input.is_none(), "input stayed open after commit");
+
+        // An empty buffer commits nothing; Esc cancels without an intent.
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
+        assert!(app.title_input.is_none());
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Intent::None);
+        assert!(app.title_input.is_none());
+        // And the pane is back to normal keys.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
     fn sample_candidate(store: &str, codename: &str, umu_id: &str) -> PickCandidate {
         PickCandidate::Db(crate::umu_report::UmuEntry {
             title: "Control".into(),
@@ -1263,6 +1368,20 @@ mod tests {
                     store: None,
                     codename: "2049187585".into(),
                     source: "the GOG catalog".into(),
+                },
+            ),
+            (
+                // The by-id record corrects the TITLE — the codename it was
+                // fetched by was already right.
+                PickCandidate::GogById {
+                    id: "1660194629".into(),
+                    title: "Project Hospital".into(),
+                    game_type: "game".into(),
+                },
+                Intent::UmuSetTitle {
+                    key: "egs:Control".into(),
+                    title: "Project Hospital".into(),
+                    source: "GOG product 1660194629".into(),
                 },
             ),
             (
@@ -1404,6 +1523,7 @@ mod tests {
                 possible_pr: None,
                 store_override: None,
                 codename_override: None,
+                title_override: None,
                 dismissed: None,
             },
         )

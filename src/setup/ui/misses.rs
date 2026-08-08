@@ -21,9 +21,10 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             The daemon writes one entry per game that umu launched without a\n\
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
             Review them here — v fetches the database and verifies, s corrects\n\
-            a store guess, a assigns an id by hand (collision-checked),\n\
-            p picks a match from the local database or your Heroic library,\n\
-            and o looks the title up at its store (network).\n\
+            a store guess, t corrects a title, a assigns an id by hand\n\
+            (collision-checked), p picks a match from the local database or\n\
+            your Heroic library, and o looks the title up at its store\n\
+            (network).\n\
             Export a submission from the shell (to stdout, or to a file if\n\
             you name one):\n\n\
             \u{20}   gamebus-setup umu-misses --export-md [file]";
@@ -49,7 +50,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
                 Line::from(vec![
                     Span::styled(format!("{glyph} "), style),
                     Span::styled(
-                        m.title.clone().unwrap_or_else(|| "(unresolved)".into()),
+                        m.effective_title().unwrap_or("(unresolved)").to_string(),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
                 ]),
@@ -87,16 +88,16 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             .iter()
             .find(|(k, _)| k == &pick.key)
             .map(|(_, m)| m.effective_store().to_string());
-        let mut last_section = None;
+        let mut last_section: Option<String> = None;
         let mut items: Vec<ListItem> = Vec::new();
         for c in &pick.candidates {
             let section = c.section_label();
-            if last_section != Some(section) {
-                last_section = Some(section);
+            if last_section.as_deref() != Some(section.as_str()) {
                 items.push(ListItem::new(Line::from(Span::styled(
                     format!("— {section} —"),
                     Style::default().fg(Color::Cyan),
                 ))));
+                last_section = Some(section);
             }
             let (name, detail) = candidate_row(c);
             let (name_style, detail_style) = if cross_store_library(c, miss_store.as_deref()) {
@@ -130,7 +131,14 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     let Some((_, m)) = app.miss_list.selected().and_then(|i| app.misses.get(i)) else {
         return;
     };
-    let mut detail = vec![field("Title", m.title.as_deref().unwrap_or("(unresolved)"))];
+    let title_line = match &m.title_override {
+        Some(over) => format!(
+            "{over} (set by you; resolver said {})",
+            m.title.as_deref().unwrap_or("-")
+        ),
+        None => m.title.clone().unwrap_or_else(|| "(unresolved)".into()),
+    };
+    let mut detail = vec![field("Title", &title_line)];
     // The lines that change what a submission means go FIRST: at small
     // terminal sizes the pane clips from the bottom, and a clipped warning
     // is a warning that never happened.
@@ -235,6 +243,31 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             ),
         ]));
     }
+    if let Some(buffer) = &app.title_input {
+        detail.push(Line::from(vec![
+            Span::styled(
+                format!("{:<11} ", "Set title"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{buffer}▏"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            // The buffer starts empty; the label carries what it would
+            // replace (typing that very title back clears the override).
+            Span::styled(
+                format!(
+                    "  now: {} · ⏎ save · esc cancel",
+                    m.effective_title().unwrap_or("(unresolved)")
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
     f.render_widget(
         Paragraph::new(detail)
             .wrap(Wrap { trim: true })
@@ -247,11 +280,11 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
 /// section-header rows inserted before it. Headers are display-only: the
 /// selection moves over candidates, so a header row can never be selected.
 fn pick_display_index(candidates: &[PickCandidate], selected: usize) -> usize {
-    let mut last_section = None;
+    let mut last_section: Option<String> = None;
     let mut headers = 0;
     for c in candidates.iter().take(selected + 1) {
         let section = c.section_label();
-        if last_section != Some(section) {
+        if last_section.as_deref() != Some(section.as_str()) {
             last_section = Some(section);
             headers += 1;
         }
@@ -279,6 +312,11 @@ fn candidate_row(c: &PickCandidate) -> (String, String) {
         ),
         PickCandidate::Library(g) => (g.title.clone(), format!("{} · {}", g.store, g.codename)),
         PickCandidate::GogProduct(p) => (p.title.clone(), format!("{} · {}", p.id, p.product_type)),
+        PickCandidate::GogById {
+            id,
+            title,
+            game_type,
+        } => (title.clone(), format!("{id} · {game_type}")),
         PickCandidate::EgsOffer(o) => (
             o.title.clone(),
             format!("{} · {}", o.namespace, o.offer_type),

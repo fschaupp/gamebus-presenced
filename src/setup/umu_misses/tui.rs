@@ -63,7 +63,11 @@ pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
     if let Some(e) = report.load_error() {
         return (vec![e.to_string()], false);
     }
-    let Some(title) = report.entries().get(key).map(|m| m.title.clone()) else {
+    let Some(title) = report
+        .entries()
+        .get(key)
+        .map(|m| m.effective_title().map(str::to_string))
+    else {
         return (
             vec![format!("No stash entry under '{key}' anymore.")],
             false,
@@ -111,6 +115,14 @@ pub enum PickCandidate {
     /// A GOG catalog hit (`o`) — Enter writes the product id as the
     /// codename override.
     GogProduct(GogProduct),
+    /// The GOG product record for the miss's own numeric codename (`o` on
+    /// such an entry) — Enter writes the TITLE override: the id was never
+    /// in question there, the (possibly mis-resolved) title was.
+    GogById {
+        id: String,
+        title: String,
+        game_type: String,
+    },
     /// An egdata offer hit (`o`) — Enter commits its last Windows build's
     /// App Name, or fires the builds request when the hit carries none. The
     /// namespace itself is NEVER offered as a codename: Control's namespace
@@ -124,13 +136,17 @@ pub enum PickCandidate {
 impl PickCandidate {
     /// The pick list's section header — the candidates arrive grouped, and
     /// the label is what tells a database row from a library identity.
-    pub fn section_label(&self) -> &'static str {
+    /// Owned, not `&'static`: the by-id header names the product it hit.
+    pub fn section_label(&self) -> String {
         match self {
-            PickCandidate::Db(_) => "umu database — Enter records the verdict",
-            PickCandidate::Library(_) => "your Heroic library — Enter sets the identity",
-            PickCandidate::GogProduct(_) => "GOG catalog — Enter sets the codename",
-            PickCandidate::EgsOffer(_) => "egdata offers — Enter picks the build",
-            PickCandidate::EgsBuild(_) => "egdata builds — Enter sets the codename",
+            PickCandidate::Db(_) => "umu database — Enter records the verdict".into(),
+            PickCandidate::Library(_) => "your Heroic library — Enter sets the identity".into(),
+            PickCandidate::GogProduct(_) => "GOG catalog — Enter sets the codename".into(),
+            PickCandidate::GogById { id, .. } => {
+                format!("GOG product {id} — Enter sets the title")
+            }
+            PickCandidate::EgsOffer(_) => "egdata offers — Enter picks the build".into(),
+            PickCandidate::EgsBuild(_) => "egdata builds — Enter sets the codename".into(),
         }
     }
 }
@@ -242,10 +258,7 @@ fn pick_entry(
             false,
         );
     };
-    let title = m
-        .title
-        .clone()
-        .unwrap_or_else(|| "(unresolved)".to_string());
+    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
     let same_row = m.effective_store().eq_ignore_ascii_case(store)
         && m.effective_codename()
             .is_some_and(|c| c.eq_ignore_ascii_case(codename));
@@ -314,10 +327,7 @@ fn set_identity(
             false,
         );
     };
-    let title = m
-        .title
-        .clone()
-        .unwrap_or_else(|| "(unresolved)".to_string());
+    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
     let guessed = m.store.clone();
     let store = store.map(str::to_string);
     let mut what = format!("codename {codename}");
@@ -338,6 +348,52 @@ fn set_identity(
         )],
         true,
     )
+}
+
+/// The TUI's title write: the user typed a title (`t`), or a GOG product
+/// lookup answered with the store's own. Same shape as [`tui_set_identity`];
+/// the decision lives in [`set_title`].
+pub(crate) fn tui_set_title(key: &str, title: &str, source: &str) -> (Vec<String>, bool) {
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let (lines, ok) = set_title(&mut report, key, title, source);
+    if ok {
+        report.save();
+    }
+    (lines, ok)
+}
+
+/// Record a title correction on a miss: `title_override`, annotation-half
+/// like the other overrides, so a daemon write never reverts it. Entering
+/// the daemon's own resolved title clears the override instead of storing a
+/// copy — mirrors the s-cycle: back to "resolved", not "corrected to the
+/// resolution". A title, never a verdict; `v` re-verifies with it.
+fn set_title(report: &mut UmuReport, key: &str, title: &str, source: &str) -> (Vec<String>, bool) {
+    let title = title.trim();
+    if title.is_empty() {
+        return (vec!["Empty title — nothing recorded.".to_string()], false);
+    }
+    let Some(m) = report.entries().get(key) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let resolved = m.title.clone();
+    let line = if resolved.as_deref() == Some(title) {
+        report.update(key, |m| m.title_override = None);
+        format!("Title back to the resolver's own: {title}.")
+    } else {
+        report.update(key, |m| m.title_override = Some(title.to_string()));
+        let resolver_note = match resolved.as_deref() {
+            Some(r) => format!("; resolver said '{r}'"),
+            None => "; nothing had resolved one".to_string(),
+        };
+        format!("Title set to '{title}' (from {source}{resolver_note}).")
+    };
+    (vec![line], true)
 }
 
 /// Every store id the database actually uses (counted from the upstream
@@ -399,10 +455,7 @@ pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
             false,
         );
     };
-    let title = m
-        .title
-        .clone()
-        .unwrap_or_else(|| "(unresolved)".to_string());
+    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
     let line = if m.dismissed.is_some() {
         report.update(key, |m| m.dismissed = None);
         format!("{title} restored — back in the list and the exports.")
@@ -563,6 +616,66 @@ mod tests {
         assert!(ok);
         // Back on the guess: "guessed", not "corrected to the guess".
         assert!(report.entries()[&key].store_override.is_none());
+    }
+
+    // ---- Title writes (`t`, and the GOG by-id lookup).
+
+    #[test]
+    fn a_typed_title_writes_the_override_and_names_its_source() {
+        let (mut report, key) = pick_report("gog", "1660194629");
+        // The Spellcraft incident: the resolver's title is wrong.
+        report.update(&key, |m| m.title = Some("Spellcraft".into()));
+        let (lines, ok) = set_title(&mut report, &key, " Project Hospital ", "you");
+        assert!(ok, "{lines:?}");
+        let m = &report.entries()[&key];
+        assert_eq!(m.title_override.as_deref(), Some("Project Hospital"));
+        assert_eq!(m.title.as_deref(), Some("Spellcraft"), "resolution touched");
+        assert_eq!(m.effective_title(), Some("Project Hospital"));
+        assert!(lines[0].contains("from you"), "{lines:?}");
+        assert!(lines[0].contains("resolver said 'Spellcraft'"), "{lines:?}");
+    }
+
+    #[test]
+    fn entering_the_resolvers_own_title_clears_the_override() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        report.update(&key, |m| m.title_override = Some("Wrong Correction".into()));
+        let (lines, ok) = set_title(&mut report, &key, "Borderlands 3", "you");
+        assert!(ok, "{lines:?}");
+        // Back to "resolved", not "corrected to the resolution".
+        assert!(report.entries()[&key].title_override.is_none());
+        assert!(lines[0].contains("back to the resolver's own"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_empty_title_is_refused_and_a_titleless_miss_still_takes_one() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        let (lines, ok) = set_title(&mut report, &key, "   ", "you");
+        assert!(!ok);
+        assert!(lines[0].contains("Empty title"), "{lines:?}");
+        assert!(report.entries()[&key].title_override.is_none());
+        // Nothing ever resolved: the override still lands, honestly labelled.
+        report.update(&key, |m| m.title = None);
+        let (lines, ok) = set_title(
+            &mut report,
+            &key,
+            "Project Hospital",
+            "GOG product 1660194629",
+        );
+        assert!(ok, "{lines:?}");
+        assert!(lines[0].contains("nothing had resolved one"), "{lines:?}");
+        assert!(lines[0].contains("GOG product 1660194629"), "{lines:?}");
+        assert_eq!(
+            report.entries()[&key].effective_title(),
+            Some("Project Hospital")
+        );
+    }
+
+    #[test]
+    fn setting_a_title_for_a_vanished_entry_fails_honestly() {
+        let (mut report, _) = pick_report("egs", "Catnip");
+        let (lines, ok) = set_title(&mut report, "gone:key", "X", "you");
+        assert!(!ok);
+        assert!(lines[0].contains("gone:key"), "{lines:?}");
     }
 
     #[test]
