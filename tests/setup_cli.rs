@@ -111,8 +111,9 @@ fn planning_a_user_install_names_every_destination() {
         assert!(text.contains(&expected), "plan missing {expected}:\n{text}");
     }
     assert!(text.contains("systemctl --user daemon-reload"), "{text}");
-    // The endpoint configuration ships with the install.
+    // The endpoint configuration and shared-helper list ship with the install.
     assert!(text.contains("endpoints.toml"), "{text}");
+    assert!(text.contains("shared-helpers.txt"), "{text}");
 }
 
 /// The whole point of a dry run.
