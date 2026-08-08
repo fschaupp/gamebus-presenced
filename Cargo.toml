@@ -1,6 +1,6 @@
 [package]
 name = "gamebus-presenced"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["fschaupp <spritzwine.absently488@passinbox.com>"]
 description = "D-Bus presence daemon for Linux desktop - publishes unified game/app activity on session bus"
