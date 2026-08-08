@@ -53,11 +53,14 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             held.push((m, format!("possibly already submitted: {pr}")));
             continue;
         }
-        let confident = matches!(
-            m.confidence,
-            Some(Confidence::High) | Some(Confidence::Medium)
-        );
-        let Some(title) = m.title.as_deref().filter(|_| confident) else {
+        // A title the user typed outranks any resolver guess — an override
+        // is confident by definition; the resolver gate stays for the rest.
+        let confident = m.title_override.is_some()
+            || matches!(
+                m.confidence,
+                Some(Confidence::High) | Some(Confidence::Medium)
+            );
+        let Some(title) = m.effective_title().filter(|_| confident) else {
             held.push((m, "unresolved or low-confidence title".to_string()));
             continue;
         };
@@ -159,7 +162,7 @@ pub(super) fn export_csv(report: &UmuReport) {
     for (m, reason) in &held {
         eprintln!(
             "(held back: {} — {reason})",
-            m.title.as_deref().unwrap_or("(unresolved)")
+            m.effective_title().unwrap_or("(unresolved)")
         );
     }
 }
@@ -225,15 +228,14 @@ pub(super) fn export_markdown(
             .map(|n| format!("; {n}"))
             .unwrap_or_default();
         md.push_str(&format!(
-            "- **{}** — store `{store}`, codename `{}`{codename_ref}{}; title from {} ({} confidence); {}{advisory}.\n",
+            "- **{}** — store `{store}`, codename `{}`{codename_ref}{}; {}; {}{advisory}.\n",
             row.title,
             row.codename,
             m.executable
                 .as_deref()
                 .map(|e| format!(", exe `{}`", exe_basename(e)))
                 .unwrap_or_default(),
-            m.title_source.as_deref().unwrap_or("unknown"),
-            confidence_label(m.confidence),
+            title_provenance(m),
             row.id_provenance
                 .as_deref()
                 .unwrap_or("id left as umu-FIXME — needs a human"),
@@ -281,7 +283,7 @@ pub(super) fn export_markdown(
         for (m, reason) in &held {
             md.push_str(&format!(
                 "  {} — {reason}\n",
-                m.title.as_deref().unwrap_or("(unresolved)")
+                m.effective_title().unwrap_or("(unresolved)")
             ));
         }
         md.push_str("-->\n");
@@ -304,6 +306,21 @@ pub(super) fn export_markdown(
         }
     }
     Ok(())
+}
+
+/// The evidence list's title-provenance phrase. An overridden title is the
+/// user's word, not the resolver's — saying "high confidence" over it would
+/// dress a human correction up as machine evidence.
+fn title_provenance(m: &Miss) -> String {
+    match (&m.title_override, m.title.as_deref()) {
+        (Some(_), Some(resolved)) => format!("title set by you (resolver said '{resolved}')"),
+        (Some(_), None) => "title set by you".to_string(),
+        (None, _) => format!(
+            "title from {} ({} confidence)",
+            m.title_source.as_deref().unwrap_or("unknown"),
+            confidence_label(m.confidence)
+        ),
+    }
 }
 
 /// Quote a CSV field when it needs it.
@@ -332,6 +349,43 @@ mod tests {
         let (rows, held) = partition(&report);
         assert!(held.is_empty(), "{:?}", held.first().map(|(_, r)| r));
         assert_eq!(rows[0].codename, "1423049311");
+    }
+
+    #[test]
+    fn a_title_override_is_confident_and_reaches_the_row() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        // Downgrade to the resolver's weakest word: held back…
+        report.update(&key, |m| {
+            m.title = Some("Spellcraft".into());
+            m.confidence = Some(Confidence::Low);
+        });
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty(), "a low-confidence title reached a row");
+        assert_eq!(held[0].1, "unresolved or low-confidence title");
+        // …until the user says what the game is. The typed title outranks
+        // any resolver guess — it exports, under the user's spelling.
+        report.update(&key, |m| m.title_override = Some("Project Hospital".into()));
+        let (rows, held) = partition(&report);
+        assert!(held.is_empty(), "{:?}", held.first().map(|(_, r)| r));
+        assert_eq!(rows[0].title, "Project Hospital");
+    }
+
+    #[test]
+    fn the_evidence_says_who_set_the_title() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        report.update(&key, |m| m.title = Some("Spellcraft".into()));
+        let resolver = title_provenance(&report.entries()[&key]);
+        assert_eq!(resolver, "title from heroic-config (high confidence)");
+        // An override drops the source/confidence phrase for the honest one.
+        report.update(&key, |m| m.title_override = Some("Project Hospital".into()));
+        let overridden = title_provenance(&report.entries()[&key]);
+        assert_eq!(overridden, "title set by you (resolver said 'Spellcraft')");
+        // No resolution at all: nothing to attribute to the resolver.
+        report.update(&key, |m| m.title = None);
+        assert_eq!(
+            title_provenance(&report.entries()[&key]),
+            "title set by you"
+        );
     }
 
     #[test]

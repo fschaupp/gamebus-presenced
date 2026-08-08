@@ -485,28 +485,6 @@ impl Enricher {
         mut activity: Activity,
         steam_activity: Option<Activity>,
     ) -> Vec<SourceEvent> {
-        // Any identity reaching a umu-missed group is a resolution worth
-        // stashing. GameProcess identities are curated-database hits; wrapper
-        // layers are human-set titles. note_title never downgrades, so the
-        // heroic-config High note (recorded at its creation site) survives
-        // this generic Wrapper-class note.
-        if let Some(id) = &identity {
-            if let Some((store, code)) = self.umu_miss_keys.get(key).cloned() {
-                let (source_label, confidence) = match id.class {
-                    IdentityClass::GameProcess => ("detectable", Confidence::High),
-                    IdentityClass::Wrapper => ("wrapper-layer", Confidence::Medium),
-                };
-                self.umu_report.note_title(
-                    &store,
-                    code.as_deref(),
-                    key,
-                    &id.name,
-                    source_label,
-                    confidence,
-                    Some(&id.exe),
-                );
-            }
-        }
         let via_gamemode = member.gamemode;
 
         // Discord pin: a rep carrying a joined Discord partial
@@ -569,7 +547,15 @@ impl Enricher {
         }
         let group_appid = group.steam_appid.clone();
 
-        match group.upsert(pid, member, rep_pinned) {
+        let effect = group.upsert(pid, member, rep_pinned);
+        // S9: the stash mirrors the group's ELECTED identity, never a
+        // member's raw claim. A claim that loses the election must not reach
+        // the stash — the Unity crash handler resolved to another game and
+        // overwrote a correct same-confidence title, while the published
+        // record stayed right because set_identity is monotone. Noting the
+        // group identity after routing hands that monotonicity to the stash.
+        self.note_group_identity(key);
+        match effect {
             GroupEffect::PublishRep => {
                 if via_gamemode {
                     self.steam_only_groups.remove(key);
@@ -789,6 +775,7 @@ impl Enricher {
                         }
                     }
                     let rep = group.rep;
+                    self.note_group_identity(&key);
                     out.extend(self.emit_rep_refresh(&key, rep));
                 }
                 None => {
@@ -807,6 +794,33 @@ impl Enricher {
             }
         }
         out
+    }
+
+    /// S9: write the group's elected identity through to the umu-miss stash.
+    /// GameProcess identities are curated-database hits; wrapper layers are
+    /// launcher/human titles. note_title never downgrades, so the
+    /// heroic-config High note (recorded at its creation site) survives the
+    /// generic Wrapper-class mapping here. No-op for keys that never missed.
+    fn note_group_identity(&mut self, key: &str) {
+        let Some((store, code)) = self.umu_miss_keys.get(key).cloned() else {
+            return;
+        };
+        let Some(id) = self.groups.get(key).and_then(|g| g.identity.clone()) else {
+            return;
+        };
+        let (source_label, confidence) = match id.class {
+            IdentityClass::GameProcess => ("detectable", Confidence::High),
+            IdentityClass::Wrapper => ("wrapper-layer", Confidence::Medium),
+        };
+        self.umu_report.note_title(
+            &store,
+            code.as_deref(),
+            key,
+            &id.name,
+            source_label,
+            confidence,
+            Some(&id.exe),
+        );
     }
 
     /// Re-emit the rep's current record (UpdateInPlace on the bus via the
@@ -1131,6 +1145,7 @@ impl Enricher {
                 exe,
                 class: IdentityClass::GameProcess,
             });
+        self.note_group_identity(key);
         self.emit_rep_refresh(key, rep)
     }
 
@@ -2758,6 +2773,59 @@ mod tests {
         if let SourceEvent::Updated(enriched) = &events[0] {
             assert_eq!(enriched.name, "eldenring"); // unchanged
         }
+    }
+
+    #[test]
+    fn the_stash_mirrors_the_elected_identity_not_the_last_claim() {
+        // The Project Hospital incident: the real game's identity is elected
+        // first; the crash handler's same-confidence claim for another game
+        // arrives later. The group refuses the sideways overwrite — and the
+        // stash must agree with the group, not with whichever claim came
+        // last. (Before the fix the stash flipped to "Spellcraft".)
+        use crate::group::MemberClass;
+        let key = "gog:1660194629";
+        let mut e = Enricher::with_naming(None);
+        e.umu_report = crate::umu_report::UmuReport::from_path(
+            std::env::temp_dir().join("gamebus-test-elected-identity.json"),
+        );
+        e.umu_miss_keys.insert(
+            key.to_string(),
+            ("gog".to_string(), Some("1660194629".to_string())),
+        );
+        e.umu_report
+            .note_launch("gog", Some("1660194629"), "umu-0", key);
+
+        let identity = |name: &str, exe: &str| {
+            Some(Identity {
+                name: name.to_string(),
+                exe: exe.to_string(),
+                class: IdentityClass::GameProcess,
+            })
+        };
+        e.grouped_update(
+            key,
+            11,
+            group_member(MemberClass::GameProcess),
+            identity("Project Hospital", "ProjectHospital.exe"),
+            Activity::from_gamemode(11, "ProjectHospital.exe", 1_700_000_000),
+            None,
+        );
+        e.grouped_update(
+            key,
+            12,
+            group_member(MemberClass::GameProcess),
+            identity("Spellcraft", "UnityCrashHandler64.exe"),
+            Activity::from_gamemode(12, "UnityCrashHandler64.exe", 1_700_000_001),
+            None,
+        );
+
+        let entry = &e.umu_report.entries()[key];
+        assert_eq!(
+            entry.title.as_deref(),
+            Some("Project Hospital"),
+            "stash disagreed with the elected identity"
+        );
+        assert_eq!(entry.executable.as_deref(), Some("ProjectHospital.exe"));
     }
 
     /// A live, gamemode-registered group member of the given class.

@@ -30,6 +30,9 @@ pub struct Endpoints {
     pub umu_open_prs: String,
     /// GOG's public catalog search (the misses pane's `o` lookup).
     pub gog_catalog: String,
+    /// GOG's products API root: `<product>/<id>` answers with the store's
+    /// own title — the `o` reverse lookup for numeric gog codenames.
+    pub gog_product: String,
     /// gogdb.org product pages — the GOG codename authority, linked per
     /// product id in the exported evidence.
     pub gog_gogdb_product: String,
@@ -67,6 +70,7 @@ impl Endpoints {
             umu_repository: get("umu.repository"),
             umu_open_prs: get("umu.open_prs"),
             gog_catalog: get("gog.catalog"),
+            gog_product: get("gog.product"),
             gog_gogdb_product: get("gog.gogdb_product"),
             egs_search: get("egs.search"),
             egs_sandboxes: get("egs.sandboxes"),
@@ -145,6 +149,7 @@ mod tests {
             "umu.repository",
             "umu.open_prs",
             "gog.catalog",
+            "gog.product",
             "gog.gogdb_product",
             "egs.search",
             "egs.sandboxes",
@@ -165,6 +170,7 @@ mod tests {
         assert_eq!(values["umu.api"], "http://localhost:9");
         assert!(values["discord.detectable"].contains("discord.com"));
         assert!(values["gog.catalog"].contains("catalog.gog.com"));
+        assert!(values["gog.product"].contains("api.gog.com"));
         assert!(values["egs.sandboxes"].contains("egdata.app"));
     }
 

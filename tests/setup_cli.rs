@@ -477,6 +477,61 @@ fn a_codename_override_reaches_the_export_and_passes_the_gog_gate() {
 }
 
 #[test]
+fn a_title_override_reaches_the_export_and_counts_as_confident() {
+    let home = TempHome::new("umu-title-override");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // The Spellcraft incident: a shared helper exe resolved the wrong title
+    // at high confidence, and a second entry whose resolver only managed a
+    // low-confidence stem. Both carry the user's correction — the export
+    // must use it, and the correction alone must pass the confidence gate.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"gog:1660194629":{"title":"Spellcraft","store":"gog","codename":"1660194629",
+            "umu_id":"umu-0","title_source":"detectable","confidence":"high",
+            "executable":"UnityCrashHandler64.exe",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "title_override":"Project Hospital"},
+        "egs:Stemmed":{"title":"stemmed","store":"egs","codename":"Stemmed",
+            "umu_id":"umu-0","title_source":"stem","confidence":"low",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "title_override":"The Real Title"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Project Hospital,gog,1660194629,umu-FIXME,,,"),
+        "overridden title missing from the row:\n{text}"
+    );
+    assert!(
+        text.contains("The Real Title,egs,Stemmed,umu-FIXME,,,"),
+        "a title override did not pass the confidence gate:\n{text}"
+    );
+    assert!(
+        !text.contains("Spellcraft") && !text.contains("stemmed,"),
+        "a resolver title leaked past its override:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(!err.contains("held back"), "{err}");
+
+    // The merge-request evidence says who set the title — honestly.
+    let md = run(&home, &["umu-misses", "--export-md"]);
+    assert!(md.status.success());
+    let text = stdout(&md);
+    assert!(
+        text.contains("title set by you (resolver said 'Spellcraft')"),
+        "evidence hides the override:\n{text}"
+    );
+    assert!(
+        !text.contains("title from detectable"),
+        "evidence claims resolver provenance over an override:\n{text}"
+    );
+}
+
+#[test]
 fn umu_misses_export_escapes_external_data_and_strips_paths() {
     let home = TempHome::new("umu-escape");
     let stash_dir = home.path().join(".local/share/gamebus-presenced");

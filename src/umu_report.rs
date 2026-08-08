@@ -89,6 +89,13 @@ pub struct Miss {
     /// [`Miss::effective_codename`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codename_override: Option<String>,
+    /// The user's title correction from the setup TUI (typed via `t`, or a
+    /// GOG product lookup). `title` stays the daemon's resolution; this
+    /// override is annotation-half like the other overrides, so a daemon
+    /// write never reverts it. Everything downstream reads
+    /// [`Miss::effective_title`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_override: Option<String>,
     /// Set (to the date) when the user dismissed this entry in the setup
     /// TUI: not wrong, just not wanted - dropped from the exports and
     /// parked at the bottom of the list. Annotation-half rather than a
@@ -112,6 +119,12 @@ impl Miss {
         self.codename_override
             .as_deref()
             .or(self.codename.as_deref())
+    }
+
+    /// The title every display, search, and export should use: the user's
+    /// correction when present, else the daemon's resolution.
+    pub fn effective_title(&self) -> Option<&str> {
+        self.title_override.as_deref().or(self.title.as_deref())
     }
 }
 
@@ -204,7 +217,8 @@ impl UmuReport {
         }
     }
 
-    fn from_path(path: PathBuf) -> Self {
+    /// crate-visible for tests that need a stash on a scratch path.
+    pub(crate) fn from_path(path: PathBuf) -> Self {
         match std::fs::read_to_string(&path) {
             // Missing file: a fresh stash that writes normally.
             Err(_) => Self {
@@ -268,6 +282,7 @@ impl UmuReport {
             possible_pr: None,
             store_override: None,
             codename_override: None,
+            title_override: None,
             dismissed: None,
         });
         entry.last_seen = today;
@@ -409,6 +424,7 @@ impl UmuReport {
                     ours.possible_pr = theirs.possible_pr;
                     ours.store_override = theirs.store_override;
                     ours.codename_override = theirs.codename_override;
+                    ours.title_override = theirs.title_override;
                     ours.dismissed = theirs.dismissed;
                 }
             }
@@ -953,6 +969,7 @@ mod tests {
                 collision_checked: "2026-08-07".into(),
             });
             m.codename_override = Some("Calluna".into());
+            m.title_override = Some("Control Ultimate Edition".into());
         });
         setup.save();
 
@@ -983,6 +1000,11 @@ mod tests {
             calluna.codename_override.as_deref(),
             Some("Calluna"),
             "daemon write erased the codename override"
+        );
+        assert_eq!(
+            calluna.title_override.as_deref(),
+            Some("Control Ultimate Edition"),
+            "daemon write erased the title override"
         );
         assert!(
             disk.contains_key("gog:1207600000"),
@@ -1025,8 +1047,10 @@ mod tests {
         assert!(m.drafted_id.is_none());
         assert!(m.possible_pr.is_none());
         assert!(m.codename_override.is_none());
-        // Without an override the effective codename is the daemon's own.
+        assert!(m.title_override.is_none());
+        // Without overrides the effective values are the daemon's own.
         assert_eq!(m.effective_codename(), Some("Calluna"));
+        assert_eq!(m.effective_title(), Some("Control"));
     }
 
     // ---- UmuDb parsing - every sample below is captured, not made up.

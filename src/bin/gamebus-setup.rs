@@ -580,13 +580,14 @@ async fn handle(
                     if app.busy.is_some() {
                         return;
                     }
-                    // The query is the resolved title; without one there is
-                    // nothing to search for.
+                    // The query is the effective title — the user's
+                    // correction when present; without any there is nothing
+                    // to search for.
                     let title = app
                         .misses
                         .iter()
                         .find(|(k, _)| *k == key)
-                        .and_then(|(_, m)| m.title.clone());
+                        .and_then(|(_, m)| m.effective_title().map(str::to_string));
                     let Some(title) = title else {
                         app.log_styled(
                             "  No resolved title to search the database for.",
@@ -613,26 +614,35 @@ async fn handle(
                     if app.busy.is_some() {
                         return;
                     }
-                    let entry = app
-                        .misses
-                        .iter()
-                        .find(|(k, _)| *k == key)
-                        .map(|(_, m)| (m.title.clone(), m.effective_store().to_string()));
-                    let Some((Some(title), store)) = entry else {
-                        app.log_styled(
-                            "  No resolved title to look up online.",
-                            Style::default().fg(Color::Red),
-                        );
+                    // The effective title and codename: the user's
+                    // corrections when present. The title may be absent —
+                    // a gog entry with a numeric codename looks up by id
+                    // and needs none; the flow refuses the rest honestly.
+                    let entry = app.misses.iter().find(|(k, _)| *k == key).map(|(_, m)| {
+                        (
+                            m.effective_title().map(str::to_string),
+                            m.effective_store().to_string(),
+                            m.effective_codename().map(str::to_string),
+                        )
+                    });
+                    let Some((title, store, codename)) = entry else {
                         return;
                     };
-                    app.busy = Some(format!("asking the {store} catalog"));
+                    app.busy = Some(format!("asking the {store} store"));
                     // One keypress, one request; the store dispatch (and the
                     // store-none refusal) lives in the flow itself.
                     let tx = tx.clone();
                     tokio::task::spawn_blocking(move || {
-                        let msg = match setup::umu_misses::tui_online_candidates(&store, &title) {
+                        let msg = match setup::umu_misses::tui_online_candidates(
+                            &store,
+                            title.as_deref(),
+                            codename.as_deref(),
+                        ) {
                             Ok(candidates) if candidates.is_empty() => Msg::UmuOutcome(
-                                vec![format!("No {store} hits for '{title}'.")],
+                                vec![format!(
+                                    "No {store} hits{}.",
+                                    title.map(|t| format!(" for '{t}'")).unwrap_or_default()
+                                )],
                                 true,
                             ),
                             Ok(candidates) => Msg::UmuCandidates {
@@ -706,6 +716,15 @@ async fn handle(
                     }
                     app.busy = Some("updating the store".into());
                     spawn_umu_flow(tx, move || setup::umu_misses::tui_cycle_store(&key));
+                }
+                ui::Intent::UmuSetTitle { key, title, source } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("recording the title".into());
+                    spawn_umu_flow(tx, move || {
+                        setup::umu_misses::tui_set_title(&key, &title, &source)
+                    });
                 }
                 ui::Intent::UmuDismiss { key } => {
                     if app.busy.is_some() {
