@@ -162,12 +162,13 @@ enum Msg {
     /// A umu flow (verify / assign / pick / store cycle) finished: its log
     /// lines and whether it completed. Clears `busy` and refreshes the pane.
     UmuOutcome(Vec<String>, bool),
-    /// The pick search answered: database candidates for one stash entry.
-    /// Clears `busy` and opens pick mode (or logs that nothing matched).
-    /// `stale` warns when the candidates came from an aging fetch cache.
+    /// A candidate search answered — the local pick (`p`) or an online
+    /// lookup (`o`), kind-tagged either way. Clears `busy` and opens pick
+    /// mode (or logs that nothing matched). `stale` warns when candidates
+    /// came from an aging fetch cache (or an absent one).
     UmuCandidates {
         key: String,
-        candidates: Vec<umu_report::UmuEntry>,
+        candidates: Vec<setup::umu_misses::PickCandidate>,
         stale: Option<String>,
     },
     Tick,
@@ -507,7 +508,9 @@ async fn handle(
                 app.log_styled(format!("  {warning}"), Style::default().fg(Color::Yellow));
             }
             if candidates.is_empty() {
-                app.log("  No database title matches — v verifies against the live API too.");
+                app.log(
+                    "  No database or library title matches — v verifies against the live API too.",
+                );
             } else if app.misses.iter().any(|(k, _)| k == &key) {
                 app.log(format!(
                     "  {} candidate(s) — ↑↓ choose, Enter picks, Esc cancels.",
@@ -591,8 +594,8 @@ async fn handle(
                         );
                         return;
                     };
-                    app.busy = Some("searching the local database".into());
-                    // Local file only — `v` stays the sole network key.
+                    app.busy = Some("searching the local database and libraries".into());
+                    // Local files only — `v` and `o` are the network keys.
                     let tx = tx.clone();
                     tokio::task::spawn_blocking(move || {
                         let msg = match setup::umu_misses::tui_pick_candidates(&title) {
@@ -604,6 +607,83 @@ async fn handle(
                             Err(e) => Msg::UmuOutcome(vec![e], false),
                         };
                         let _ = tx.blocking_send(msg);
+                    });
+                }
+                ui::Intent::UmuOnline { key } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    let entry = app
+                        .misses
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, m)| (m.title.clone(), m.effective_store().to_string()));
+                    let Some((Some(title), store)) = entry else {
+                        app.log_styled(
+                            "  No resolved title to look up online.",
+                            Style::default().fg(Color::Red),
+                        );
+                        return;
+                    };
+                    app.busy = Some(format!("asking the {store} catalog"));
+                    // One keypress, one request; the store dispatch (and the
+                    // store-none refusal) lives in the flow itself.
+                    let tx = tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let msg = match setup::umu_misses::tui_online_candidates(&store, &title) {
+                            Ok(candidates) if candidates.is_empty() => Msg::UmuOutcome(
+                                vec![format!("No {store} hits for '{title}'.")],
+                                true,
+                            ),
+                            Ok(candidates) => Msg::UmuCandidates {
+                                key,
+                                candidates,
+                                stale: None,
+                            },
+                            Err(e) => Msg::UmuOutcome(vec![e], false),
+                        };
+                        let _ = tx.blocking_send(msg);
+                    });
+                }
+                ui::Intent::UmuEgsBuilds { key, namespace } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some(format!("fetching the {namespace} builds"));
+                    let tx = tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let msg = match setup::umu_misses::tui_egs_builds(&namespace) {
+                            Ok(candidates) if candidates.is_empty() => Msg::UmuOutcome(
+                                vec![format!("No builds listed for the {namespace} sandbox.")],
+                                true,
+                            ),
+                            Ok(candidates) => Msg::UmuCandidates {
+                                key,
+                                candidates,
+                                stale: None,
+                            },
+                            Err(e) => Msg::UmuOutcome(vec![e], false),
+                        };
+                        let _ = tx.blocking_send(msg);
+                    });
+                }
+                ui::Intent::UmuSetIdentity {
+                    key,
+                    store,
+                    codename,
+                    source,
+                } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("recording the identity".into());
+                    spawn_umu_flow(tx, move || {
+                        setup::umu_misses::tui_set_identity(
+                            &key,
+                            store.as_deref(),
+                            &codename,
+                            &source,
+                        )
                     });
                 }
                 ui::Intent::UmuPickEntry {

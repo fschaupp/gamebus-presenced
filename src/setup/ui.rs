@@ -14,9 +14,9 @@ use ratatui::Frame;
 use super::actions::{Action, Plan};
 use super::paths::Target;
 use super::status::{self, Health, Row, Status};
-use super::umu_misses::{basis_label, confidence_label};
+use super::umu_misses::{basis_label, confidence_label, PickCandidate};
 use crate::client::ActivityView;
-use crate::umu_report::{Miss, UmuEntry, VerificationState};
+use crate::umu_report::{Miss, VerificationState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -25,9 +25,10 @@ pub enum View {
     /// The umu-database miss stash (S9b): what the daemon collected, what
     /// verification made of it. The pane drives the flows on explicit
     /// keypresses — `v` fetches+verifies (network, and the footer says so),
+    /// `o` looks the title up at its store (network, labelled likewise),
     /// `a` assigns an id (collision-checked before it saves), `p` picks the
-    /// matching entry from the local database, `s` corrects the store guess,
-    /// `d` dismisses/restores an entry.
+    /// matching entry from the local database or the Heroic libraries,
+    /// `s` corrects the store guess, `d` dismisses/restores an entry.
     Misses,
 }
 
@@ -68,14 +69,16 @@ pub struct Confirm {
     pub details: bool,
 }
 
-/// The misses pane's pick mode: database candidates for one miss, waiting
-/// for the user to choose (or Esc out).
+/// The misses pane's pick mode: candidates for one miss, waiting for the
+/// user to choose (or Esc out). The candidates are kind-tagged — database
+/// rows, Heroic library identities, online hits — and Enter dispatches per
+/// kind; the list renders them in labelled sections.
 pub struct Pick {
     /// The stash key the candidates were fetched for — the pick lands on
     /// this entry, never on whatever the selection moved to since.
     pub key: String,
     /// Never empty: the binary logs "no matches" instead of opening the mode.
-    pub candidates: Vec<UmuEntry>,
+    pub candidates: Vec<PickCandidate>,
     pub selected: usize,
     /// A warning when the candidates came from an aging fetch cache — the
     /// footer then advertises `v` as the way out.
@@ -298,18 +301,40 @@ pub enum Intent {
         key: String,
         id: String,
     },
-    /// Misses pane `p`: search the local database for candidates matching
-    /// the selected entry's title. Local file only — never the network.
+    /// Misses pane `p`: search the local database and the Heroic libraries
+    /// for candidates matching the selected entry's title. Local files
+    /// only — never the network.
     UmuPick {
         key: String,
     },
-    /// Misses pane, Enter in pick mode: record "this game IS that database
-    /// entry" on the miss.
+    /// Misses pane `o`: one online lookup at the entry's effective store.
+    /// Network — the footer labels the key as such.
+    UmuOnline {
+        key: String,
+    },
+    /// Misses pane, Enter on a database candidate: record "this game IS
+    /// that database entry" on the miss.
     UmuPickEntry {
         key: String,
         store: String,
         codename: String,
         umu_id: String,
+    },
+    /// Misses pane, Enter on a library or online candidate: write the store
+    /// identity (codename override, plus the store when the pick names one)
+    /// onto the annotation half. An identity, never a verdict.
+    UmuSetIdentity {
+        key: String,
+        store: Option<String>,
+        codename: String,
+        /// Where the identity came from, for the outcome line.
+        source: String,
+    },
+    /// Misses pane, Enter on an egs offer with no Windows build in it: the
+    /// second request, this namespace's builds. Network, like `o` itself.
+    UmuEgsBuilds {
+        key: String,
+        namespace: String,
     },
     /// Misses pane `s`: cycle the selected entry's store correction.
     UmuStore {
@@ -395,14 +420,48 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                 pick.selected = (pick.selected + pick.candidates.len() - 1) % pick.candidates.len();
                 Intent::None
             }
+            // Enter dispatches on the candidate's kind: a database row is a
+            // verdict, a library or online hit is an identity, and an egs
+            // offer without a Windows build fires the builds request. The
+            // offer's namespace is never committed as a codename.
             KeyCode::Enter => {
                 let pick = app.pick.take().expect("checked");
                 match pick.candidates.get(pick.selected) {
-                    Some(c) => Intent::UmuPickEntry {
+                    Some(PickCandidate::Db(c)) => Intent::UmuPickEntry {
                         key: pick.key,
                         store: c.store.clone(),
                         codename: c.codename.clone(),
                         umu_id: c.umu_id.clone(),
+                    },
+                    Some(PickCandidate::Library(g)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: Some(g.store.clone()),
+                        codename: g.codename.clone(),
+                        source: "your Heroic library".into(),
+                    },
+                    Some(PickCandidate::GogProduct(p)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: None,
+                        codename: p.id.clone(),
+                        source: "the GOG catalog".into(),
+                    },
+                    Some(PickCandidate::EgsOffer(o)) => match &o.windows_app_name {
+                        Some(app_name) => Intent::UmuSetIdentity {
+                            key: pick.key,
+                            store: None,
+                            codename: app_name.clone(),
+                            source: "the egdata offer's Windows build".into(),
+                        },
+                        None => Intent::UmuEgsBuilds {
+                            key: pick.key,
+                            namespace: o.namespace.clone(),
+                        },
+                    },
+                    Some(PickCandidate::EgsBuild(b)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: None,
+                        codename: b.app_name.clone(),
+                        source: "the egdata builds list".into(),
                     },
                     None => Intent::None,
                 }
@@ -439,6 +498,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         }
         KeyCode::Char('p') if app.view == View::Misses => match app.selected_miss_key() {
             Some(key) => Intent::UmuPick { key },
+            None => Intent::None,
+        },
+        KeyCode::Char('o') if app.view == View::Misses => match app.selected_miss_key() {
+            Some(key) => Intent::UmuOnline { key },
             None => Intent::None,
         },
         KeyCode::Char('s') if app.view == View::Misses => match app.selected_miss_key() {
@@ -788,8 +851,9 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             The daemon writes one entry per game that umu launched without a\n\
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
             Review them here — v fetches the database and verifies, s corrects\n\
-            a store guess, a assigns an id by hand (collision-checked), and\n\
-            p picks the matching entry from the local database.\n\
+            a store guess, a assigns an id by hand (collision-checked),\n\
+            p picks a match from the local database or your Heroic library,\n\
+            and o looks the title up at its store (network).\n\
             Export a submission from the shell (to stdout, or to a file if\n\
             you name one):\n\n\
             \u{20}   gamebus-setup umu-misses --export-md [file]";
@@ -840,31 +904,52 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(list, panes[0], &mut app.miss_list);
 
     // Pick mode replaces the detail with the candidate list. It is bound to
-    // the stash key it was opened for, not to the (frozen) selection.
+    // the stash key it was opened for, not to the (frozen) selection. The
+    // candidates arrive grouped by kind; section headers are rows of their
+    // own and can never be selected — `selected` indexes candidates, and
+    // [`pick_display_index`] maps it onto the row list at render time.
     if let Some(pick) = &app.pick {
-        let items: Vec<ListItem> = pick
-            .candidates
+        // A library identity from a different store than the one already on
+        // the miss still works (picking it changes the store), but it is
+        // probably not the row the user is after — greyed, not hidden.
+        let miss_store = app
+            .misses
             .iter()
-            .map(|e| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        e.title.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  {} · {} · {}", e.store, e.codename, e.umu_id),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]))
-            })
-            .collect();
+            .find(|(k, _)| k == &pick.key)
+            .map(|(_, m)| m.effective_store().to_string());
+        let mut last_section = None;
+        let mut items: Vec<ListItem> = Vec::new();
+        for c in &pick.candidates {
+            let section = c.section_label();
+            if last_section != Some(section) {
+                last_section = Some(section);
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("— {section} —"),
+                    Style::default().fg(Color::Cyan),
+                ))));
+            }
+            let (name, detail) = candidate_row(c);
+            let (name_style, detail_style) = if cross_store_library(c, miss_store.as_deref()) {
+                let dim = Style::default().fg(Color::DarkGray);
+                (dim, dim)
+            } else {
+                (
+                    Style::default().add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::DarkGray),
+                )
+            };
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(name, name_style),
+                Span::styled(format!("  {detail}"), detail_style),
+            ])));
+        }
         let mut state = ListState::default();
-        state.select(Some(pick.selected));
+        state.select(Some(pick_display_index(&pick.candidates, pick.selected)));
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Pick from the database ")
+                    .title(" Pick a match ")
                     .border_style(Style::default().fg(Color::Cyan)),
             )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -901,9 +986,16 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         Some(over) => format!("{over} (corrected by you; daemon guessed {})", m.store),
         None => format!("{} (guessed — s cycles)", m.store),
     };
+    let codename_line = match &m.codename_override {
+        Some(over) => format!(
+            "{over} (set by you; launcher reported {})",
+            m.codename.as_deref().unwrap_or("-")
+        ),
+        None => m.codename.clone().unwrap_or_else(|| "-".into()),
+    };
     detail.extend([
         field("Store", &store_line),
-        field("Codename", m.codename.as_deref().unwrap_or("-")),
+        field("Codename", &codename_line),
         field("Reported", &m.umu_id),
     ]);
     if let Some(source) = &m.title_source {
@@ -981,6 +1073,53 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
+/// Where candidate `selected` lands in the rendered row list, counting the
+/// section-header rows inserted before it. Headers are display-only: the
+/// selection moves over candidates, so a header row can never be selected.
+fn pick_display_index(candidates: &[PickCandidate], selected: usize) -> usize {
+    let mut last_section = None;
+    let mut headers = 0;
+    for c in candidates.iter().take(selected + 1) {
+        let section = c.section_label();
+        if last_section != Some(section) {
+            last_section = Some(section);
+            headers += 1;
+        }
+    }
+    selected + headers
+}
+
+/// A Heroic library row whose store differs from the one the miss already
+/// carries. Only library identities grey this way: database rows are
+/// cross-store on purpose, and the online sections were store-dispatched
+/// to begin with.
+fn cross_store_library(c: &PickCandidate, miss_store: Option<&str>) -> bool {
+    match (c, miss_store) {
+        (PickCandidate::Library(g), Some(store)) => store != "none" && g.store != store,
+        _ => false,
+    }
+}
+
+/// One pick row: what to print bold, and the gray detail beside it.
+fn candidate_row(c: &PickCandidate) -> (String, String) {
+    match c {
+        PickCandidate::Db(e) => (
+            e.title.clone(),
+            format!("{} · {} · {}", e.store, e.codename, e.umu_id),
+        ),
+        PickCandidate::Library(g) => (g.title.clone(), format!("{} · {}", g.store, g.codename)),
+        PickCandidate::GogProduct(p) => (p.title.clone(), format!("{} · {}", p.id, p.product_type)),
+        PickCandidate::EgsOffer(o) => (
+            o.title.clone(),
+            format!("{} · {}", o.namespace, o.offer_type),
+        ),
+        PickCandidate::EgsBuild(b) => (
+            b.app_name.clone(),
+            format!("{} · {}", b.label_name, b.platform),
+        ),
+    }
+}
+
 /// One glyph summarizing where an entry stands, for the list column.
 fn miss_state(m: &Miss) -> (&'static str, Style) {
     if m.dismissed.is_some() {
@@ -1036,7 +1175,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         View::Misses if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
         View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
         View::Misses => {
-            "↑↓ · tab view · v verify (net) · a assign · p pick from db · s store · d dismiss · q quit"
+            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · p pick · s store · d dismiss · q quit"
         }
     };
     f.render_widget(
@@ -1468,13 +1607,50 @@ mod tests {
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
     }
 
-    fn sample_candidate(store: &str, codename: &str, umu_id: &str) -> UmuEntry {
-        UmuEntry {
+    fn sample_candidate(store: &str, codename: &str, umu_id: &str) -> PickCandidate {
+        PickCandidate::Db(crate::umu_report::UmuEntry {
             title: "Control".into(),
             store: store.into(),
             codename: codename.into(),
             umu_id: umu_id.into(),
-        }
+        })
+    }
+
+    #[test]
+    fn section_headers_are_rows_of_their_own_and_never_selected() {
+        // Two sections: db rows then a library row. Headers occupy display
+        // rows, so candidate 0 renders at row 1 (after its header), and the
+        // library candidate at row 4 (two headers before it).
+        let candidates = vec![
+            sample_candidate("egs", "Calluna", "umu-870780"),
+            sample_candidate("gog", "2049187585", "umu-870780"),
+            PickCandidate::Library(crate::setup::heroic_library::LibraryGame {
+                title: "Control".into(),
+                store: "gog".into(),
+                codename: "2049187585".into(),
+            }),
+        ];
+        assert_eq!(pick_display_index(&candidates, 0), 1);
+        assert_eq!(pick_display_index(&candidates, 1), 2);
+        assert_eq!(pick_display_index(&candidates, 2), 4);
+    }
+
+    #[test]
+    fn library_rows_from_another_store_grey_out_but_stay_pickable() {
+        let gog_lib = PickCandidate::Library(crate::setup::heroic_library::LibraryGame {
+            title: "Control".into(),
+            store: "gog".into(),
+            codename: "2049187585".into(),
+        });
+        // The miss already says egs: a gog library row is probably not the
+        // one — greyed. Same store, store none, or a db row: full color.
+        assert!(cross_store_library(&gog_lib, Some("egs")));
+        assert!(!cross_store_library(&gog_lib, Some("gog")));
+        assert!(!cross_store_library(&gog_lib, Some("none")));
+        assert!(!cross_store_library(
+            &sample_candidate("gog", "2049187585", "umu-870780"),
+            Some("egs")
+        ));
     }
 
     #[test]
@@ -1511,6 +1687,127 @@ mod tests {
                 key: "egs:Control".into()
             }
         );
+    }
+
+    #[test]
+    fn o_asks_for_an_online_lookup_only_in_the_misses_view() {
+        let mut app = app_with_rows();
+        // Inert outside the misses view.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('o'))), Intent::None);
+        app.view = View::Misses;
+        // And inert without a selected entry.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('o'))), Intent::None);
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('o'))),
+            Intent::UmuOnline {
+                key: "egs:Control".into()
+            }
+        );
+    }
+
+    /// Enter must dispatch on the candidate's kind — a database row records
+    /// a verdict, everything else an identity, and an egs offer without a
+    /// Windows build fires the builds request instead of committing its
+    /// (lowercase, wrong) namespace.
+    #[test]
+    fn enter_in_pick_mode_dispatches_per_candidate_kind() {
+        use super::super::heroic_library::LibraryGame;
+        use super::super::umu_misses::{EgsBuild, EgsOffer, GogProduct};
+
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+
+        let cases: Vec<(PickCandidate, Intent)> = vec![
+            (
+                sample_candidate("egs", "Calluna", "umu-870780"),
+                Intent::UmuPickEntry {
+                    key: "egs:Control".into(),
+                    store: "egs".into(),
+                    codename: "Calluna".into(),
+                    umu_id: "umu-870780".into(),
+                },
+            ),
+            (
+                PickCandidate::Library(LibraryGame {
+                    title: "Control".into(),
+                    store: "egs".into(),
+                    codename: "Calluna".into(),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: Some("egs".into()),
+                    codename: "Calluna".into(),
+                    source: "your Heroic library".into(),
+                },
+            ),
+            (
+                PickCandidate::GogProduct(GogProduct {
+                    id: "2049187585".into(),
+                    title: "Control Ultimate Edition".into(),
+                    product_type: "game".into(),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: None,
+                    codename: "2049187585".into(),
+                    source: "the GOG catalog".into(),
+                },
+            ),
+            (
+                // The search hit already knew the Windows build.
+                PickCandidate::EgsOffer(EgsOffer {
+                    title: "Control".into(),
+                    namespace: "calluna".into(),
+                    offer_type: "BASE_GAME".into(),
+                    windows_app_name: Some("Calluna".into()),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: None,
+                    codename: "Calluna".into(),
+                    source: "the egdata offer's Windows build".into(),
+                },
+            ),
+            (
+                // No Windows build: the builds request, NEVER the namespace.
+                PickCandidate::EgsOffer(EgsOffer {
+                    title: "Control".into(),
+                    namespace: "calluna".into(),
+                    offer_type: "BASE_GAME".into(),
+                    windows_app_name: None,
+                }),
+                Intent::UmuEgsBuilds {
+                    key: "egs:Control".into(),
+                    namespace: "calluna".into(),
+                },
+            ),
+            (
+                PickCandidate::EgsBuild(EgsBuild {
+                    app_name: "Calluna".into(),
+                    label_name: "Live".into(),
+                    platform: "Windows".into(),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: None,
+                    codename: "Calluna".into(),
+                    source: "the egdata builds list".into(),
+                },
+            ),
+        ];
+        for (candidate, expected) in cases {
+            app.pick = Some(Pick {
+                key: "egs:Control".into(),
+                candidates: vec![candidate],
+                selected: 0,
+                stale: None,
+            });
+            assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), expected);
+            assert!(app.pick.is_none(), "pick mode stayed open after commit");
+        }
     }
 
     #[test]
@@ -1597,6 +1894,7 @@ mod tests {
                 drafted_id: None,
                 possible_pr: None,
                 store_override: None,
+                codename_override: None,
                 dismissed: None,
             },
         )
