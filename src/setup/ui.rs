@@ -16,7 +16,7 @@ use super::paths::Target;
 use super::status::{self, Health, Row, Status};
 use super::umu_misses::{basis_label, confidence_label};
 use crate::client::ActivityView;
-use crate::umu_report::{Miss, VerificationState};
+use crate::umu_report::{Miss, UmuEntry, VerificationState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -25,8 +25,9 @@ pub enum View {
     /// The umu-database miss stash (S9b): what the daemon collected, what
     /// verification made of it. The pane drives the flows on explicit
     /// keypresses — `v` fetches+verifies (network, and the footer says so),
-    /// `a` assigns an id (collision-checked before it saves), `s` corrects
-    /// the store guess, `d` dismisses/restores an entry.
+    /// `a` assigns an id (collision-checked before it saves), `p` picks the
+    /// matching entry from the local database, `s` corrects the store guess,
+    /// `d` dismisses/restores an entry.
     Misses,
 }
 
@@ -67,6 +68,20 @@ pub struct Confirm {
     pub details: bool,
 }
 
+/// The misses pane's pick mode: database candidates for one miss, waiting
+/// for the user to choose (or Esc out).
+pub struct Pick {
+    /// The stash key the candidates were fetched for — the pick lands on
+    /// this entry, never on whatever the selection moved to since.
+    pub key: String,
+    /// Never empty: the binary logs "no matches" instead of opening the mode.
+    pub candidates: Vec<UmuEntry>,
+    pub selected: usize,
+    /// A warning when the candidates came from an aging fetch cache — the
+    /// footer then advertises `v` as the way out.
+    pub stale: Option<String>,
+}
+
 pub struct App {
     pub view: View,
     pub focus: Focus,
@@ -90,6 +105,11 @@ pub struct App {
     /// land here instead of the keymap. Committed with Enter (which checks
     /// the id before anything is saved), cancelled with Esc.
     pub id_input: Option<String>,
+    /// While `Some`, the misses pane is in pick mode and the candidate list
+    /// owns the keyboard: ↑↓/j/k choose, Enter records the pick, Esc
+    /// cancels. Remembers the stash key it was opened for; a refresh that
+    /// drops that miss cancels the mode (see [`App::set_misses`]).
+    pub pick: Option<Pick>,
     pub output: Vec<Line<'static>>,
     pub confirm: Option<Confirm>,
     /// Set while a mutating action is running. Also the mutual-exclusion gate
@@ -121,6 +141,7 @@ impl Default for App {
             misses: Vec::new(),
             miss_list: ListState::default(),
             id_input: None,
+            pick: None,
             output: Vec::new(),
             confirm: None,
             busy: None,
@@ -200,6 +221,22 @@ impl App {
             .map(|(k, _)| k.clone())
     }
 
+    /// Move the selection off the current entry onto its list neighbor —
+    /// the one below, or the one above when the cursor sits on the last
+    /// row. Used before an action that resorts the current entry away
+    /// (dismiss), so the key-stable refresh follows the neighbor instead
+    /// of trailing the acted-on entry to its new position.
+    fn select_neighbor_miss(&mut self) {
+        let Some(idx) = self.miss_list.selected() else {
+            return;
+        };
+        if idx + 1 < self.misses.len() {
+            self.miss_list.select(Some(idx + 1));
+        } else if idx > 0 {
+            self.miss_list.select(Some(idx - 1));
+        }
+    }
+
     /// Replace the miss list, keeping the selection on the same entry (by
     /// stash key): the once-a-second refresh may reorder rows — a bump of
     /// `last_seen`, a new miss on top — and a bare index would silently
@@ -214,6 +251,13 @@ impl App {
         if let Some(key) = selected_key {
             if let Some(idx) = self.misses.iter().position(|(k, _)| k == &key) {
                 self.miss_list.select(Some(idx));
+            }
+        }
+        // Pick mode is bound to one stash entry; if a refresh dropped it,
+        // there is nothing left to pick for.
+        if let Some(pick) = &self.pick {
+            if !self.misses.iter().any(|(k, _)| k == &pick.key) {
+                self.pick = None;
             }
         }
     }
@@ -253,6 +297,19 @@ pub enum Intent {
     UmuAssign {
         key: String,
         id: String,
+    },
+    /// Misses pane `p`: search the local database for candidates matching
+    /// the selected entry's title. Local file only — never the network.
+    UmuPick {
+        key: String,
+    },
+    /// Misses pane, Enter in pick mode: record "this game IS that database
+    /// entry" on the miss.
+    UmuPickEntry {
+        key: String,
+        store: String,
+        codename: String,
+        umu_id: String,
     },
     /// Misses pane `s`: cycle the selected entry's store correction.
     UmuStore {
@@ -312,6 +369,48 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         };
     }
 
+    // Pick mode owns the keyboard likewise: the candidate list is a modal
+    // choice, so the selection keys move through candidates and no pane verb
+    // fires underneath it.
+    if app.view == View::Misses && app.pick.is_some() {
+        let pick = app.pick.as_mut().expect("checked");
+        return match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Intent::Quit,
+            KeyCode::Esc => {
+                app.pick = None;
+                Intent::None
+            }
+            // The candidates may have come from a stale cache; v abandons
+            // the pick and runs the pane's one network action, the same
+            // fetch+verify it means everywhere else.
+            KeyCode::Char('v') => {
+                app.pick = None;
+                Intent::UmuVerify
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                pick.selected = (pick.selected + 1) % pick.candidates.len();
+                Intent::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                pick.selected = (pick.selected + pick.candidates.len() - 1) % pick.candidates.len();
+                Intent::None
+            }
+            KeyCode::Enter => {
+                let pick = app.pick.take().expect("checked");
+                match pick.candidates.get(pick.selected) {
+                    Some(c) => Intent::UmuPickEntry {
+                        key: pick.key,
+                        store: c.store.clone(),
+                        codename: c.codename.clone(),
+                        umu_id: c.umu_id.clone(),
+                    },
+                    None => Intent::None,
+                }
+            }
+            _ => Intent::None,
+        };
+    }
+
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Intent::Quit,
         KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
@@ -338,12 +437,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             }
             Intent::None
         }
+        KeyCode::Char('p') if app.view == View::Misses => match app.selected_miss_key() {
+            Some(key) => Intent::UmuPick { key },
+            None => Intent::None,
+        },
         KeyCode::Char('s') if app.view == View::Misses => match app.selected_miss_key() {
             Some(key) => Intent::UmuStore { key },
             None => Intent::None,
         },
         KeyCode::Char('d') if app.view == View::Misses => match app.selected_miss_key() {
-            Some(key) => Intent::UmuDismiss { key },
+            Some(key) => {
+                // Dismissing resorts the entry to the bottom of the list; the
+                // key-stable selection would follow it there, stranding a
+                // triage run (d, navigate all the way back, d, …). Hop to the
+                // neighbor first — the refresh then keeps THAT entry selected
+                // wherever the resort puts everything.
+                app.select_neighbor_miss();
+                Intent::UmuDismiss { key }
+            }
             None => Intent::None,
         },
         // Pane focus, install target, and Enter act on the Status pane's
@@ -677,7 +788,8 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             The daemon writes one entry per game that umu launched without a\n\
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
             Review them here — v fetches the database and verifies, s corrects\n\
-            a store guess, a assigns an id by hand (collision-checked).\n\
+            a store guess, a assigns an id by hand (collision-checked), and\n\
+            p picks the matching entry from the local database.\n\
             Export a submission from the shell (to stdout, or to a file if\n\
             you name one):\n\n\
             \u{20}   gamebus-setup umu-misses --export-md [file]";
@@ -726,6 +838,39 @@ fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title(" umu misses "))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, panes[0], &mut app.miss_list);
+
+    // Pick mode replaces the detail with the candidate list. It is bound to
+    // the stash key it was opened for, not to the (frozen) selection.
+    if let Some(pick) = &app.pick {
+        let items: Vec<ListItem> = pick
+            .candidates
+            .iter()
+            .map(|e| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        e.title.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {} · {} · {}", e.store, e.codename, e.umu_id),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(pick.selected));
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Pick from the database ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        f.render_stateful_widget(list, panes[1], &mut state);
+        return;
+    }
 
     let Some((_, m)) = app.miss_list.selected().and_then(|i| app.misses.get(i)) else {
         return;
@@ -885,8 +1030,14 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
         // The export hint lives in the verify output and the empty state —
         // this line carries the pane's own verbs.
+        View::Misses if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
+            "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
+        }
+        View::Misses if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
         View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
-        View::Misses => "↑↓ · tab view · v verify (net) · a assign · s store · d dismiss · q quit",
+        View::Misses => {
+            "↑↓ · tab view · v verify (net) · a assign · p pick from db · s store · d dismiss · q quit"
+        }
     };
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
@@ -1190,6 +1341,44 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_hops_the_selection_to_the_neighbor_not_the_sunk_entry() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![
+            sample_miss("Control"),
+            sample_miss("Brotato"),
+            sample_miss("Hades II"),
+        ]);
+        handle_key(&mut app, key(KeyCode::Down)); // first ↓ lands on index 1
+        handle_key(&mut app, key(KeyCode::Up)); // index 0: Control
+
+        // d dismisses Control, but the cursor must hop to Brotato — a triage
+        // run (d, d, d) works top-down without re-navigating.
+        let intent = handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(
+            intent,
+            Intent::UmuDismiss {
+                key: "egs:Control".into()
+            }
+        );
+        assert_eq!(app.selected_miss_key().as_deref(), Some("egs:Brotato"));
+
+        // The refresh resorts the dismissed entry to the bottom; the
+        // selection stays with Brotato at its new position.
+        app.set_misses(vec![
+            sample_miss("Brotato"),
+            sample_miss("Hades II"),
+            sample_miss("Control"),
+        ]);
+        assert_eq!(app.selected_miss_key().as_deref(), Some("egs:Brotato"));
+
+        // On the last row there is no entry below: hop upward instead.
+        app.miss_list.select(Some(2));
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.selected_miss_key().as_deref(), Some("egs:Hades II"));
+    }
+
+    #[test]
     fn status_pane_keys_are_inert_outside_the_status_view() {
         let mut app = app_with_rows();
         app.focus = Focus::Actions; // an Install row is highlighted underneath
@@ -1277,6 +1466,118 @@ mod tests {
         assert!(app.id_input.is_none());
         // And the pane is back to normal keys.
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
+    fn sample_candidate(store: &str, codename: &str, umu_id: &str) -> UmuEntry {
+        UmuEntry {
+            title: "Control".into(),
+            store: store.into(),
+            codename: codename.into(),
+            umu_id: umu_id.into(),
+        }
+    }
+
+    #[test]
+    fn v_inside_pick_mode_abandons_the_pick_and_fetches() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
+            selected: 0,
+            stale: Some("Database cache is 9 days old — v refreshes it (net).".into()),
+        });
+        // The one network key means the same thing inside the mode: leave
+        // the stale candidate list and fetch fresh.
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('v'))),
+            Intent::UmuVerify
+        );
+        assert!(app.pick.is_none(), "pick mode survived the refresh");
+    }
+
+    #[test]
+    fn p_asks_for_candidates_for_the_selected_miss() {
+        let mut app = app_with_rows();
+        // Inert outside the misses view.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('p'))), Intent::None);
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('p'))),
+            Intent::UmuPick {
+                key: "egs:Control".into()
+            }
+        );
+    }
+
+    #[test]
+    fn pick_mode_owns_the_keyboard_and_commits_the_chosen_candidate() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![
+                sample_candidate("egs", "Calluna", "umu-870780"),
+                sample_candidate("gog", "2049187585", "umu-870780"),
+            ],
+            selected: 0,
+            stale: None,
+        });
+        // q must NOT quit while the list is up (v is the deliberate
+        // exception — it abandons the pick to refresh, tested separately).
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::None);
+        // ↓/j and ↑/k move, wrapping at both ends.
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.pick.as_ref().unwrap().selected, 1);
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.pick.as_ref().unwrap().selected, 0, "wrap-around broke");
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.pick.as_ref().unwrap().selected, 1, "wrap-around broke");
+        // Enter commits the highlighted candidate for the remembered key.
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuPickEntry {
+                key: "egs:Control".into(),
+                store: "gog".into(),
+                codename: "2049187585".into(),
+                umu_id: "umu-870780".into(),
+            }
+        );
+        assert!(app.pick.is_none(), "pick mode stayed open after commit");
+
+        // Esc cancels without an intent, and the pane keys are back.
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
+            selected: 0,
+            stale: None,
+        });
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Intent::None);
+        assert!(app.pick.is_none());
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
+    #[test]
+    fn a_refresh_that_drops_the_picked_miss_cancels_pick_mode() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control"), sample_miss("Brotato")]);
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
+            selected: 0,
+            stale: None,
+        });
+        // A refresh that keeps the miss keeps the mode.
+        app.set_misses(vec![sample_miss("Brotato"), sample_miss("Control")]);
+        assert!(app.pick.is_some());
+        // One that drops it cancels — the pick has nothing to land on.
+        app.set_misses(vec![sample_miss("Brotato")]);
+        assert!(app.pick.is_none(), "pick mode outlived its miss");
     }
 
     fn sample_miss(title: &str) -> (String, Miss) {
