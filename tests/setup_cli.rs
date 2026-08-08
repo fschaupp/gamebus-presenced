@@ -262,7 +262,7 @@ fn umu_misses_lists_and_exports_the_stash() {
     // for the id (umu-<Steam appid> is the reviewer's call).
     assert!(text.contains("TITLE,STORE,CODENAME,UMU_ID"), "{text}");
     assert!(
-        text.contains("Control,egs,Calluna,umu-FIXME"),
+        text.contains("Control,egs,Calluna,umu-FIXME,,,"),
         "export row malformed:\n{text}"
     );
 }
@@ -344,9 +344,12 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     let export = run_env(&home, &["umu-misses", "--export"], &[]);
     assert!(export.status.success());
     let text = stdout(&export);
-    assert!(text.contains("Borderlands 3,egs,Bee,umu-397540"), "{text}");
     assert!(
-        text.contains("Zzz Fixture Quest,none,none,umu-zzzfixturequest"),
+        text.contains("Borderlands 3,egs,Bee,umu-397540,,,"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Zzz Fixture Quest,none,none,umu-zzzfixturequest,,,"),
         "{text}"
     );
     assert!(
@@ -370,6 +373,64 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     assert!(
         text.contains("- [ ] Every id follows the database rules"),
         "steam-rule box was pre-ticked over a slug draft:\n{text}"
+    );
+    // Conformance boxes: the gog rule is enforced by the hold-back, the egs
+    // fixture's store came from the daemon (no override), and the NOTE
+    // column is empty by construction.
+    assert!(
+        text.contains("- [x] GOG codenames are numeric gogdb.org"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- [x] EGS codenames are the egdata.app Builds"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- [x] NOTE column carries game-related"),
+        "{text}"
+    );
+    // Provenance lives in the evidence, not in the CSV rows.
+    assert!(text.contains("## Evidence"), "{text}");
+    assert!(
+        !text.contains("collision-checked 2026-08-07\","),
+        "provenance leaked into a CSV cell:\n{text}"
+    );
+}
+
+#[test]
+fn gog_rows_without_a_gogdb_product_id_are_held_back() {
+    let home = TempHome::new("umu-gogdb");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // The database's GOG rule: codename = numeric gogdb.org product id.
+    // Heroic GOG launches carry exactly that; a name-shaped codename means
+    // somebody has to look the id up before this row may be submitted.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"gog:1423049311":{"title":"Numeric Fine","store":"gog","codename":"1423049311",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08"},
+        "gog:witchery":{"title":"Name Shaped","store":"gog","codename":"witchery",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Numeric Fine,gog,1423049311,umu-FIXME,,,"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Name Shaped"),
+        "non-gogdb codename reached the submission:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(
+        err.contains("gogdb.org") && err.contains("witchery"),
+        "hold-back reason missing the gogdb rule:\n{err}"
     );
 }
 
@@ -395,7 +456,7 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
     assert!(export.status.success());
     let text = stdout(&export);
     assert!(
-        text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-FIXME"#),
+        text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-FIXME,,,Game.exe"#),
         "codename not escaped — columns shifted:\n{text}"
     );
     assert!(
