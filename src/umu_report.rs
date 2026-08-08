@@ -82,6 +82,20 @@ pub struct Miss {
     /// [`Miss::effective_store`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_override: Option<String>,
+    /// The user's codename correction from the setup TUI (a Heroic library
+    /// pick or an online store lookup). `codename` stays the daemon's
+    /// observation; this override is annotation-half like `store_override`,
+    /// so a daemon write never reverts it. Everything downstream reads
+    /// [`Miss::effective_codename`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename_override: Option<String>,
+    /// The user's title correction from the setup TUI (typed via `t`, or a
+    /// GOG product lookup). `title` stays the daemon's resolution; this
+    /// override is annotation-half like the other overrides, so a daemon
+    /// write never reverts it. Everything downstream reads
+    /// [`Miss::effective_title`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_override: Option<String>,
     /// Set (to the date) when the user dismissed this entry in the setup
     /// TUI: not wrong, just not wanted — dropped from the exports and
     /// parked at the bottom of the list. Annotation-half rather than a
@@ -97,6 +111,20 @@ impl Miss {
     /// when present, else the daemon's guess.
     pub fn effective_store(&self) -> &str {
         self.store_override.as_deref().unwrap_or(&self.store)
+    }
+
+    /// The codename every lookup and export should use: the user's
+    /// correction when present, else the daemon's observation.
+    pub fn effective_codename(&self) -> Option<&str> {
+        self.codename_override
+            .as_deref()
+            .or(self.codename.as_deref())
+    }
+
+    /// The title every display, search, and export should use: the user's
+    /// correction when present, else the daemon's resolution.
+    pub fn effective_title(&self) -> Option<&str> {
+        self.title_override.as_deref().or(self.title.as_deref())
     }
 }
 
@@ -189,7 +217,8 @@ impl UmuReport {
         }
     }
 
-    fn from_path(path: PathBuf) -> Self {
+    /// crate-visible for tests that need a stash on a scratch path.
+    pub(crate) fn from_path(path: PathBuf) -> Self {
         match std::fs::read_to_string(&path) {
             // Missing file: a fresh stash that writes normally.
             Err(_) => Self {
@@ -252,6 +281,8 @@ impl UmuReport {
             drafted_id: None,
             possible_pr: None,
             store_override: None,
+            codename_override: None,
+            title_override: None,
             dismissed: None,
         });
         entry.last_seen = today;
@@ -392,6 +423,8 @@ impl UmuReport {
                     ours.drafted_id = theirs.drafted_id;
                     ours.possible_pr = theirs.possible_pr;
                     ours.store_override = theirs.store_override;
+                    ours.codename_override = theirs.codename_override;
+                    ours.title_override = theirs.title_override;
                     ours.dismissed = theirs.dismissed;
                 }
             }
@@ -608,6 +641,48 @@ impl UmuDb {
             .get(&umu_id.to_lowercase())
             .map(|idx| idx.iter().map(|&i| &self.entries[i]).collect())
             .unwrap_or_default()
+    }
+
+    /// Candidates for a human pick: case-insensitive substring match in both
+    /// directions — a database title containing the query ("Control" finds
+    /// "Control Ultimate Edition") or the query containing a database title
+    /// (a decorated launcher title finds the plain row). Ranked exact match,
+    /// then database-title-starts-with-query, then the rest; capped at 20.
+    /// The upstream CSV carries literal duplicate rows, so results dedup by
+    /// (store, codename, umu id). Empty or whitespace queries match nothing.
+    pub fn search_title(&self, query: &str) -> Vec<&UmuEntry> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut seen: std::collections::HashSet<(String, String, String)> = Default::default();
+        let mut ranked: Vec<(u8, usize)> = Vec::new();
+        for (i, e) in self.entries.iter().enumerate() {
+            let t = e.title.to_lowercase();
+            let rank = if t == q {
+                0
+            } else if t.starts_with(&q) {
+                1
+            } else if t.contains(&q) || q.contains(&t) {
+                2
+            } else {
+                continue;
+            };
+            if seen.insert((
+                e.store.to_lowercase(),
+                e.codename.to_lowercase(),
+                e.umu_id.to_lowercase(),
+            )) {
+                ranked.push((rank, i));
+            }
+        }
+        // Stable sort: within a rank, database order stands.
+        ranked.sort_by_key(|&(rank, _)| rank);
+        ranked
+            .into_iter()
+            .take(20)
+            .map(|(_, i)| &self.entries[i])
+            .collect()
     }
 }
 
@@ -893,6 +968,8 @@ mod tests {
                 basis: DraftBasis::SteamSku,
                 collision_checked: "2026-08-07".into(),
             });
+            m.codename_override = Some("Calluna".into());
+            m.title_override = Some("Control Ultimate Edition".into());
         });
         setup.save();
 
@@ -918,6 +995,16 @@ mod tests {
             calluna.drafted_id.as_ref().map(|d| d.id.as_str()),
             Some("umu-870780"),
             "daemon write erased the drafted id"
+        );
+        assert_eq!(
+            calluna.codename_override.as_deref(),
+            Some("Calluna"),
+            "daemon write erased the codename override"
+        );
+        assert_eq!(
+            calluna.title_override.as_deref(),
+            Some("Control Ultimate Edition"),
+            "daemon write erased the title override"
         );
         assert!(
             disk.contains_key("gog:1207600000"),
@@ -959,6 +1046,11 @@ mod tests {
         assert!(m.verification.is_none());
         assert!(m.drafted_id.is_none());
         assert!(m.possible_pr.is_none());
+        assert!(m.codename_override.is_none());
+        assert!(m.title_override.is_none());
+        // Without overrides the effective values are the daemon's own.
+        assert_eq!(m.effective_codename(), Some("Calluna"));
+        assert_eq!(m.effective_title(), Some("Control"));
     }
 
     // ---- UmuDb parsing (S9b) — every sample below is captured, not made up.
@@ -1022,6 +1114,71 @@ mod tests {
         // those must not "find" Dark and Darker.
         assert!(db.find_store_codename("none", "none").is_none());
         assert!(db.find_store_codename("egs", "").is_none());
+    }
+
+    // ---- Title search for the TUI's pick verb (S9b).
+
+    /// Real row shapes: one game in three spellings, plus the CSV's literal
+    /// duplicate-row habit (the upstream file really contains repeated rows).
+    const SEARCH_CSV: &str = concat!(
+        "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+        "Control,egs,Calluna,umu-870780,,,\n",
+        "Control Ultimate Edition,gog,2049187585,umu-870780,,,\n",
+        "Ground Control,gog,1207658883,umu-groundcontrol,,,\n",
+        "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+        "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+    );
+
+    #[test]
+    fn search_ranks_exact_then_prefix_then_the_rest() {
+        let db = UmuDb::parse(SEARCH_CSV).unwrap();
+        let hits = db.search_title("control");
+        let titles: Vec<&str> = hits.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Control", "Control Ultimate Edition", "Ground Control"]
+        );
+        // Case-insensitive throughout.
+        assert_eq!(db.search_title("CONTROL")[0].title, "Control");
+    }
+
+    #[test]
+    fn search_matches_substrings_in_both_directions() {
+        let db = UmuDb::parse(SEARCH_CSV).unwrap();
+        // Query inside a database title.
+        assert!(db
+            .search_title("ultimate")
+            .iter()
+            .any(|e| e.title == "Control Ultimate Edition"));
+        // Database title inside the query — a decorated launcher title still
+        // finds the plain row.
+        assert!(db
+            .search_title("Control Ultimate Edition GOTY")
+            .iter()
+            .any(|e| e.title == "Control Ultimate Edition"));
+        assert!(db.search_title("Half-Life").is_empty());
+    }
+
+    #[test]
+    fn search_dedups_the_csvs_literal_duplicate_rows() {
+        let db = UmuDb::parse(SEARCH_CSV).unwrap();
+        let hits = db.search_title("Borderlands 3");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].umu_id, "umu-397540");
+    }
+
+    #[test]
+    fn search_caps_at_twenty_and_ignores_empty_queries() {
+        let mut csv = String::from(
+            "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+        );
+        for i in 0..25 {
+            csv.push_str(&format!("Fixture Quest {i:02},egs,code{i},umu-fq{i},,,\n"));
+        }
+        let db = UmuDb::parse(&csv).unwrap();
+        assert_eq!(db.search_title("fixture quest").len(), 20);
+        assert!(db.search_title("").is_empty());
+        assert!(db.search_title("   ").is_empty());
     }
 
     #[test]

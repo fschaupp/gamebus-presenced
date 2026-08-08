@@ -4,7 +4,7 @@
 live in [`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md).
 This file is the roadmap and the status line.
 
-## Status: S0-S4f and S6-S10 done and verified. S5 (setup tool) landed 2026-08-06, STAGED.
+## Status: S0-S4f and S6-S10 done and verified (S9c matchup + mislabel defense 2026-08-08). S5 (setup tool) landed 2026-08-06, STAGED.
 
 Repo created 2026-08-03. The original S1 ("D-Bus surface + GameMode source")
 was split: the surface was extracted as S0 so the interface could be verified
@@ -446,6 +446,53 @@ stash that fails to parse is reported and never written over.
   via the unauthenticated GitHub API for rows matching our entries —
   matched entries are annotated and held back from exports. Failures are
   reported and non-fatal.
+
+#### S9b conformance fix (DONE 2026-08-08)
+
+The first real submission round (Control, submitted upstream as PR #151,
+pending as of 2026-08-08) showed the exports drifting from the database's
+own rules. Three fixes, all in the
+export path: the CSV NOTE column is now always empty — it belongs to the
+database and carries game-related remarks only (the README's Genshin
+example); provenance lives exclusively in the merge request's evidence text.
+GOG rows are gated on the codename being a numeric gogdb.org product id
+(Heroic launches satisfy this by construction — Heroic's GOG app name IS
+that id; anything else is held back with the reason). EGS codenames stay the
+launcher's App Name, which per the README is exactly the egdata.app Builds
+"App Name" value; the checklist ticks that box only when the daemon itself
+derived the store from HEROIC_APP_NAME. Evidence lines now link the
+per-store authority (gogdb.org product page, egdata.app) and carry the
+verification's advisory notes.
+
+#### S9c — Manual matchup and the mislabel defense (DONE 2026-08-08)
+
+The misses pane became a full matchup workbench. `p` picks from two
+labeled, zero-network candidate sections: local umu-database matches
+(Enter records the verdict) and identities from Heroic's store_cache
+libraries (Enter sets store + codename overrides — identity, not verdict;
+`v` verifies it afterwards). `o` asks the store's own database once per
+keypress: GOG catalog search commits the numeric product id; egdata
+commits the Builds "App Name" via the sandbox builds route (the lowercase
+namespace is structurally never offered — a real hand-submission mixup);
+a gog entry with a numeric codename flips to a by-id product lookup that
+sets the *title* instead. A stale (>7 days) fetch cache warns inside pick
+mode with `v` as the exit. All overrides (`store_override`,
+`codename_override`, `title_override` via the `t` verb) live on the
+annotation half and thread through verify, drafting, the gog gate, and
+both exports with honest provenance.
+
+The defense behind it, found live (Project Hospital stashed as
+"Spellcraft" off `UnityCrashHandler64.exe`): shared helper executables
+never name a game — the list ships as `shared-helpers.txt` (bundled →
+installed → user config, union semantics, installed beside
+endpoints.toml); and the stash now mirrors the group's ELECTED identity
+instead of member claims in arrival order, inheriting the election's
+monotonicity (regression test replays the incident). Dismissing hops the
+selection to the neighbor so triage runs top-down. `ui` and `umu_misses`
+split into per-concern modules. The export checklist carries only what a
+human must verify — mechanical guarantees claim no box — and everything
+that leaves the machine (CSV, merge-request text, stash notes,
+shared-helpers.txt) is em-dash-free.
 
 #### S10 — Release pipeline (DONE 2026-08-07)
 

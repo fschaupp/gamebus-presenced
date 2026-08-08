@@ -111,8 +111,9 @@ fn planning_a_user_install_names_every_destination() {
         assert!(text.contains(&expected), "plan missing {expected}:\n{text}");
     }
     assert!(text.contains("systemctl --user daemon-reload"), "{text}");
-    // The endpoint configuration ships with the install.
+    // The endpoint configuration and shared-helper list ship with the install.
     assert!(text.contains("endpoints.toml"), "{text}");
+    assert!(text.contains("shared-helpers.txt"), "{text}");
 }
 
 /// The whole point of a dry run.
@@ -262,7 +263,7 @@ fn umu_misses_lists_and_exports_the_stash() {
     // for the id (umu-<Steam appid> is the reviewer's call).
     assert!(text.contains("TITLE,STORE,CODENAME,UMU_ID"), "{text}");
     assert!(
-        text.contains("Control,egs,Calluna,umu-FIXME"),
+        text.contains("Control,egs,Calluna,umu-FIXME,,,"),
         "export row malformed:\n{text}"
     );
 }
@@ -344,9 +345,12 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     let export = run_env(&home, &["umu-misses", "--export"], &[]);
     assert!(export.status.success());
     let text = stdout(&export);
-    assert!(text.contains("Borderlands 3,egs,Bee,umu-397540"), "{text}");
     assert!(
-        text.contains("Zzz Fixture Quest,none,none,umu-zzzfixturequest"),
+        text.contains("Borderlands 3,egs,Bee,umu-397540,,,"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Zzz Fixture Quest,none,none,umu-zzzfixturequest,,,"),
         "{text}"
     );
     assert!(
@@ -370,6 +374,160 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     assert!(
         text.contains("- [ ] Every id follows the database rules"),
         "steam-rule box was pre-ticked over a slug draft:\n{text}"
+    );
+    // Conformance boxes: the gog rule is enforced by the hold-back, the egs
+    // fixture's store came from the daemon (no override). Mechanical
+    // guarantees (lowercase STORE, empty NOTE) claim no box: the checklist
+    // is for what a human verifies.
+    assert!(
+        text.contains("- [x] GOG codenames are numeric gogdb.org"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- [x] EGS codenames are the egdata.app Builds"),
+        "{text}"
+    );
+    assert!(!text.contains("NOTE column carries"), "{text}");
+    assert!(!text.contains("Store ids are lowercase"), "{text}");
+    // Provenance lives in the evidence, not in the CSV rows.
+    assert!(text.contains("## Evidence"), "{text}");
+    assert!(
+        !text.contains("collision-checked 2026-08-07\","),
+        "provenance leaked into a CSV cell:\n{text}"
+    );
+}
+
+#[test]
+fn gog_rows_without_a_gogdb_product_id_are_held_back() {
+    let home = TempHome::new("umu-gogdb");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // The database's GOG rule: codename = numeric gogdb.org product id.
+    // Heroic GOG launches carry exactly that; a name-shaped codename means
+    // somebody has to look the id up before this row may be submitted.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"gog:1423049311":{"title":"Numeric Fine","store":"gog","codename":"1423049311",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08"},
+        "gog:witchery":{"title":"Name Shaped","store":"gog","codename":"witchery",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Numeric Fine,gog,1423049311,umu-FIXME,,,"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Name Shaped"),
+        "non-gogdb codename reached the submission:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(
+        err.contains("gogdb.org") && err.contains("witchery"),
+        "hold-back reason missing the gogdb rule:\n{err}"
+    );
+}
+
+#[test]
+fn a_codename_override_reaches_the_export_and_passes_the_gog_gate() {
+    let home = TempHome::new("umu-codename-override");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // Two annotated identities: a gog entry whose launcher-reported codename
+    // is name-shaped (held back on its own — see the gogdb-gate test) but
+    // whose override is the numeric product id, and an egs entry whose
+    // override replaces a wrong App Name. The daemon-owned codename field
+    // stays untouched in both; the export must use the overrides.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"gog:witchery":{"title":"Name Shaped","store":"gog","codename":"witchery",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "codename_override":"1423049311"},
+        "egs:WrongName":{"title":"Control","store":"egs","codename":"WrongName",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "codename_override":"Calluna"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Name Shaped,gog,1423049311,umu-FIXME,,,"),
+        "gog override missing or gate still held it back:\n{text}"
+    );
+    assert!(
+        text.contains("Control,egs,Calluna,umu-FIXME,,,"),
+        "egs override missing:\n{text}"
+    );
+    assert!(
+        !text.contains("witchery") && !text.contains("WrongName"),
+        "a launcher-reported codename leaked past its override:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(!err.contains("held back"), "{err}");
+}
+
+#[test]
+fn a_title_override_reaches_the_export_and_counts_as_confident() {
+    let home = TempHome::new("umu-title-override");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // The Spellcraft incident: a shared helper exe resolved the wrong title
+    // at high confidence, and a second entry whose resolver only managed a
+    // low-confidence stem. Both carry the user's correction — the export
+    // must use it, and the correction alone must pass the confidence gate.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"gog:1660194629":{"title":"Spellcraft","store":"gog","codename":"1660194629",
+            "umu_id":"umu-0","title_source":"detectable","confidence":"high",
+            "executable":"UnityCrashHandler64.exe",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "title_override":"Project Hospital"},
+        "egs:Stemmed":{"title":"stemmed","store":"egs","codename":"Stemmed",
+            "umu_id":"umu-0","title_source":"stem","confidence":"low",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "title_override":"The Real Title"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Project Hospital,gog,1660194629,umu-FIXME,,,"),
+        "overridden title missing from the row:\n{text}"
+    );
+    assert!(
+        text.contains("The Real Title,egs,Stemmed,umu-FIXME,,,"),
+        "a title override did not pass the confidence gate:\n{text}"
+    );
+    assert!(
+        !text.contains("Spellcraft") && !text.contains("stemmed,"),
+        "a resolver title leaked past its override:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(!err.contains("held back"), "{err}");
+
+    // The merge-request evidence says who set the title — honestly.
+    let md = run(&home, &["umu-misses", "--export-md"]);
+    assert!(md.status.success());
+    let text = stdout(&md);
+    assert!(
+        text.contains("title set by you (resolver said 'Spellcraft')"),
+        "evidence hides the override:\n{text}"
+    );
+    assert!(
+        !text.contains("title from detectable"),
+        "evidence claims resolver provenance over an override:\n{text}"
     );
 }
 
@@ -395,7 +553,7 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
     assert!(export.status.success());
     let text = stdout(&export);
     assert!(
-        text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-FIXME"#),
+        text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-FIXME,,,Game.exe"#),
         "codename not escaped — columns shifted:\n{text}"
     );
     assert!(

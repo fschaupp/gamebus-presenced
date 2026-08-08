@@ -29,3 +29,29 @@ repository = "https://github.com/Open-Wine-Components/umu-database"
 # Open merge requests of that repository (unauthenticated GitHub API), for
 # the opt-in --check-prs duplicate scan.
 open_prs = "https://api.github.com/repos/Open-Wine-Components/umu-database/pulls?state=open"
+
+[gog]
+# GOG's public catalog search — the misses pane's one-shot online lookup
+# (`o`) for gog entries. Queried as ?limit=10&query=like:<title>&…; the
+# numeric product id in the results IS the codename the database wants.
+catalog = "https://catalog.gog.com/v1/catalog"
+
+# GOG's products API — the reverse lookup, one record per numeric product
+# id: <product>/<id> answers with the store's own title. The misses pane's
+# `o` uses it when the codename already is that id, instead of a fuzzy
+# catalog search by a possibly mis-resolved title.
+product = "https://api.gog.com/products"
+
+# gogdb.org product pages, the database's GOG codename authority — linked in
+# the exported merge-request evidence, one page per product id.
+gogdb_product = "https://www.gogdb.org/product"
+
+[egs]
+# egdata.app's offer search — the misses pane's `o` lookup for egs entries.
+# Queried as ?query=<title>&limit=10.
+search = "https://api.egdata.app/multisearch/offers"
+
+# egdata.app's per-namespace build lists: <sandboxes>/<namespace>/builds.
+# The Builds App Name in there is the codename the database wants — the
+# namespace itself never is.
+sandboxes = "https://api.egdata.app/sandboxes"

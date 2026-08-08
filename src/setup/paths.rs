@@ -131,6 +131,13 @@ impl Layout {
     pub fn endpoints_file(&self) -> PathBuf {
         self.data_dir.join(crate::endpoints::ENDPOINTS_NAME)
     }
+
+    /// The installed reference copy of the shared-helper list. User additions
+    /// belong in the config dir, not here — the lists union, so this copy can
+    /// only add entries; install rewrites it with the bundled content.
+    pub fn shared_helpers_file(&self) -> PathBuf {
+        self.data_dir.join(crate::naming::SHARED_HELPERS_NAME)
+    }
     /// The three binaries, in install order.
     pub fn binaries(&self) -> [(&'static str, PathBuf); 3] {
         [

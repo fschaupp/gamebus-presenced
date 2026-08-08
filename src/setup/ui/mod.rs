@@ -8,15 +8,23 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, ListState, Paragraph};
 use ratatui::Frame;
 
 use super::actions::{Action, Plan};
 use super::paths::Target;
-use super::status::{self, Health, Row, Status};
-use super::umu_misses::{basis_label, confidence_label};
+use super::status::{Health, Row, Status};
+use super::umu_misses::PickCandidate;
 use crate::client::ActivityView;
-use crate::umu_report::{Miss, VerificationState};
+use crate::umu_report::Miss;
+
+mod misses;
+mod monitor;
+mod status;
+
+use self::misses::render_misses;
+use self::monitor::render_monitor;
+use self::status::render_status;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -25,8 +33,11 @@ pub enum View {
     /// The umu-database miss stash (S9b): what the daemon collected, what
     /// verification made of it. The pane drives the flows on explicit
     /// keypresses — `v` fetches+verifies (network, and the footer says so),
-    /// `a` assigns an id (collision-checked before it saves), `s` corrects
-    /// the store guess, `d` dismisses/restores an entry.
+    /// `o` looks the title up at its store (network, labelled likewise),
+    /// `a` assigns an id (collision-checked before it saves), `p` picks the
+    /// matching entry from the local database or the Heroic libraries,
+    /// `s` corrects the store guess, `t` corrects the title,
+    /// `d` dismisses/restores an entry.
     Misses,
 }
 
@@ -67,6 +78,22 @@ pub struct Confirm {
     pub details: bool,
 }
 
+/// The misses pane's pick mode: candidates for one miss, waiting for the
+/// user to choose (or Esc out). The candidates are kind-tagged — database
+/// rows, Heroic library identities, online hits — and Enter dispatches per
+/// kind; the list renders them in labelled sections.
+pub struct Pick {
+    /// The stash key the candidates were fetched for — the pick lands on
+    /// this entry, never on whatever the selection moved to since.
+    pub key: String,
+    /// Never empty: the binary logs "no matches" instead of opening the mode.
+    pub candidates: Vec<PickCandidate>,
+    pub selected: usize,
+    /// A warning when the candidates came from an aging fetch cache — the
+    /// footer then advertises `v` as the way out.
+    pub stale: Option<String>,
+}
+
 pub struct App {
     pub view: View,
     pub focus: Focus,
@@ -90,6 +117,15 @@ pub struct App {
     /// land here instead of the keymap. Committed with Enter (which checks
     /// the id before anything is saved), cancelled with Esc.
     pub id_input: Option<String>,
+    /// While `Some`, the misses pane is in title-entry mode (`t`) — same
+    /// keyboard ownership as `id_input`. Starts empty; the input line shows
+    /// the current effective title beside it.
+    pub title_input: Option<String>,
+    /// While `Some`, the misses pane is in pick mode and the candidate list
+    /// owns the keyboard: ↑↓/j/k choose, Enter records the pick, Esc
+    /// cancels. Remembers the stash key it was opened for; a refresh that
+    /// drops that miss cancels the mode (see [`App::set_misses`]).
+    pub pick: Option<Pick>,
     pub output: Vec<Line<'static>>,
     pub confirm: Option<Confirm>,
     /// Set while a mutating action is running. Also the mutual-exclusion gate
@@ -121,6 +157,8 @@ impl Default for App {
             misses: Vec::new(),
             miss_list: ListState::default(),
             id_input: None,
+            title_input: None,
+            pick: None,
             output: Vec::new(),
             confirm: None,
             busy: None,
@@ -133,7 +171,7 @@ impl Default for App {
 
 impl App {
     pub fn set_status(&mut self, status: Status) {
-        self.rows = status::rows(&status);
+        self.rows = super::status::rows(&status);
         if !self.target_pinned {
             self.target = status.primary().target;
         }
@@ -200,6 +238,22 @@ impl App {
             .map(|(k, _)| k.clone())
     }
 
+    /// Move the selection off the current entry onto its list neighbor —
+    /// the one below, or the one above when the cursor sits on the last
+    /// row. Used before an action that resorts the current entry away
+    /// (dismiss), so the key-stable refresh follows the neighbor instead
+    /// of trailing the acted-on entry to its new position.
+    fn select_neighbor_miss(&mut self) {
+        let Some(idx) = self.miss_list.selected() else {
+            return;
+        };
+        if idx + 1 < self.misses.len() {
+            self.miss_list.select(Some(idx + 1));
+        } else if idx > 0 {
+            self.miss_list.select(Some(idx - 1));
+        }
+    }
+
     /// Replace the miss list, keeping the selection on the same entry (by
     /// stash key): the once-a-second refresh may reorder rows — a bump of
     /// `last_seen`, a new miss on top — and a bare index would silently
@@ -214,6 +268,13 @@ impl App {
         if let Some(key) = selected_key {
             if let Some(idx) = self.misses.iter().position(|(k, _)| k == &key) {
                 self.miss_list.select(Some(idx));
+            }
+        }
+        // Pick mode is bound to one stash entry; if a refresh dropped it,
+        // there is nothing left to pick for.
+        if let Some(pick) = &self.pick {
+            if !self.misses.iter().any(|(k, _)| k == &pick.key) {
+                self.pick = None;
             }
         }
     }
@@ -254,9 +315,53 @@ pub enum Intent {
         key: String,
         id: String,
     },
+    /// Misses pane `p`: search the local database and the Heroic libraries
+    /// for candidates matching the selected entry's title. Local files
+    /// only — never the network.
+    UmuPick {
+        key: String,
+    },
+    /// Misses pane `o`: one online lookup at the entry's effective store.
+    /// Network — the footer labels the key as such.
+    UmuOnline {
+        key: String,
+    },
+    /// Misses pane, Enter on a database candidate: record "this game IS
+    /// that database entry" on the miss.
+    UmuPickEntry {
+        key: String,
+        store: String,
+        codename: String,
+        umu_id: String,
+    },
+    /// Misses pane, Enter on a library or online candidate: write the store
+    /// identity (codename override, plus the store when the pick names one)
+    /// onto the annotation half. An identity, never a verdict.
+    UmuSetIdentity {
+        key: String,
+        store: Option<String>,
+        codename: String,
+        /// Where the identity came from, for the outcome line.
+        source: String,
+    },
+    /// Misses pane, Enter on an egs offer with no Windows build in it: the
+    /// second request, this namespace's builds. Network, like `o` itself.
+    UmuEgsBuilds {
+        key: String,
+        namespace: String,
+    },
     /// Misses pane `s`: cycle the selected entry's store correction.
     UmuStore {
         key: String,
+    },
+    /// Misses pane, Enter in title-entry mode or on a GOG product record:
+    /// write the title override onto the annotation half. A title, never a
+    /// verdict.
+    UmuSetTitle {
+        key: String,
+        title: String,
+        /// Where the title came from, for the outcome line.
+        source: String,
     },
     /// Misses pane `d`: dismiss the selected entry (parked, out of the
     /// exports) or restore it — a toggle, not a deletion.
@@ -312,6 +417,121 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         };
     }
 
+    // Title-entry mode owns printable keys the same way.
+    if app.view == View::Misses && app.title_input.is_some() {
+        let buffer = app.title_input.as_mut().expect("checked");
+        return match key.code {
+            KeyCode::Esc => {
+                app.title_input = None;
+                Intent::None
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+                Intent::None
+            }
+            KeyCode::Enter => {
+                let title = app.title_input.take().expect("checked");
+                match app.selected_miss_key() {
+                    Some(key) if !title.trim().is_empty() => Intent::UmuSetTitle {
+                        key,
+                        title,
+                        source: "you".into(),
+                    },
+                    _ => Intent::None,
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                buffer.push(c);
+                Intent::None
+            }
+            KeyCode::Char('c') => Intent::Quit, // ctrl-c stays an exit
+            _ => Intent::None,
+        };
+    }
+
+    // Pick mode owns the keyboard likewise: the candidate list is a modal
+    // choice, so the selection keys move through candidates and no pane verb
+    // fires underneath it.
+    if app.view == View::Misses && app.pick.is_some() {
+        let pick = app.pick.as_mut().expect("checked");
+        return match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Intent::Quit,
+            KeyCode::Esc => {
+                app.pick = None;
+                Intent::None
+            }
+            // The candidates may have come from a stale cache; v abandons
+            // the pick and runs the pane's one network action, the same
+            // fetch+verify it means everywhere else.
+            KeyCode::Char('v') => {
+                app.pick = None;
+                Intent::UmuVerify
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                pick.selected = (pick.selected + 1) % pick.candidates.len();
+                Intent::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                pick.selected = (pick.selected + pick.candidates.len() - 1) % pick.candidates.len();
+                Intent::None
+            }
+            // Enter dispatches on the candidate's kind: a database row is a
+            // verdict, a library or online hit is an identity, and an egs
+            // offer without a Windows build fires the builds request. The
+            // offer's namespace is never committed as a codename.
+            KeyCode::Enter => {
+                let pick = app.pick.take().expect("checked");
+                match pick.candidates.get(pick.selected) {
+                    Some(PickCandidate::Db(c)) => Intent::UmuPickEntry {
+                        key: pick.key,
+                        store: c.store.clone(),
+                        codename: c.codename.clone(),
+                        umu_id: c.umu_id.clone(),
+                    },
+                    Some(PickCandidate::Library(g)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: Some(g.store.clone()),
+                        codename: g.codename.clone(),
+                        source: "your Heroic library".into(),
+                    },
+                    Some(PickCandidate::GogProduct(p)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: None,
+                        codename: p.id.clone(),
+                        source: "the GOG catalog".into(),
+                    },
+                    // The by-id record answers the opposite question: the
+                    // codename was already right, the title was not.
+                    Some(PickCandidate::GogById { id, title, .. }) => Intent::UmuSetTitle {
+                        key: pick.key,
+                        title: title.clone(),
+                        source: format!("GOG product {id}"),
+                    },
+                    Some(PickCandidate::EgsOffer(o)) => match &o.windows_app_name {
+                        Some(app_name) => Intent::UmuSetIdentity {
+                            key: pick.key,
+                            store: None,
+                            codename: app_name.clone(),
+                            source: "the egdata offer's Windows build".into(),
+                        },
+                        None => Intent::UmuEgsBuilds {
+                            key: pick.key,
+                            namespace: o.namespace.clone(),
+                        },
+                    },
+                    Some(PickCandidate::EgsBuild(b)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: None,
+                        codename: b.app_name.clone(),
+                        source: "the egdata builds list".into(),
+                    },
+                    None => Intent::None,
+                }
+            }
+            _ => Intent::None,
+        };
+    }
+
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Intent::Quit,
         KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
@@ -338,12 +558,37 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             }
             Intent::None
         }
+        KeyCode::Char('t') if app.view == View::Misses => {
+            // Empty on purpose, not prefilled with the resolver's title: the
+            // point of the verb is that the resolver got it wrong. The input
+            // line shows the current effective title beside the buffer.
+            if app.selected_miss_key().is_some() {
+                app.title_input = Some(String::new());
+            }
+            Intent::None
+        }
+        KeyCode::Char('p') if app.view == View::Misses => match app.selected_miss_key() {
+            Some(key) => Intent::UmuPick { key },
+            None => Intent::None,
+        },
+        KeyCode::Char('o') if app.view == View::Misses => match app.selected_miss_key() {
+            Some(key) => Intent::UmuOnline { key },
+            None => Intent::None,
+        },
         KeyCode::Char('s') if app.view == View::Misses => match app.selected_miss_key() {
             Some(key) => Intent::UmuStore { key },
             None => Intent::None,
         },
         KeyCode::Char('d') if app.view == View::Misses => match app.selected_miss_key() {
-            Some(key) => Intent::UmuDismiss { key },
+            Some(key) => {
+                // Dismissing resorts the entry to the bottom of the list; the
+                // key-stable selection would follow it there, stranding a
+                // triage run (d, navigate all the way back, d, …). Hop to the
+                // neighbor first — the refresh then keeps THAT entry selected
+                // wherever the resort puts everything.
+                app.select_neighbor_miss();
+                Intent::UmuDismiss { key }
+            }
             None => Intent::None,
         },
         // Pane focus, install target, and Enter act on the Status pane's
@@ -453,7 +698,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let (health, summary) = match &app.status {
-        Some(s) => status::overall(s),
+        Some(s) => super::status::overall(s),
         None => (Health::Unknown, "probing…".to_string()),
     };
     let mut spans = vec![
@@ -480,68 +725,6 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_status(f: &mut Frame, area: Rect, app: &mut App) {
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(area);
-
-    // Hints carry the actionable half of a check, so they wrap rather than
-    // being truncated at the pane edge like a List would do by default.
-    const INDENT: usize = 14;
-    let hint_width = (panes[0].width as usize).saturating_sub(INDENT + 3);
-
-    let items: Vec<ListItem> = app
-        .rows
-        .iter()
-        .map(|row| {
-            let mut lines = vec![Line::from(vec![
-                Span::styled(
-                    format!("{} ", row.health.marker()),
-                    health_style(row.health),
-                ),
-                Span::styled(
-                    format!("{:<11} ", row.label),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(row.value.clone()),
-            ])];
-            if let Some(hint) = &row.hint {
-                for line in wrap(hint, hint_width) {
-                    lines.push(Line::from(Span::styled(
-                        format!("{:INDENT$}{line}", ""),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-            }
-            ListItem::new(lines)
-        })
-        .collect();
-
-    let checks = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(focus_title(" Checks ", app.focus == Focus::Checks)),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    f.render_stateful_widget(checks, panes[0], &mut app.checks);
-
-    let action_items: Vec<ListItem> = app
-        .action_list()
-        .into_iter()
-        .map(|a| ListItem::new(Line::from(a.label())))
-        .collect();
-    let actions = List::new(action_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(focus_title(" Actions ", app.focus == Focus::Actions)),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    f.render_stateful_widget(actions, panes[1], &mut app.actions);
-}
-
 /// Greedy word wrap. Words longer than the width are left alone rather than
 /// broken — they are paths, and a broken path is worse than a long line.
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -565,296 +748,6 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         lines.push(current);
     }
     lines
-}
-
-fn focus_title(text: &str, focused: bool) -> Span<'_> {
-    if focused {
-        Span::styled(
-            text.to_string(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::raw(text.to_string())
-    }
-}
-
-fn render_monitor(f: &mut Frame, area: Rect, app: &mut App) {
-    if app.activities.is_empty() {
-        let text = match &app.status {
-            Some(s) if s.bus.owned => "Nothing is playing.",
-            Some(_) => "The daemon is not running.",
-            None => "…",
-        };
-        f.render_widget(
-            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Monitor ")),
-            area,
-        );
-        return;
-    }
-
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-
-    let items: Vec<ListItem> = app
-        .activities
-        .iter()
-        .map(|a| {
-            ListItem::new(vec![
-                Line::from(Span::styled(
-                    a.display_name().to_string(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!("  {} · pid {}", a.sources.join("+"), a.pid),
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ])
-        })
-        .collect();
-    if app.monitor.selected().is_none() {
-        app.monitor.select(Some(0));
-    }
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Activities "))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    f.render_stateful_widget(list, panes[0], &mut app.monitor);
-
-    let selected = app
-        .monitor
-        .selected()
-        .and_then(|i| app.activities.get(i))
-        .cloned()
-        .unwrap_or_default();
-
-    let mut detail = vec![
-        field("Name", selected.display_name()),
-        field("Kind", &selected.kind),
-        field("Sources", &selected.sources.join(", ")),
-        field("PID", &selected.pid.to_string()),
-    ];
-    for (label, value) in [
-        ("Executable", &selected.executable),
-        ("Details", &selected.details),
-        ("State", &selected.state),
-    ] {
-        if !value.is_empty() {
-            detail.push(field(label, value));
-        }
-    }
-    if let Some(elapsed) = selected.elapsed() {
-        detail.push(field("Playing", &elapsed));
-    }
-    if !selected.app_ids.is_empty() {
-        let ids: Vec<String> = selected
-            .app_ids
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect();
-        detail.push(field("AppIds", &ids.join(", ")));
-    }
-    detail.push(field("Object", &selected.path));
-
-    f.render_widget(
-        Paragraph::new(detail)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title(" Detail ")),
-        panes[1],
-    );
-}
-
-/// The umu-miss review pane: what the daemon collected, one entry per game,
-/// with the verification verdict and drafted id once verification ran.
-/// Its verbs act only on explicit keypresses the footer labels — `v` is the
-/// one that reaches the network, and says so. Exporting stays a CLI
-/// invocation: a submission wants a shell, not a raw-mode terminal.
-fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
-    if app.misses.is_empty() {
-        let text = "No umu-database misses recorded.\n\n\
-            The daemon writes one entry per game that umu launched without a\n\
-            database entry (GAMEID=umu-0), together with the title it resolved.\n\
-            Review them here — v fetches the database and verifies, s corrects\n\
-            a store guess, a assigns an id by hand (collision-checked).\n\
-            Export a submission from the shell (to stdout, or to a file if\n\
-            you name one):\n\n\
-            \u{20}   gamebus-setup umu-misses --export-md [file]";
-        f.render_widget(
-            Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL).title(" umu misses ")),
-            area,
-        );
-        return;
-    }
-
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-
-    let items: Vec<ListItem> = app
-        .misses
-        .iter()
-        .map(|(_, m)| {
-            let (glyph, style) = miss_state(m);
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(format!("{glyph} "), style),
-                    Span::styled(
-                        m.title.clone().unwrap_or_else(|| "(unresolved)".into()),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    format!(
-                        "  {} · {} · seen {}",
-                        m.effective_store(),
-                        confidence_label(m.confidence),
-                        m.last_seen
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ])
-        })
-        .collect();
-    if app.miss_list.selected().is_none() {
-        app.miss_list.select(Some(0));
-    }
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" umu misses "))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    f.render_stateful_widget(list, panes[0], &mut app.miss_list);
-
-    let Some((_, m)) = app.miss_list.selected().and_then(|i| app.misses.get(i)) else {
-        return;
-    };
-    let mut detail = vec![field("Title", m.title.as_deref().unwrap_or("(unresolved)"))];
-    // The lines that change what a submission means go FIRST: at small
-    // terminal sizes the pane clips from the bottom, and a clipped warning
-    // is a warning that never happened.
-    if let Some(when) = &m.dismissed {
-        detail.push(Line::from(Span::styled(
-            format!(
-                "{:<11} {when} — out of the exports (d restores)",
-                "Dismissed"
-            ),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    if let Some(pr) = &m.possible_pr {
-        detail.push(Line::from(vec![
-            Span::styled(
-                format!("{:<11} ", "Submitted?"),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled(pr.clone(), Style::default().fg(Color::Magenta)),
-        ]));
-    }
-    let store_line = match &m.store_override {
-        Some(over) => format!("{over} (corrected by you; daemon guessed {})", m.store),
-        None => format!("{} (guessed — s cycles)", m.store),
-    };
-    detail.extend([
-        field("Store", &store_line),
-        field("Codename", m.codename.as_deref().unwrap_or("-")),
-        field("Reported", &m.umu_id),
-    ]);
-    if let Some(source) = &m.title_source {
-        detail.push(field(
-            "Resolved by",
-            &format!("{source} ({} confidence)", confidence_label(m.confidence)),
-        ));
-    }
-    if let Some(exe) = &m.executable {
-        detail.push(field("Executable", exe));
-    }
-    detail.push(field(
-        "Seen",
-        &format!("{} – {}", m.first_seen, m.last_seen),
-    ));
-    match &m.verification {
-        Some(v) => {
-            let verdict = match v.state {
-                VerificationState::AlreadyInDatabase => format!(
-                    "already in the database as {} — the launcher missed, not the database",
-                    v.umu_id.as_deref().unwrap_or("?")
-                ),
-                VerificationState::CrossStoreId => format!(
-                    "known under another store as {}",
-                    v.umu_id.as_deref().unwrap_or("?")
-                ),
-                VerificationState::ConfirmedMissing => "missing from the database".into(),
-            };
-            detail.push(field(
-                "Verified",
-                &format!("{verdict} (checked {})", v.checked),
-            ));
-            if let Some(note) = &v.note {
-                detail.push(field("Note", note));
-            }
-        }
-        None => detail.push(field("Verified", "not yet — press v to fetch + verify")),
-    }
-    if let Some(d) = &m.drafted_id {
-        detail.push(field(
-            "Drafted id",
-            &format!(
-                "{} — from {}, collision-checked {}",
-                d.id,
-                basis_label(d.basis),
-                d.collision_checked
-            ),
-        ));
-    }
-    if let Some(buffer) = &app.id_input {
-        detail.push(Line::from(vec![
-            Span::styled(
-                format!("{:<11} ", "Assign id"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{buffer}▏"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "  ⏎ check+save · esc cancel",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-    f.render_widget(
-        Paragraph::new(detail)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title(" Detail ")),
-        panes[1],
-    );
-}
-
-/// One glyph summarizing where an entry stands, for the list column.
-fn miss_state(m: &Miss) -> (&'static str, Style) {
-    if m.dismissed.is_some() {
-        return ("✗", Style::default().fg(Color::DarkGray));
-    }
-    if m.possible_pr.is_some() {
-        return ("↷", Style::default().fg(Color::Magenta));
-    }
-    match &m.verification {
-        Some(v) => match v.state {
-            VerificationState::AlreadyInDatabase => ("✓", Style::default().fg(Color::Green)),
-            VerificationState::CrossStoreId => ("≈", Style::default().fg(Color::Cyan)),
-            VerificationState::ConfirmedMissing if m.drafted_id.is_some() => {
-                ("+", Style::default().fg(Color::Yellow))
-            }
-            VerificationState::ConfirmedMissing => ("∅", Style::default().fg(Color::Yellow)),
-        },
-        None => ("·", Style::default().fg(Color::DarkGray)),
-    }
 }
 
 fn field(label: &str, value: &str) -> Line<'static> {
@@ -885,8 +778,15 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
         // The export hint lives in the verify output and the empty state —
         // this line carries the pane's own verbs.
+        View::Misses if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
+            "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
+        }
+        View::Misses if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
         View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
-        View::Misses => "↑↓ · tab view · v verify (net) · a assign · s store · d dismiss · q quit",
+        View::Misses if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
+        View::Misses => {
+            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · d dismiss · q quit"
+        }
     };
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
@@ -1190,6 +1090,44 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_hops_the_selection_to_the_neighbor_not_the_sunk_entry() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![
+            sample_miss("Control"),
+            sample_miss("Brotato"),
+            sample_miss("Hades II"),
+        ]);
+        handle_key(&mut app, key(KeyCode::Down)); // first ↓ lands on index 1
+        handle_key(&mut app, key(KeyCode::Up)); // index 0: Control
+
+        // d dismisses Control, but the cursor must hop to Brotato — a triage
+        // run (d, d, d) works top-down without re-navigating.
+        let intent = handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(
+            intent,
+            Intent::UmuDismiss {
+                key: "egs:Control".into()
+            }
+        );
+        assert_eq!(app.selected_miss_key().as_deref(), Some("egs:Brotato"));
+
+        // The refresh resorts the dismissed entry to the bottom; the
+        // selection stays with Brotato at its new position.
+        app.set_misses(vec![
+            sample_miss("Brotato"),
+            sample_miss("Hades II"),
+            sample_miss("Control"),
+        ]);
+        assert_eq!(app.selected_miss_key().as_deref(), Some("egs:Brotato"));
+
+        // On the last row there is no entry below: hop upward instead.
+        app.miss_list.select(Some(2));
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.selected_miss_key().as_deref(), Some("egs:Hades II"));
+    }
+
+    #[test]
     fn status_pane_keys_are_inert_outside_the_status_view() {
         let mut app = app_with_rows();
         app.focus = Focus::Actions; // an Install row is highlighted underneath
@@ -1279,6 +1217,294 @@ mod tests {
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
     }
 
+    /// Follows the a-verb precedent exactly: the mode owns the keyboard,
+    /// Enter commits, Esc cancels — but the buffer starts EMPTY (the point
+    /// of the verb is that the resolver's title is wrong).
+    #[test]
+    fn title_entry_mode_owns_the_keyboard_and_commits_on_enter() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        assert_eq!(app.title_input.as_deref(), Some(""));
+        // Printable keys type — including q, v and t itself.
+        for c in ['P', 'q', 'v', 't'] {
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
+        }
+        for _ in 0..3 {
+            assert_eq!(handle_key(&mut app, key(KeyCode::Backspace)), Intent::None);
+        }
+        assert_eq!(app.title_input.as_deref(), Some("P"));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuSetTitle {
+                key: "egs:Control".into(),
+                title: "P".into(),
+                source: "you".into(),
+            }
+        );
+        assert!(app.title_input.is_none(), "input stayed open after commit");
+
+        // An empty buffer commits nothing; Esc cancels without an intent.
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
+        assert!(app.title_input.is_none());
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Intent::None);
+        assert!(app.title_input.is_none());
+        // And the pane is back to normal keys.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
+    fn sample_candidate(store: &str, codename: &str, umu_id: &str) -> PickCandidate {
+        PickCandidate::Db(crate::umu_report::UmuEntry {
+            title: "Control".into(),
+            store: store.into(),
+            codename: codename.into(),
+            umu_id: umu_id.into(),
+        })
+    }
+
+    #[test]
+    fn v_inside_pick_mode_abandons_the_pick_and_fetches() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
+            selected: 0,
+            stale: Some("Database cache is 9 days old — v refreshes it (net).".into()),
+        });
+        // The one network key means the same thing inside the mode: leave
+        // the stale candidate list and fetch fresh.
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('v'))),
+            Intent::UmuVerify
+        );
+        assert!(app.pick.is_none(), "pick mode survived the refresh");
+    }
+
+    #[test]
+    fn p_asks_for_candidates_for_the_selected_miss() {
+        let mut app = app_with_rows();
+        // Inert outside the misses view.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('p'))), Intent::None);
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('p'))),
+            Intent::UmuPick {
+                key: "egs:Control".into()
+            }
+        );
+    }
+
+    #[test]
+    fn o_asks_for_an_online_lookup_only_in_the_misses_view() {
+        let mut app = app_with_rows();
+        // Inert outside the misses view.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('o'))), Intent::None);
+        app.view = View::Misses;
+        // And inert without a selected entry.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('o'))), Intent::None);
+        app.set_misses(vec![sample_miss("Control")]);
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('o'))),
+            Intent::UmuOnline {
+                key: "egs:Control".into()
+            }
+        );
+    }
+
+    /// Enter must dispatch on the candidate's kind — a database row records
+    /// a verdict, everything else an identity, and an egs offer without a
+    /// Windows build fires the builds request instead of committing its
+    /// (lowercase, wrong) namespace.
+    #[test]
+    fn enter_in_pick_mode_dispatches_per_candidate_kind() {
+        use super::super::heroic_library::LibraryGame;
+        use super::super::umu_misses::{EgsBuild, EgsOffer, GogProduct};
+
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+
+        let cases: Vec<(PickCandidate, Intent)> = vec![
+            (
+                sample_candidate("egs", "Calluna", "umu-870780"),
+                Intent::UmuPickEntry {
+                    key: "egs:Control".into(),
+                    store: "egs".into(),
+                    codename: "Calluna".into(),
+                    umu_id: "umu-870780".into(),
+                },
+            ),
+            (
+                PickCandidate::Library(LibraryGame {
+                    title: "Control".into(),
+                    store: "egs".into(),
+                    codename: "Calluna".into(),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: Some("egs".into()),
+                    codename: "Calluna".into(),
+                    source: "your Heroic library".into(),
+                },
+            ),
+            (
+                PickCandidate::GogProduct(GogProduct {
+                    id: "2049187585".into(),
+                    title: "Control Ultimate Edition".into(),
+                    product_type: "game".into(),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: None,
+                    codename: "2049187585".into(),
+                    source: "the GOG catalog".into(),
+                },
+            ),
+            (
+                // The by-id record corrects the TITLE — the codename it was
+                // fetched by was already right.
+                PickCandidate::GogById {
+                    id: "1660194629".into(),
+                    title: "Project Hospital".into(),
+                    game_type: "game".into(),
+                },
+                Intent::UmuSetTitle {
+                    key: "egs:Control".into(),
+                    title: "Project Hospital".into(),
+                    source: "GOG product 1660194629".into(),
+                },
+            ),
+            (
+                // The search hit already knew the Windows build.
+                PickCandidate::EgsOffer(EgsOffer {
+                    title: "Control".into(),
+                    namespace: "calluna".into(),
+                    offer_type: "BASE_GAME".into(),
+                    windows_app_name: Some("Calluna".into()),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: None,
+                    codename: "Calluna".into(),
+                    source: "the egdata offer's Windows build".into(),
+                },
+            ),
+            (
+                // No Windows build: the builds request, NEVER the namespace.
+                PickCandidate::EgsOffer(EgsOffer {
+                    title: "Control".into(),
+                    namespace: "calluna".into(),
+                    offer_type: "BASE_GAME".into(),
+                    windows_app_name: None,
+                }),
+                Intent::UmuEgsBuilds {
+                    key: "egs:Control".into(),
+                    namespace: "calluna".into(),
+                },
+            ),
+            (
+                PickCandidate::EgsBuild(EgsBuild {
+                    app_name: "Calluna".into(),
+                    label_name: "Live".into(),
+                    platform: "Windows".into(),
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: None,
+                    codename: "Calluna".into(),
+                    source: "the egdata builds list".into(),
+                },
+            ),
+        ];
+        for (candidate, expected) in cases {
+            app.pick = Some(Pick {
+                key: "egs:Control".into(),
+                candidates: vec![candidate],
+                selected: 0,
+                stale: None,
+            });
+            assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), expected);
+            assert!(app.pick.is_none(), "pick mode stayed open after commit");
+        }
+    }
+
+    #[test]
+    fn pick_mode_owns_the_keyboard_and_commits_the_chosen_candidate() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control")]);
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![
+                sample_candidate("egs", "Calluna", "umu-870780"),
+                sample_candidate("gog", "2049187585", "umu-870780"),
+            ],
+            selected: 0,
+            stale: None,
+        });
+        // q must NOT quit while the list is up (v is the deliberate
+        // exception — it abandons the pick to refresh, tested separately).
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::None);
+        // ↓/j and ↑/k move, wrapping at both ends.
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.pick.as_ref().unwrap().selected, 1);
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.pick.as_ref().unwrap().selected, 0, "wrap-around broke");
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.pick.as_ref().unwrap().selected, 1, "wrap-around broke");
+        // Enter commits the highlighted candidate for the remembered key.
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuPickEntry {
+                key: "egs:Control".into(),
+                store: "gog".into(),
+                codename: "2049187585".into(),
+                umu_id: "umu-870780".into(),
+            }
+        );
+        assert!(app.pick.is_none(), "pick mode stayed open after commit");
+
+        // Esc cancels without an intent, and the pane keys are back.
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
+            selected: 0,
+            stale: None,
+        });
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Intent::None);
+        assert!(app.pick.is_none());
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
+    #[test]
+    fn a_refresh_that_drops_the_picked_miss_cancels_pick_mode() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        app.set_misses(vec![sample_miss("Control"), sample_miss("Brotato")]);
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
+            selected: 0,
+            stale: None,
+        });
+        // A refresh that keeps the miss keeps the mode.
+        app.set_misses(vec![sample_miss("Brotato"), sample_miss("Control")]);
+        assert!(app.pick.is_some());
+        // One that drops it cancels — the pick has nothing to land on.
+        app.set_misses(vec![sample_miss("Brotato")]);
+        assert!(app.pick.is_none(), "pick mode outlived its miss");
+    }
+
     fn sample_miss(title: &str) -> (String, Miss) {
         (
             format!("egs:{title}"),
@@ -1296,6 +1522,8 @@ mod tests {
                 drafted_id: None,
                 possible_pr: None,
                 store_override: None,
+                codename_override: None,
+                title_override: None,
                 dismissed: None,
             },
         )

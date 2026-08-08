@@ -6,7 +6,8 @@
 //!
 //! The parser handles exactly the subset the shipped file uses — `[section]`
 //! headers, `key = "value"` lines, `#` comments — by hand, like the CSV and
-//! date code elsewhere: a TOML crate would be a dependency for four keys.
+//! date code elsewhere: a TOML crate would be a dependency for a handful of
+//! keys.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +28,18 @@ pub struct Endpoints {
     pub umu_repository: String,
     /// Its open merge requests (GitHub API), for `--check-prs`.
     pub umu_open_prs: String,
+    /// GOG's public catalog search (the misses pane's `o` lookup).
+    pub gog_catalog: String,
+    /// GOG's products API root: `<product>/<id>` answers with the store's
+    /// own title — the `o` reverse lookup for numeric gog codenames.
+    pub gog_product: String,
+    /// gogdb.org product pages — the GOG codename authority, linked per
+    /// product id in the exported evidence.
+    pub gog_gogdb_product: String,
+    /// egdata.app's offer search (the `o` lookup for egs entries).
+    pub egs_search: String,
+    /// egdata.app's sandboxes root: `<sandboxes>/<namespace>/builds`.
+    pub egs_sandboxes: String,
 }
 
 impl Endpoints {
@@ -56,6 +69,11 @@ impl Endpoints {
             umu_api: get("umu.api"),
             umu_repository: get("umu.repository"),
             umu_open_prs: get("umu.open_prs"),
+            gog_catalog: get("gog.catalog"),
+            gog_product: get("gog.product"),
+            gog_gogdb_product: get("gog.gogdb_product"),
+            egs_search: get("egs.search"),
+            egs_sandboxes: get("egs.sandboxes"),
         }
     }
 }
@@ -130,6 +148,11 @@ mod tests {
             "umu.api",
             "umu.repository",
             "umu.open_prs",
+            "gog.catalog",
+            "gog.product",
+            "gog.gogdb_product",
+            "egs.search",
+            "egs.sandboxes",
         ] {
             assert!(
                 values.get(key).is_some_and(|v| v.starts_with("https://")),
@@ -146,6 +169,9 @@ mod tests {
         }
         assert_eq!(values["umu.api"], "http://localhost:9");
         assert!(values["discord.detectable"].contains("discord.com"));
+        assert!(values["gog.catalog"].contains("catalog.gog.com"));
+        assert!(values["gog.product"].contains("api.gog.com"));
+        assert!(values["egs.sandboxes"].contains("egdata.app"));
     }
 
     #[test]
