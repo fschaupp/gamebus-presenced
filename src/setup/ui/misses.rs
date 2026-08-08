@@ -187,7 +187,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     }
     detail.push(field(
         "Seen",
-        &format!("{} – {}", m.first_seen, m.last_seen),
+        &format!("{} - {}", m.first_seen, m.last_seen),
     ));
     match &m.verification {
         Some(v) => {
