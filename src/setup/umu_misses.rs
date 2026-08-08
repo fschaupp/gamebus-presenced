@@ -873,6 +873,21 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
         } else {
             m.codename.clone().unwrap_or_else(|| "none".into())
         };
+        // The database's GOG rule: the codename is the numeric gogdb.org
+        // product id. Heroic launches satisfy it by construction (Heroic's
+        // GOG app name IS that id); anything else needs a human lookup and
+        // is held out of the submission until it gets one.
+        let is_gogdb_id = !codename.is_empty() && codename.bytes().all(|b| b.is_ascii_digit());
+        if m.effective_store() == "gog" && !is_gogdb_id {
+            held.push((
+                m,
+                format!(
+                    "gog codename must be the numeric gogdb.org product id \
+                     (launcher reported '{codename}')"
+                ),
+            ));
+            continue;
+        }
         rows.push(SubmissionRow {
             miss: m,
             title,
@@ -894,28 +909,13 @@ fn exe_basename(path: &str) -> &str {
 
 fn csv_line(row: &SubmissionRow<'_>) -> String {
     let m = row.miss;
-    let mut note = format!(
-        "resolved by gamebus-presenced ({}, {} confidence)",
-        m.title_source.as_deref().unwrap_or("unknown"),
-        confidence_label(m.confidence),
-    );
-    if let Some(p) = &row.id_provenance {
-        note.push_str("; ");
-        note.push_str(p);
-    }
-    if let Some(v) = &m.verification {
-        if let Some(vn) = &v.note {
-            note.push_str("; ");
-            note.push_str(vn);
-        }
-    }
-    if m.effective_store() == "none" {
-        if let Some(code) = m.codename.as_deref().filter(|c| !c.is_empty()) {
-            note.push_str(&format!("; launcher codename was '{code}' (store unknown)"));
-        }
-    }
+    // The NOTE column is the database's, not ours: it carries game-related
+    // remarks only (which of two standalone versions a row means, per the
+    // README's Genshin example). Provenance — who resolved the title, how
+    // the id was drafted — belongs in the merge request's evidence text,
+    // never in the submitted CSV. The column stays empty.
     format!(
-        "{},{},{},{},,{},{}",
+        "{},{},{},{},,,{}",
         csv_field(row.title),
         m.effective_store().to_lowercase(),
         // Codename comes verbatim from an untrusted process's environment
@@ -923,7 +923,6 @@ fn csv_line(row: &SubmissionRow<'_>) -> String {
         // comma in it would shift the columns and forge the UMU_ID cell.
         csv_field(&row.codename),
         row.umu_id,
-        csv_field(&note),
         m.executable
             .as_deref()
             .map(exe_basename)
@@ -988,10 +987,27 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
     md.push_str("```\n\n## Evidence\n\n");
     for row in &rows {
         let m = row.miss;
+        let store = m.effective_store().to_lowercase();
+        // The database's per-store codename authorities, linked so the
+        // reviewer can check without hunting: gogdb.org product page for
+        // GOG ids; egdata.app for the EGS Builds App Name.
+        let codename_ref = match store.as_str() {
+            "gog" => format!(
+                " ([gogdb.org product](https://www.gogdb.org/product/{}))",
+                urlencode(&row.codename)
+            ),
+            "egs" => " (egdata.app Builds App Name, via Heroic)".to_string(),
+            _ => String::new(),
+        };
+        let advisory = m
+            .verification
+            .as_ref()
+            .and_then(|v| v.note.as_deref())
+            .map(|n| format!("; {n}"))
+            .unwrap_or_default();
         md.push_str(&format!(
-            "- **{}** - store `{}`, codename `{}`{}; title from {} ({} confidence); {}.\n",
+            "- **{}** — store `{store}`, codename `{}`{codename_ref}{}; title from {} ({} confidence); {}{advisory}.\n",
             row.title,
-            m.effective_store().to_lowercase(),
             row.codename,
             m.executable
                 .as_deref()
@@ -1017,6 +1033,24 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
     ));
     md.push_str(
         "- [x] Non-Steam ids contain a letter (a numeric id would be parsed as a SteamAppId)\n",
+    );
+    md.push_str(
+        "- [x] GOG codenames are numeric gogdb.org product ids (non-conforming entries are held back)\n",
+    );
+    // Provable only when the daemon itself derived the store: an egs guess
+    // straight from HEROIC_APP_NAME IS the egdata Builds App Name. A store
+    // the user overrode to egs pairs that store with a codename of unknown
+    // origin — the box stays open for the human.
+    let egs_appname = rows
+        .iter()
+        .filter(|r| r.miss.effective_store() == "egs")
+        .all(|r| r.miss.store == "egs" && r.miss.store_override.is_none());
+    md.push_str(&format!(
+        "- [{}] EGS codenames are the egdata.app Builds \"App Name\" (Heroic reports it verbatim)\n",
+        if egs_appname { 'x' } else { ' ' }
+    ));
+    md.push_str(
+        "- [x] NOTE column carries game-related remarks only (provenance stays in this text)\n",
     );
     if !held.is_empty() {
         md.push_str("\n<!-- Held back, not part of this submission:\n");
