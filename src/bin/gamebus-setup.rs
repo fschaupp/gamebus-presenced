@@ -65,9 +65,11 @@ fn usage() {
     eprintln!("  --check-prs               Also scan open upstream merge requests for");
     eprintln!("                            already-submitted entries (best-effort)");
     eprintln!();
-    eprintln!("Every remote endpoint the tools talk to is configured in endpoints.toml");
-    eprintln!("(~/.config/gamebus-presenced/ overrides the installed copy in the data");
-    eprintln!("directory - see that file for the full order and the defaults).");
+    eprintln!("Every remote endpoint the tools talk to is configured in endpoints.toml,");
+    eprintln!("and shared-helpers.txt lists helper executables that never name a game");
+    eprintln!("(~/.config/gamebus-presenced/ overrides the installed copies in the data");
+    eprintln!("directory — endpoint keys replace, helper entries add on top; see each");
+    eprintln!("file for the full order and the defaults).");
 }
 
 #[tokio::main]

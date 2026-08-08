@@ -15,8 +15,9 @@
 //! works", design doc).
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// One entry in Discord's detectable database.
 #[derive(Debug, Deserialize)]
@@ -37,6 +38,69 @@ struct DetectableExecutable {
 struct DetectableSku {
     distributor: String,
     id: Option<String>,
+}
+
+/// The shipped shared-helper list (helper executables that can never name a
+/// game — see `shared-helpers.txt` at the repo root, incident history
+/// included), compiled in so the protections exist even with no file on disk.
+const BUNDLED_SHARED_HELPERS: &str = include_str!("../shared-helpers.txt");
+
+pub const SHARED_HELPERS_NAME: &str = "shared-helpers.txt";
+
+/// The effective shared-helper set: the bundled list unioned with every
+/// `shared-helpers.txt` found on disk. Union, not override — each file only
+/// adds entries, so a local file can extend the shipped protections but never
+/// remove them. Parsed once per process; the daemon is long-running and the
+/// files do not change under it.
+fn shared_helper_exes() -> &'static HashSet<String> {
+    static EXES: OnceLock<HashSet<String>> = OnceLock::new();
+    EXES.get_or_init(|| {
+        let mut exes = parse_shared_helpers(BUNDLED_SHARED_HELPERS);
+        for path in shared_helpers_candidates() {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                exes.extend(parse_shared_helpers(&raw));
+            }
+        }
+        exes
+    })
+}
+
+/// The on-disk copies to union in, in the order documented in the shipped
+/// file: user additions in the config dir, then the installed reference
+/// copies (user data dir, then each system data dir).
+fn shared_helpers_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(config) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    {
+        paths.push(config.join("gamebus-presenced").join(SHARED_HELPERS_NAME));
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    {
+        paths.push(data.join("gamebus-presenced").join(SHARED_HELPERS_NAME));
+    }
+    paths.extend(
+        xdg_data_dirs()
+            .into_iter()
+            .map(|d| d.join("gamebus-presenced").join(SHARED_HELPERS_NAME)),
+    );
+    paths
+}
+
+/// Lines → lowercase basenames. Blank lines and `#` comments are skipped; a
+/// junk line is an entry that matches nothing, not an error — a typo in a
+/// user file must not cost the shipped protections.
+fn parse_shared_helpers(raw: &str) -> HashSet<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_lowercase)
+        .collect()
 }
 
 /// Naming database with pre-built lookup indexes.
@@ -124,6 +188,10 @@ impl NamingDb {
         // `S:\Spiele\game\game.exe`, detectable.json uses `/`.
         let lower = executable.replace('\\', "/").to_lowercase();
         let basename = lower.rsplit_once('/').map(|(_, b)| b).unwrap_or(&lower);
+        // A shared helper exe names no game, whatever the bucket holds.
+        if shared_helper_exes().contains(basename) {
+            return None;
+        }
         let bucket = self.by_executable.get(basename)?;
 
         // 1. Path-suffix match (most specific).
@@ -338,6 +406,55 @@ mod tests {
             db.lookup_by_executable("amnesia.exe"),
             Some("Amnesia: Memories")
         );
+    }
+
+    #[test]
+    fn shared_helpers_parse_skips_comments_blanks_case_and_whitespace() {
+        let set = parse_shared_helpers(
+            "# a comment\n\n  UnityCrashHandler64.EXE  \nhelper.exe\n\t# indented comment\n",
+        );
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("unitycrashhandler64.exe"));
+        assert!(set.contains("helper.exe"));
+        assert!(parse_shared_helpers("").is_empty());
+        assert!(parse_shared_helpers("# only comments\n\n").is_empty());
+    }
+
+    #[test]
+    fn the_bundled_shared_helpers_carry_the_unity_crash_handlers() {
+        // The floor of the union: whatever local files add, these must parse
+        // out of the bundled file or the Spellcraft protection is gone.
+        let set = parse_shared_helpers(BUNDLED_SHARED_HELPERS);
+        for exe in [
+            "unitycrashhandler.exe",
+            "unitycrashhandler32.exe",
+            "unitycrashhandler64.exe",
+        ] {
+            assert!(set.contains(exe), "bundled shared-helpers.txt lost {exe}");
+        }
+    }
+
+    #[test]
+    fn shared_helper_exes_never_name_a_game() {
+        // The Spellcraft incident: another game's install runs the shared
+        // Unity crash handler; no path suffix matches, and the bucket
+        // fallback would name the one game that happens to list the exe.
+        let json = r#"[
+            {"name": "Spellcraft", "executables": [{"name": "some game/unitycrashhandler64.exe"}], "third_party_skus": []}
+        ]"#;
+        let db = NamingDb::parse(json).unwrap();
+        assert_eq!(
+            db.lookup_by_executable("H:\\Spiele\\Other Game\\UnityCrashHandler64.exe"),
+            None
+        );
+        // Even the listing game's own install must not resolve through the
+        // helper — the real game exe is the one that identifies it.
+        assert_eq!(
+            db.lookup_by_executable("some game/unitycrashhandler64.exe"),
+            None
+        );
+        assert_eq!(db.lookup_by_executable("UnityCrashHandler.exe"), None);
+        assert_eq!(db.lookup_by_executable("unitycrashhandler32.exe"), None);
     }
 
     #[test]

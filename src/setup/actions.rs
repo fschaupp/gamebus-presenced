@@ -476,6 +476,15 @@ fn plan_install(layout: &Layout, source: &Source) -> Plan {
         mode: 0o644,
     });
 
+    // The shared-helper list ships the same way: a reference copy in the data
+    // dir, rewritten on every install. User additions go in the config dir
+    // and are unioned in — rewriting this copy cannot lose them.
+    privileged.push(Step::WriteFile {
+        to: layout.shared_helpers_file(),
+        contents: include_str!("../../shared-helpers.txt").to_string(),
+        mode: 0o644,
+    });
+
     let exec = layout.daemon_bin();
     privileged.push(Step::WriteFile {
         to: layout.unit_file(),
@@ -515,6 +524,7 @@ fn plan_uninstall(layout: &Layout) -> Plan {
     privileged.push(Step::Remove(layout.dbus_service_file()));
     privileged.push(Step::Remove(layout.detectable_file()));
     privileged.push(Step::Remove(layout.endpoints_file()));
+    privileged.push(Step::Remove(layout.shared_helpers_file()));
 
     Plan {
         // Stop and disable before the files go, or systemd is left holding a
@@ -861,8 +871,9 @@ mod tests {
                 path.display()
             );
         }
-        // Three generated files: the two unit files naming the user-level
-        // binary, and the endpoint configuration (bundled content).
+        // Four generated files: the two unit files naming the user-level
+        // binary, the endpoint configuration, and the shared-helper list
+        // (both bundled content).
         let written: Vec<_> = plan
             .privileged
             .iter()
@@ -871,10 +882,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(written.len(), 3);
+        assert_eq!(written.len(), 4);
         for (to, contents) in &written {
             if to.ends_with(crate::endpoints::ENDPOINTS_NAME) {
                 assert!(contents.contains("[umu]"), "endpoints content wrong");
+            } else if to.ends_with(crate::naming::SHARED_HELPERS_NAME) {
+                assert!(
+                    contents.contains("unitycrashhandler64.exe"),
+                    "shared-helpers content wrong"
+                );
             } else {
                 assert!(contents.contains("/home/tester/.local/bin/gamebus-presenced"));
             }
