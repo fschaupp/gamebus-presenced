@@ -42,7 +42,7 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
                 held.push((
                     m,
                     format!(
-                        "already in the database as {} — a launcher-side miss, not a gap",
+                        "already in the database as {} - a launcher-side miss, not a gap",
                         v.umu_id.as_deref().unwrap_or("?")
                     ),
                 ));
@@ -152,16 +152,16 @@ fn csv_line(row: &SubmissionRow<'_>) -> String {
 /// `--export`: the submission CSV on stdout, held-back entries on stderr.
 pub(super) fn export_csv(report: &UmuReport) {
     let (rows, held) = partition(report);
-    println!("# umu-database submission draft — review before submitting!");
+    println!("# umu-database submission draft - review before submitting!");
     println!("# Rules: {}#readme", endpoints().umu_repository);
-    println!("# umu-FIXME means no id could be drafted safely — resolve by hand.");
+    println!("# umu-FIXME means no id could be drafted safely - resolve by hand.");
     println!("{CSV_HEADER}");
     for row in &rows {
         println!("{}", csv_line(row));
     }
     for (m, reason) in &held {
         eprintln!(
-            "(held back: {} — {reason})",
+            "(held back: {} - {reason})",
             m.effective_title().unwrap_or("(unresolved)")
         );
     }
@@ -228,7 +228,7 @@ pub(super) fn export_markdown(
             .map(|n| format!("; {n}"))
             .unwrap_or_default();
         md.push_str(&format!(
-            "- **{}** — store `{store}`, codename `{}`{codename_ref}{}; {}; {}{advisory}.\n",
+            "- **{}** - store `{store}`, codename `{}`{codename_ref}{}; {}; {}{advisory}.\n",
             row.title,
             row.codename,
             m.executable
@@ -238,12 +238,15 @@ pub(super) fn export_markdown(
             title_provenance(m),
             row.id_provenance
                 .as_deref()
-                .unwrap_or("id left as umu-FIXME — needs a human"),
+                .unwrap_or("id left as umu-FIXME - needs a human"),
         ));
     }
     md.push_str("\n## Checklist\n\n");
+    // The checklist is for what a human must verify, not for what the code
+    // guarantees mechanically — lowercase STORE entries and the empty NOTE
+    // column are enforced at the emit site, and a self-ticked box for them
+    // would be a box nobody actually checked.
     md.push_str("- [ ] Titles match the store's spelling and capitalization\n");
-    md.push_str("- [x] Store ids are lowercase\n");
     md.push_str(&format!(
         "- [{}] Every id follows the database rules (Steam appid when the game is on Steam)\n",
         if steam_rule { 'x' } else { ' ' }
@@ -275,14 +278,11 @@ pub(super) fn export_markdown(
         "- [{}] EGS codenames are the egdata.app Builds \"App Name\" (Heroic reports it verbatim)\n",
         if egs_appname { 'x' } else { ' ' }
     ));
-    md.push_str(
-        "- [x] NOTE column carries game-related remarks only (provenance stays in this text)\n",
-    );
     if !held.is_empty() {
         md.push_str("\n<!-- Held back, not part of this submission:\n");
         for (m, reason) in &held {
             md.push_str(&format!(
-                "  {} — {reason}\n",
+                "  {} - {reason}\n",
                 m.effective_title().unwrap_or("(unresolved)")
             ));
         }

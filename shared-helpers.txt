@@ -1,9 +1,9 @@
 # Helper executables that ship beside many games and therefore can never
-# identify one — the naming lookup returns no name for anything listed here.
+# identify one - the naming lookup returns no name for anything listed here.
 # One executable basename per line, matched case-insensitively; blank lines
 # and # comments are ignored.
 #
-# Every copy of this file ADDS entries — the lists union, so a local file
+# Every copy of this file ADDS entries - the lists union, so a local file
 # can extend the shipped protections but never remove them:
 #   1. the list bundled into the binaries from this very file
 #   2. $XDG_CONFIG_HOME/gamebus-presenced/shared-helpers.txt  (your additions)
@@ -13,7 +13,7 @@
 # Unity's crash handler ships beside every Unity game. Without this, the
 # bucket fallback names whichever single game happens to list the helper:
 # Project Hospital (Heroic-GOG) resolved UnityCrashHandler64.exe and got
-# stashed as "Spellcraft" at high confidence — the only detectable.json
+# stashed as "Spellcraft" at high confidence - the only detectable.json
 # entry listing that exe.
 unitycrashhandler.exe
 unitycrashhandler32.exe

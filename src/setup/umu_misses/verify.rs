@@ -128,7 +128,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
                 Verdict {
                     state: VerificationState::ConfirmedMissing,
                     umu_id: None,
-                    note: Some("API unreachable — checked against the local copy only".into()),
+                    note: Some("API unreachable - checked against the local copy only".into()),
                     drafted: None,
                 },
             )),
@@ -170,7 +170,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
                 }
                 DraftOutcome::Collision { id, existing_title } => {
                     let collision = format!(
-                        "draft {id} collides with the existing entry '{existing_title}' — left as umu-FIXME"
+                        "draft {id} collides with the existing entry '{existing_title}' - left as umu-FIXME"
                     );
                     verdict.note = Some(match verdict.note.take() {
                         Some(prior) => format!("{prior}; {collision}"),
@@ -307,7 +307,7 @@ fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
                 state: VerificationState::ConfirmedMissing,
                 umu_id: None,
                 note: Some(format!(
-                    "live title lookup matched {} (substring match — check whether one is this game before submitting)",
+                    "live title lookup matched {} (substring match - check whether one is this game before submitting)",
                     ids.join(", ")
                 )),
                 drafted: None,

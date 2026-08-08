@@ -376,8 +376,9 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
         "steam-rule box was pre-ticked over a slug draft:\n{text}"
     );
     // Conformance boxes: the gog rule is enforced by the hold-back, the egs
-    // fixture's store came from the daemon (no override), and the NOTE
-    // column is empty by construction.
+    // fixture's store came from the daemon (no override). Mechanical
+    // guarantees (lowercase STORE, empty NOTE) claim no box: the checklist
+    // is for what a human verifies.
     assert!(
         text.contains("- [x] GOG codenames are numeric gogdb.org"),
         "{text}"
@@ -386,10 +387,8 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
         text.contains("- [x] EGS codenames are the egdata.app Builds"),
         "{text}"
     );
-    assert!(
-        text.contains("- [x] NOTE column carries game-related"),
-        "{text}"
-    );
+    assert!(!text.contains("NOTE column carries"), "{text}");
+    assert!(!text.contains("Store ids are lowercase"), "{text}");
     // Provenance lives in the evidence, not in the CSV rows.
     assert!(text.contains("## Evidence"), "{text}");
     assert!(
