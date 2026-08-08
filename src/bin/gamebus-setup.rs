@@ -159,9 +159,17 @@ enum Msg {
     Activities(Vec<client::ActivityView>),
     Misses(Vec<(String, umu_report::Miss)>),
     Done(Action, Vec<actions::StepOutcome>),
-    /// A umu flow (verify / assign / store cycle) finished: its log lines
-    /// and whether it completed. Clears `busy` and refreshes the pane.
+    /// A umu flow (verify / assign / pick / store cycle) finished: its log
+    /// lines and whether it completed. Clears `busy` and refreshes the pane.
     UmuOutcome(Vec<String>, bool),
+    /// The pick search answered: database candidates for one stash entry.
+    /// Clears `busy` and opens pick mode (or logs that nothing matched).
+    /// `stale` warns when the candidates came from an aging fetch cache.
+    UmuCandidates {
+        key: String,
+        candidates: Vec<umu_report::UmuEntry>,
+        stale: Option<String>,
+    },
     Tick,
 }
 
@@ -486,6 +494,35 @@ async fn handle(
             // Show what the flow changed without waiting for the next tick.
             spawn_misses(tx);
         }
+        Msg::UmuCandidates {
+            key,
+            candidates,
+            stale,
+        } => {
+            app.busy = None;
+            // The staleness warning matters MOST when nothing matched: an
+            // old cache missing a fresh entry reads exactly like "not in
+            // the database".
+            if let Some(warning) = &stale {
+                app.log_styled(format!("  {warning}"), Style::default().fg(Color::Yellow));
+            }
+            if candidates.is_empty() {
+                app.log("  No database title matches — v verifies against the live API too.");
+            } else if app.misses.iter().any(|(k, _)| k == &key) {
+                app.log(format!(
+                    "  {} candidate(s) — ↑↓ choose, Enter picks, Esc cancels.",
+                    candidates.len()
+                ));
+                app.pick = Some(ui::Pick {
+                    key,
+                    candidates,
+                    selected: 0,
+                    stale,
+                });
+            }
+            // A refresh dropped the miss while the search ran: nothing left
+            // to pick for.
+        }
         Msg::Done(action, outcomes) => {
             for outcome in &outcomes {
                 let style = if outcome.ok {
@@ -535,6 +572,53 @@ async fn handle(
                     }
                     app.busy = Some("checking the assigned id".into());
                     spawn_umu_flow(tx, move || setup::umu_misses::tui_assign_id(&key, &id));
+                }
+                ui::Intent::UmuPick { key } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    // The query is the resolved title; without one there is
+                    // nothing to search for.
+                    let title = app
+                        .misses
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .and_then(|(_, m)| m.title.clone());
+                    let Some(title) = title else {
+                        app.log_styled(
+                            "  No resolved title to search the database for.",
+                            Style::default().fg(Color::Red),
+                        );
+                        return;
+                    };
+                    app.busy = Some("searching the local database".into());
+                    // Local file only — `v` stays the sole network key.
+                    let tx = tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let msg = match setup::umu_misses::tui_pick_candidates(&title) {
+                            Ok((candidates, stale)) => Msg::UmuCandidates {
+                                key,
+                                candidates,
+                                stale,
+                            },
+                            Err(e) => Msg::UmuOutcome(vec![e], false),
+                        };
+                        let _ = tx.blocking_send(msg);
+                    });
+                }
+                ui::Intent::UmuPickEntry {
+                    key,
+                    store,
+                    codename,
+                    umu_id,
+                } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("recording the picked entry".into());
+                    spawn_umu_flow(tx, move || {
+                        setup::umu_misses::tui_pick_entry(&key, &store, &codename, &umu_id)
+                    });
                 }
                 ui::Intent::UmuStore { key } => {
                     if app.busy.is_some() {

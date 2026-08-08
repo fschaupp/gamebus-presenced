@@ -27,8 +27,8 @@ use serde::Deserialize;
 
 use crate::naming::NamingDb;
 use crate::umu_report::{
-    self, draft_umu_id, Confidence, DraftBasis, DraftOutcome, DraftedId, Miss, UmuDb, UmuReport,
-    Verification, VerificationState,
+    self, draft_umu_id, Confidence, DraftBasis, DraftOutcome, DraftedId, Miss, UmuDb, UmuEntry,
+    UmuReport, Verification, VerificationState,
 };
 
 use crate::endpoints::Endpoints;
@@ -514,6 +514,125 @@ pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
     });
     report.save();
     (vec![format!("Assigned {id}: {note}")], true)
+}
+
+/// Candidates for the TUI's `p`: a title search against the local database
+/// only — no network, ever ([`UmuDb::search_title`] ranks and caps them).
+/// `v` stays the only key that fetches. Blocking — run it off the render
+/// path. The second value is a staleness warning when the source is an
+/// aging fetch cache.
+pub(crate) fn tui_pick_candidates(title: &str) -> Result<(Vec<UmuEntry>, Option<String>), String> {
+    match load_db(&Opts::none()) {
+        Ok(Some(db)) => Ok((
+            db.search_title(title).into_iter().cloned().collect(),
+            cache_staleness(),
+        )),
+        Ok(None) => {
+            Err("No local database — press v to fetch, or set --db/GAMEBUS_UMU_DB.".to_string())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Entries land upstream continuously; a cache this old silently misses
+/// the newest ones, and a pick that cannot find a game reads as "not in
+/// the database" when the truth is "not in YOUR COPY of the database".
+const STALE_AFTER: Duration = Duration::from_secs(7 * 86_400);
+
+fn staleness_note(age: Duration) -> Option<String> {
+    if age < STALE_AFTER {
+        return None;
+    }
+    Some(format!(
+        "Database cache is {} days old — v refreshes it (net).",
+        age.as_secs() / 86_400
+    ))
+}
+
+/// Only the fetch cache ages into a warning: an explicit `--db`/
+/// `GAMEBUS_UMU_DB` checkout is the user's to keep fresh, and `v` would
+/// not refresh it anyway — warning about it would point at the wrong fix.
+fn cache_staleness() -> Option<String> {
+    if std::env::var_os("GAMEBUS_UMU_DB").is_some() {
+        return None;
+    }
+    let path = UmuDb::cache_path()?;
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    let age = std::time::SystemTime::now().duration_since(mtime).ok()?;
+    staleness_note(age)
+}
+
+/// The TUI's pick: the user chose a database entry as "this game IS that
+/// entry" — recorded as the verification verdict, no network. Same shape as
+/// [`tui_assign_id`]; the decision itself lives in [`pick_entry`].
+pub(crate) fn tui_pick_entry(
+    key: &str,
+    store: &str,
+    codename: &str,
+    umu_id: &str,
+) -> (Vec<String>, bool) {
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let (lines, ok) = pick_entry(&mut report, key, store, codename, umu_id);
+    if ok {
+        report.save();
+    }
+    (lines, ok)
+}
+
+/// Record a picked database entry on a miss. A pick whose store+codename
+/// exactly equals the miss's own launch (case-insensitive) means the row
+/// already exists — a launcher-side miss, [`AlreadyInDatabase`]; anything
+/// else is the cross-store verdict carrying the picked id. The picked id
+/// supersedes any drafted one, so the draft is cleared either way.
+///
+/// [`AlreadyInDatabase`]: VerificationState::AlreadyInDatabase
+fn pick_entry(
+    report: &mut UmuReport,
+    key: &str,
+    store: &str,
+    codename: &str,
+    umu_id: &str,
+) -> (Vec<String>, bool) {
+    let Some(m) = report.entries().get(key) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let title = m
+        .title
+        .clone()
+        .unwrap_or_else(|| "(unresolved)".to_string());
+    let same_row = m.effective_store().eq_ignore_ascii_case(store)
+        && m.codename
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case(codename));
+    let (state, line) = if same_row {
+        (
+            VerificationState::AlreadyInDatabase,
+            format!("{title}: already in the database as {umu_id} — the launcher missed, not the database."),
+        )
+    } else {
+        (
+            VerificationState::CrossStoreId,
+            format!("{title}: recorded {umu_id} from the database's {store}/{codename} entry."),
+        )
+    };
+    report.update(key, |m| {
+        m.verification = Some(Verification {
+            state,
+            umu_id: Some(umu_id.to_string()),
+            checked: umu_report::today(),
+            note: Some(format!(
+                "picked from the database's {store}/{codename} entry"
+            )),
+        });
+        m.drafted_id = None;
+    });
+    (vec![line], true)
 }
 
 /// Every store id the database actually uses (counted from the upstream
@@ -1204,6 +1323,14 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_week_old_cache_warns_a_fresher_one_does_not() {
+        assert_eq!(staleness_note(Duration::from_secs(6 * 86_400)), None);
+        let note = staleness_note(Duration::from_secs(9 * 86_400)).expect("9 days is stale");
+        assert!(note.contains("9 days old"), "{note}");
+        assert!(note.contains("(net)"), "the fix must name its cost: {note}");
+    }
+
     fn miss(title: Option<&str>, codename: Option<&str>) -> Miss {
         Miss {
             title: title.map(str::to_string),
@@ -1269,6 +1396,102 @@ mod tests {
         // Same-title holder is the cross-store id; different title rejects.
         assert!(check_assignment(&db, Some("Borderlands 3"), "umu-397540").is_ok());
         assert!(check_assignment(&db, Some("Not Borderlands"), "umu-397540").is_err());
+    }
+
+    /// Fixture database for the pick flow — the shapes the search hands the
+    /// TUI as candidates.
+    fn pick_db() -> UmuDb {
+        UmuDb::parse(concat!(
+            "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+            "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+            "Borderlands 3,gog,1454587428,umu-397540,bl3,,\n",
+        ))
+        .unwrap()
+    }
+
+    /// In-memory stash with one resolved miss (no path: persist no-ops).
+    fn pick_report(store: &str, codename: &str) -> (UmuReport, String) {
+        let key = format!("{store}:{codename}");
+        let mut report = UmuReport::default();
+        report.note_launch(store, Some(codename), "umu-0", &key);
+        report.note_title(
+            store,
+            Some(codename),
+            &key,
+            "Borderlands 3",
+            "heroic-config",
+            Confidence::High,
+            None,
+        );
+        (report, key)
+    }
+
+    #[test]
+    fn picking_the_misss_own_row_is_a_launcher_side_miss() {
+        let db = pick_db();
+        // Case differs from the database row — the comparison must not care.
+        let (mut report, key) = pick_report("EGS", "catnip");
+        let cand = db.search_title("Borderlands 3")[0].clone();
+        let (lines, ok) = pick_entry(&mut report, &key, &cand.store, &cand.codename, &cand.umu_id);
+        assert!(ok, "{lines:?}");
+        let v = report.entries()[&key].verification.as_ref().unwrap();
+        assert_eq!(v.state, VerificationState::AlreadyInDatabase);
+        assert_eq!(v.umu_id.as_deref(), Some("umu-397540"));
+        assert!(lines[0].contains("launcher missed"), "{lines:?}");
+    }
+
+    #[test]
+    fn picking_another_stores_row_is_the_cross_store_verdict() {
+        let db = pick_db();
+        let (mut report, key) = pick_report("egs", "Catnip");
+        // A stale draft that the pick must supersede.
+        report.update(&key, |m| {
+            m.drafted_id = Some(DraftedId {
+                id: "umu-borderlands3".into(),
+                basis: DraftBasis::Manual,
+                collision_checked: "2026-08-08".into(),
+            });
+        });
+        let cand = db
+            .search_title("Borderlands 3")
+            .into_iter()
+            .find(|e| e.store == "gog")
+            .unwrap()
+            .clone();
+        let (lines, ok) = pick_entry(&mut report, &key, &cand.store, &cand.codename, &cand.umu_id);
+        assert!(ok, "{lines:?}");
+        let m = &report.entries()[&key];
+        let v = m.verification.as_ref().unwrap();
+        assert_eq!(v.state, VerificationState::CrossStoreId);
+        assert_eq!(v.umu_id.as_deref(), Some("umu-397540"));
+        assert!(
+            v.note.as_deref().unwrap().contains("gog/1454587428"),
+            "{:?}",
+            v.note
+        );
+        assert!(m.drafted_id.is_none(), "the pick left the stale draft");
+    }
+
+    #[test]
+    fn a_store_override_counts_as_the_misss_own_store() {
+        let db = pick_db();
+        let (mut report, key) = pick_report("none", "Catnip");
+        report.update(&key, |m| m.store_override = Some("egs".into()));
+        let cand = db.search_title("Borderlands 3")[0].clone();
+        let (_, ok) = pick_entry(&mut report, &key, &cand.store, &cand.codename, &cand.umu_id);
+        assert!(ok);
+        assert_eq!(
+            report.entries()[&key].verification.as_ref().unwrap().state,
+            VerificationState::AlreadyInDatabase
+        );
+    }
+
+    #[test]
+    fn picking_for_a_vanished_entry_fails_honestly() {
+        let (mut report, _) = pick_report("egs", "Catnip");
+        let (lines, ok) = pick_entry(&mut report, "gone:key", "egs", "Catnip", "umu-397540");
+        assert!(!ok);
+        assert!(lines[0].contains("gone:key"), "{lines:?}");
     }
 
     #[test]

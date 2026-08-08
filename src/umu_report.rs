@@ -609,6 +609,48 @@ impl UmuDb {
             .map(|idx| idx.iter().map(|&i| &self.entries[i]).collect())
             .unwrap_or_default()
     }
+
+    /// Candidates for a human pick: case-insensitive substring match in both
+    /// directions — a database title containing the query ("Control" finds
+    /// "Control Ultimate Edition") or the query containing a database title
+    /// (a decorated launcher title finds the plain row). Ranked exact match,
+    /// then database-title-starts-with-query, then the rest; capped at 20.
+    /// The upstream CSV carries literal duplicate rows, so results dedup by
+    /// (store, codename, umu id). Empty or whitespace queries match nothing.
+    pub fn search_title(&self, query: &str) -> Vec<&UmuEntry> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut seen: std::collections::HashSet<(String, String, String)> = Default::default();
+        let mut ranked: Vec<(u8, usize)> = Vec::new();
+        for (i, e) in self.entries.iter().enumerate() {
+            let t = e.title.to_lowercase();
+            let rank = if t == q {
+                0
+            } else if t.starts_with(&q) {
+                1
+            } else if t.contains(&q) || q.contains(&t) {
+                2
+            } else {
+                continue;
+            };
+            if seen.insert((
+                e.store.to_lowercase(),
+                e.codename.to_lowercase(),
+                e.umu_id.to_lowercase(),
+            )) {
+                ranked.push((rank, i));
+            }
+        }
+        // Stable sort: within a rank, database order stands.
+        ranked.sort_by_key(|&(rank, _)| rank);
+        ranked
+            .into_iter()
+            .take(20)
+            .map(|(_, i)| &self.entries[i])
+            .collect()
+    }
 }
 
 /// Split CSV text into records, honouring quoted fields (embedded commas,
@@ -1022,6 +1064,71 @@ mod tests {
         // those must not "find" Dark and Darker.
         assert!(db.find_store_codename("none", "none").is_none());
         assert!(db.find_store_codename("egs", "").is_none());
+    }
+
+    // ---- Title search for the TUI's pick verb (S9b).
+
+    /// Real row shapes: one game in three spellings, plus the CSV's literal
+    /// duplicate-row habit (the upstream file really contains repeated rows).
+    const SEARCH_CSV: &str = concat!(
+        "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+        "Control,egs,Calluna,umu-870780,,,\n",
+        "Control Ultimate Edition,gog,2049187585,umu-870780,,,\n",
+        "Ground Control,gog,1207658883,umu-groundcontrol,,,\n",
+        "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+        "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+    );
+
+    #[test]
+    fn search_ranks_exact_then_prefix_then_the_rest() {
+        let db = UmuDb::parse(SEARCH_CSV).unwrap();
+        let hits = db.search_title("control");
+        let titles: Vec<&str> = hits.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Control", "Control Ultimate Edition", "Ground Control"]
+        );
+        // Case-insensitive throughout.
+        assert_eq!(db.search_title("CONTROL")[0].title, "Control");
+    }
+
+    #[test]
+    fn search_matches_substrings_in_both_directions() {
+        let db = UmuDb::parse(SEARCH_CSV).unwrap();
+        // Query inside a database title.
+        assert!(db
+            .search_title("ultimate")
+            .iter()
+            .any(|e| e.title == "Control Ultimate Edition"));
+        // Database title inside the query — a decorated launcher title still
+        // finds the plain row.
+        assert!(db
+            .search_title("Control Ultimate Edition GOTY")
+            .iter()
+            .any(|e| e.title == "Control Ultimate Edition"));
+        assert!(db.search_title("Half-Life").is_empty());
+    }
+
+    #[test]
+    fn search_dedups_the_csvs_literal_duplicate_rows() {
+        let db = UmuDb::parse(SEARCH_CSV).unwrap();
+        let hits = db.search_title("Borderlands 3");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].umu_id, "umu-397540");
+    }
+
+    #[test]
+    fn search_caps_at_twenty_and_ignores_empty_queries() {
+        let mut csv = String::from(
+            "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+        );
+        for i in 0..25 {
+            csv.push_str(&format!("Fixture Quest {i:02},egs,code{i},umu-fq{i},,,\n"));
+        }
+        let db = UmuDb::parse(&csv).unwrap();
+        assert_eq!(db.search_title("fixture quest").len(), 20);
+        assert!(db.search_title("").is_empty());
+        assert!(db.search_title("   ").is_empty());
     }
 
     #[test]
