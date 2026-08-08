@@ -268,7 +268,7 @@ fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<String>, Str
         let m = &report.entries()[key];
         // Local pass: the exact launch first, then the title.
         if let Some(db) = db {
-            if let Some(code) = m.codename.as_deref() {
+            if let Some(code) = m.effective_codename() {
                 if let Some(hit) = db.find_store_codename(m.effective_store(), code) {
                     verdicts.push((
                         key.clone(),
@@ -354,7 +354,7 @@ fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<String>, Str
                 continue;
             };
             let appid = naming.as_ref().and_then(|n| n.steam_appid_for_title(title));
-            match draft_umu_id(db, title, m.codename.as_deref(), appid) {
+            match draft_umu_id(db, title, m.effective_codename(), appid) {
                 DraftOutcome::Drafted { id, basis } => {
                     verdict.drafted = Some(DraftedId {
                         id,
@@ -516,16 +516,100 @@ pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
     (vec![format!("Assigned {id}: {note}")], true)
 }
 
+/// One row of the TUI's pick list, tagged with what Enter on it means. The
+/// kinds flow as one list through `Msg::UmuCandidates` and `ui::Pick`; the
+/// keymap dispatches per kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickCandidate {
+    /// A umu-database row — Enter records the id verdict on the miss.
+    Db(UmuEntry),
+    /// A Heroic library identity — Enter writes the store+codename
+    /// overrides. NOT a verdict: the game may still be missing from the
+    /// database; identity and verdict are different facts.
+    Library(super::heroic_library::LibraryGame),
+    /// A GOG catalog hit (`o`) — Enter writes the product id as the
+    /// codename override.
+    GogProduct(GogProduct),
+    /// An egdata offer hit (`o`) — Enter commits its last Windows build's
+    /// App Name, or fires the builds request when the hit carries none. The
+    /// namespace itself is NEVER offered as a codename: Control's namespace
+    /// is lowercase `calluna`, its Builds App Name is `Calluna`.
+    EgsOffer(EgsOffer),
+    /// One build from the sandboxes list — Enter writes its App Name as the
+    /// codename override.
+    EgsBuild(EgsBuild),
+}
+
+impl PickCandidate {
+    /// The pick list's section header — the candidates arrive grouped, and
+    /// the label is what tells a database row from a library identity.
+    pub fn section_label(&self) -> &'static str {
+        match self {
+            PickCandidate::Db(_) => "umu database — Enter records the verdict",
+            PickCandidate::Library(_) => "your Heroic library — Enter sets the identity",
+            PickCandidate::GogProduct(_) => "GOG catalog — Enter sets the codename",
+            PickCandidate::EgsOffer(_) => "egdata offers — Enter picks the build",
+            PickCandidate::EgsBuild(_) => "egdata builds — Enter sets the codename",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GogProduct {
+    pub id: String,
+    pub title: String,
+    pub product_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgsOffer {
+    pub title: String,
+    pub namespace: String,
+    pub offer_type: String,
+    /// The App Name of the hit's last Windows build, when the search
+    /// response already carries one — Enter then commits it directly and
+    /// the second request never fires.
+    pub windows_app_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgsBuild {
+    pub app_name: String,
+    pub label_name: String,
+    pub platform: String,
+}
+
 /// Candidates for the TUI's `p`: a title search against the local database
-/// only — no network, ever ([`UmuDb::search_title`] ranks and caps them).
-/// `v` stays the only key that fetches. Blocking — run it off the render
-/// path. The second value is a staleness warning when the source is an
-/// aging fetch cache.
-pub(crate) fn tui_pick_candidates(title: &str) -> Result<(Vec<UmuEntry>, Option<String>), String> {
+/// ([`UmuDb::search_title`] ranks and caps them) plus the user's Heroic
+/// store_cache libraries — both local files, no network, ever; `v` stays
+/// the only pane key that fetches. Blocking — run it off the render path.
+/// The second value is a warning: an aging fetch cache, or a missing
+/// database when the libraries still produced something to pick.
+pub(crate) fn tui_pick_candidates(
+    title: &str,
+) -> Result<(Vec<PickCandidate>, Option<String>), String> {
+    let library: Vec<PickCandidate> = super::heroic_library::candidates(title)
+        .into_iter()
+        .map(PickCandidate::Library)
+        .collect();
     match load_db(&Opts::none()) {
-        Ok(Some(db)) => Ok((
-            db.search_title(title).into_iter().cloned().collect(),
-            cache_staleness(),
+        Ok(Some(db)) => {
+            let mut candidates: Vec<PickCandidate> = db
+                .search_title(title)
+                .into_iter()
+                .cloned()
+                .map(PickCandidate::Db)
+                .collect();
+            candidates.extend(library);
+            Ok((candidates, cache_staleness()))
+        }
+        Ok(None) if !library.is_empty() => Ok((
+            library,
+            Some(
+                "No local umu database — candidates are your Heroic library only; \
+                 v fetches the database (net)."
+                    .to_string(),
+            ),
         )),
         Ok(None) => {
             Err("No local database — press v to fetch, or set --db/GAMEBUS_UMU_DB.".to_string())
@@ -607,8 +691,7 @@ fn pick_entry(
         .clone()
         .unwrap_or_else(|| "(unresolved)".to_string());
     let same_row = m.effective_store().eq_ignore_ascii_case(store)
-        && m.codename
-            .as_deref()
+        && m.effective_codename()
             .is_some_and(|c| c.eq_ignore_ascii_case(codename));
     let (state, line) = if same_row {
         (
@@ -633,6 +716,249 @@ fn pick_entry(
         m.drafted_id = None;
     });
     (vec![line], true)
+}
+
+/// The TUI's identity write: a Heroic library pick or an online lookup
+/// established what the game IS on its store. Same shape as
+/// [`tui_pick_entry`]; the decision lives in [`set_identity`].
+pub(crate) fn tui_set_identity(
+    key: &str,
+    store: Option<&str>,
+    codename: &str,
+    source: &str,
+) -> (Vec<String>, bool) {
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let (lines, ok) = set_identity(&mut report, key, store, codename, source);
+    if ok {
+        report.save();
+    }
+    (lines, ok)
+}
+
+/// Record a store identity on a miss: `codename_override`, plus
+/// `store_override` when the pick names a store (a library pick does; an
+/// online lookup already ran under the miss's effective store). Both are
+/// annotation-half, so a daemon write never reverts them. Deliberately NOT
+/// a verification verdict: knowing what the game is says nothing about
+/// whether the database has it — a later `v` verifies with the new
+/// identity.
+fn set_identity(
+    report: &mut UmuReport,
+    key: &str,
+    store: Option<&str>,
+    codename: &str,
+    source: &str,
+) -> (Vec<String>, bool) {
+    let Some(m) = report.entries().get(key) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let title = m
+        .title
+        .clone()
+        .unwrap_or_else(|| "(unresolved)".to_string());
+    let guessed = m.store.clone();
+    let store = store.map(str::to_string);
+    let mut what = format!("codename {codename}");
+    if let Some(s) = &store {
+        what.push_str(&format!(", store {s}"));
+    }
+    report.update(key, |m| {
+        m.codename_override = Some(codename.to_string());
+        if let Some(s) = &store {
+            // Mirrors the s-cycle: landing on the daemon's own guess means
+            // the entry is back to "guessed", not "corrected to the guess".
+            m.store_override = (*s != guessed).then(|| s.clone());
+        }
+    });
+    (
+        vec![format!(
+            "{title}: {what} from {source} — v verifies with the new identity (net)."
+        )],
+        true,
+    )
+}
+
+/// The `o` verb's dispatch: one lookup against the miss's effective store.
+/// Exactly one HTTP request per call; failures are one honest line and
+/// nothing written. Blocking — run it off the render path.
+pub(crate) fn tui_online_candidates(
+    store: &str,
+    title: &str,
+) -> Result<Vec<PickCandidate>, String> {
+    match store {
+        "gog" => {
+            let url = format!(
+                "{}?limit=10&query=like:{}&order=desc:score&productType=in:game",
+                endpoints().gog_catalog,
+                urlencode(title)
+            );
+            parse_gog_catalog(&http_get(&url)?).map_err(|e| format!("{url}: {e}"))
+        }
+        "egs" => {
+            let url = format!(
+                "{}?query={}&limit=10",
+                endpoints().egs_search,
+                urlencode(title)
+            );
+            parse_egs_offers(&http_get(&url)?).map_err(|e| format!("{url}: {e}"))
+        }
+        // The database's standalone rule pairs store none with codename
+        // none — there is no store catalog to ask.
+        "none" => Err(
+            "Store is none — standalone entries pair codename none by the database's own rule; \
+             cycle s first if this is a store game."
+                .to_string(),
+        ),
+        other => Err(format!(
+            "No online lookup for the {other} store — only gog and egs have one."
+        )),
+    }
+}
+
+/// The second egs request: the builds of one namespace, fired by Enter on
+/// an offer that carried no Windows build. One request, like every `o` step.
+pub(crate) fn tui_egs_builds(namespace: &str) -> Result<Vec<PickCandidate>, String> {
+    let url = format!(
+        "{}/{}/builds",
+        endpoints().egs_sandboxes,
+        urlencode(namespace)
+    );
+    parse_egs_builds(&http_get(&url)?).map_err(|e| format!("{url}: {e}"))
+}
+
+/// One GET, body as text. Timeout and User-Agent like every request here.
+fn http_get(url: &str) -> Result<String, String> {
+    ureq::get(url)
+        .set("User-Agent", USER_AGENT)
+        .timeout(HTTP_TIMEOUT)
+        .call()
+        .map_err(|e| format!("{url}: {e}"))?
+        .into_string()
+        .map_err(|e| format!("{url}: reading the response body: {e}"))
+}
+
+/// catalog.gog.com answers `{"products":[{id, title, productType, …}]}` —
+/// the id is the numeric product id the database wants as the codename.
+/// Rows missing an id or title are dropped, not errors.
+fn parse_gog_catalog(raw: &str) -> Result<Vec<PickCandidate>, String> {
+    #[derive(Deserialize)]
+    struct Resp {
+        products: Vec<Product>,
+    }
+    #[derive(Deserialize)]
+    struct Product {
+        id: Option<serde_json::Value>,
+        title: Option<String>,
+        #[serde(rename = "productType")]
+        product_type: Option<String>,
+    }
+    let resp: Resp =
+        serde_json::from_str(raw).map_err(|e| format!("not the catalog response: {e}"))?;
+    Ok(resp
+        .products
+        .into_iter()
+        .filter_map(|p| {
+            // The id arrives as a JSON string; a number would mean the same.
+            let id = match p.id? {
+                serde_json::Value::String(s) if !s.is_empty() => s,
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            Some(PickCandidate::GogProduct(GogProduct {
+                id,
+                title: p.title.filter(|t| !t.is_empty())?,
+                product_type: p.product_type.unwrap_or_default(),
+            }))
+        })
+        .collect())
+}
+
+/// api.egdata.app/multisearch/offers answers `{"hits":[{title, namespace,
+/// offerType, lastBuilds:[{appName, labelName, platform}], …}]}`. BASE_GAME
+/// hits rank first; a hit whose lastBuilds already carries a Windows build
+/// remembers its App Name so Enter can skip the second request.
+fn parse_egs_offers(raw: &str) -> Result<Vec<PickCandidate>, String> {
+    #[derive(Deserialize)]
+    struct Resp {
+        hits: Vec<Hit>,
+    }
+    #[derive(Deserialize)]
+    struct Hit {
+        title: Option<String>,
+        namespace: Option<String>,
+        #[serde(rename = "offerType")]
+        offer_type: Option<String>,
+        #[serde(rename = "lastBuilds", default)]
+        last_builds: Option<Vec<RawBuild>>,
+    }
+    #[derive(Deserialize)]
+    struct RawBuild {
+        #[serde(rename = "appName")]
+        app_name: Option<String>,
+        platform: Option<String>,
+    }
+    let resp: Resp =
+        serde_json::from_str(raw).map_err(|e| format!("not the offer-search response: {e}"))?;
+    let mut offers: Vec<EgsOffer> = resp
+        .hits
+        .into_iter()
+        .filter_map(|h| {
+            let windows_app_name = h
+                .last_builds
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find_map(|b| match (&b.app_name, &b.platform) {
+                    (Some(app), Some(p)) if p == "Windows" && !app.is_empty() => Some(app.clone()),
+                    _ => None,
+                });
+            Some(EgsOffer {
+                title: h.title.filter(|t| !t.is_empty())?,
+                namespace: h.namespace.filter(|n| !n.is_empty())?,
+                offer_type: h.offer_type.unwrap_or_default(),
+                windows_app_name,
+            })
+        })
+        .collect();
+    // Stable: BASE_GAME first, the response's relevance order otherwise.
+    offers.sort_by_key(|o| o.offer_type != "BASE_GAME");
+    Ok(offers.into_iter().map(PickCandidate::EgsOffer).collect())
+}
+
+/// The sandboxes builds list — parsed by value, since only the rows'
+/// `appName`/`labelName`/`platform` matter: a bare array and an array under
+/// any top-level key both work. Live Windows builds rank first.
+fn parse_egs_builds(raw: &str) -> Result<Vec<PickCandidate>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("not the builds response: {e}"))?;
+    let rows = match &v {
+        serde_json::Value::Array(a) => a.as_slice(),
+        serde_json::Value::Object(o) => o
+            .values()
+            .find_map(|x| x.as_array())
+            .map(Vec::as_slice)
+            .ok_or("no builds array in the response")?,
+        _ => return Err("no builds array in the response".into()),
+    };
+    let mut builds: Vec<EgsBuild> = rows
+        .iter()
+        .filter_map(|r| {
+            let field = |k: &str| Some(r.get(k)?.as_str().unwrap_or_default().to_string());
+            Some(EgsBuild {
+                app_name: field("appName").filter(|a| !a.is_empty())?,
+                label_name: field("labelName").unwrap_or_default(),
+                platform: field("platform").unwrap_or_default(),
+            })
+        })
+        .collect();
+    builds.sort_by_key(|b| (b.platform != "Windows", !b.label_name.starts_with("Live")));
+    Ok(builds.into_iter().map(PickCandidate::EgsBuild).collect())
 }
 
 /// Every store id the database actually uses (counted from the upstream
@@ -756,8 +1082,7 @@ fn check_assignment(db: &UmuDb, title: Option<&str>, id: &str) -> Result<String,
 /// verdict's id. `Ok(None)` means the API answered and found nothing.
 fn api_check(api: &str, m: &Miss) -> Result<Option<Verdict>, String> {
     if let Some(code) = m
-        .codename
-        .as_deref()
+        .effective_codename()
         .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("none"))
     {
         if m.effective_store() != "none" {
@@ -900,8 +1225,7 @@ fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
 /// (`"Warhammer 40,000: Space Marine",gog,…`).
 fn diff_mentions(diff_lower: &str, m: &Miss) -> bool {
     let codename_hit = m
-        .codename
-        .as_deref()
+        .effective_codename()
         .filter(|c| c.len() >= 4 && !c.eq_ignore_ascii_case("none"))
         .is_some_and(|c| diff_lower.contains(&format!(",{},", c.to_lowercase())));
     let title_hit = m.title.as_deref().is_some_and(|t| {
@@ -990,7 +1314,9 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
         let codename = if m.effective_store() == "none" {
             "none".to_string()
         } else {
-            m.codename.clone().unwrap_or_else(|| "none".into())
+            m.effective_codename()
+                .map(str::to_string)
+                .unwrap_or_else(|| "none".into())
         };
         // The database's GOG rule: the codename is the numeric gogdb.org
         // product id. Heroic launches satisfy it by construction (Heroic's
@@ -1112,7 +1438,8 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
         // GOG ids; egdata.app for the EGS Builds App Name.
         let codename_ref = match store.as_str() {
             "gog" => format!(
-                " ([gogdb.org product](https://www.gogdb.org/product/{}))",
+                " ([gogdb.org product]({}/{}))",
+                endpoints().gog_gogdb_product,
                 urlencode(&row.codename)
             ),
             "egs" => " (egdata.app Builds App Name, via Heroic)".to_string(),
@@ -1156,14 +1483,19 @@ fn export_markdown(report: &UmuReport, dest: Option<&std::path::Path>) -> Result
     md.push_str(
         "- [x] GOG codenames are numeric gogdb.org product ids (non-conforming entries are held back)\n",
     );
-    // Provable only when the daemon itself derived the store: an egs guess
-    // straight from HEROIC_APP_NAME IS the egdata Builds App Name. A store
-    // the user overrode to egs pairs that store with a codename of unknown
-    // origin — the box stays open for the human.
+    // Provable only when the daemon itself derived the store AND the
+    // codename: an egs guess straight from HEROIC_APP_NAME IS the egdata
+    // Builds App Name. A store the user overrode to egs, or a codename
+    // override (whose origin the stash cannot prove), leaves the box open
+    // for the human.
     let egs_appname = rows
         .iter()
         .filter(|r| r.miss.effective_store() == "egs")
-        .all(|r| r.miss.store == "egs" && r.miss.store_override.is_none());
+        .all(|r| {
+            r.miss.store == "egs"
+                && r.miss.store_override.is_none()
+                && r.miss.codename_override.is_none()
+        });
     md.push_str(&format!(
         "- [{}] EGS codenames are the egdata.app Builds \"App Name\" (Heroic reports it verbatim)\n",
         if egs_appname { 'x' } else { ' ' }
@@ -1346,6 +1678,7 @@ mod tests {
             drafted_id: None,
             possible_pr: None,
             store_override: None,
+            codename_override: None,
             dismissed: None,
         }
     }
@@ -1492,6 +1825,217 @@ mod tests {
         let (lines, ok) = pick_entry(&mut report, "gone:key", "egs", "Catnip", "umu-397540");
         assert!(!ok);
         assert!(lines[0].contains("gone:key"), "{lines:?}");
+    }
+
+    // ---- codename_override threading: everything that reads a codename
+    // must read the effective one.
+
+    #[test]
+    fn verify_looks_up_store_and_codename_with_the_override() {
+        let db = UmuDb::parse(concat!(
+            "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+            "Witchery,gog,1423049311,umu-witchery1,,,\n",
+        ))
+        .unwrap();
+        let (mut report, key) = pick_report("gog", "witchery");
+        report.update(&key, |m| {
+            m.title = Some("Witchery".into());
+            m.codename_override = Some("1423049311".into());
+        });
+        // The overridden codename hits locally — the API is never reached
+        // (there is nothing serving it here, so a request would error out).
+        let lines = verify(&mut report, Some(&db)).expect("local verify");
+        assert!(
+            lines.iter().any(|l| l.contains("already in the database")),
+            "{lines:?}"
+        );
+        let v = report.entries()[&key].verification.as_ref().unwrap();
+        assert_eq!(v.state, VerificationState::AlreadyInDatabase);
+        assert_eq!(v.umu_id.as_deref(), Some("umu-witchery1"));
+    }
+
+    #[test]
+    fn the_export_partition_uses_the_override_and_its_gog_gate_passes() {
+        let (mut report, key) = pick_report("gog", "witchery");
+        // Name-shaped launcher codename: held back by the gogdb rule…
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty(), "non-numeric gog codename reached a row");
+        assert_eq!(held.len(), 1);
+        // …until the override supplies the numeric product id.
+        report.update(&key, |m| m.codename_override = Some("1423049311".into()));
+        let (rows, held) = partition(&report);
+        assert!(held.is_empty(), "{:?}", held.first().map(|(_, r)| r));
+        assert_eq!(rows[0].codename, "1423049311");
+    }
+
+    #[test]
+    fn a_codename_override_counts_as_the_misss_own_row_in_a_pick() {
+        let db = pick_db();
+        let (mut report, key) = pick_report("egs", "WrongName");
+        report.update(&key, |m| m.codename_override = Some("Catnip".into()));
+        let cand = db.search_title("Borderlands 3")[0].clone();
+        let (_, ok) = pick_entry(&mut report, &key, &cand.store, &cand.codename, &cand.umu_id);
+        assert!(ok);
+        assert_eq!(
+            report.entries()[&key].verification.as_ref().unwrap().state,
+            VerificationState::AlreadyInDatabase
+        );
+    }
+
+    // ---- Identity writes (library picks and online lookups).
+
+    #[test]
+    fn a_library_pick_writes_the_identity_but_never_a_verdict() {
+        let (mut report, key) = pick_report("none", "somewrapper");
+        let (lines, ok) = set_identity(
+            &mut report,
+            &key,
+            Some("egs"),
+            "Calluna",
+            "your Heroic library",
+        );
+        assert!(ok, "{lines:?}");
+        let m = &report.entries()[&key];
+        assert_eq!(m.codename_override.as_deref(), Some("Calluna"));
+        assert_eq!(m.store_override.as_deref(), Some("egs"));
+        assert!(
+            m.verification.is_none(),
+            "an identity pick minted a verdict"
+        );
+        assert!(lines[0].contains("codename Calluna"), "{lines:?}");
+        assert!(lines[0].contains("your Heroic library"), "{lines:?}");
+        assert!(lines[0].contains("store egs"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_online_pick_sets_the_codename_and_leaves_the_store_alone() {
+        let (mut report, key) = pick_report("gog", "witchery");
+        report.update(&key, |m| m.store_override = Some("gog".into()));
+        let (lines, ok) = set_identity(&mut report, &key, None, "2049187585", "the GOG catalog");
+        assert!(ok, "{lines:?}");
+        let m = &report.entries()[&key];
+        assert_eq!(m.codename_override.as_deref(), Some("2049187585"));
+        assert_eq!(m.store_override.as_deref(), Some("gog"), "store touched");
+        assert!(
+            lines[0].contains("codename 2049187585 from the GOG catalog"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_library_pick_matching_the_daemons_guess_clears_the_store_override() {
+        let (mut report, key) = pick_report("egs", "WrongName");
+        report.update(&key, |m| m.store_override = Some("gog".into()));
+        let (_, ok) = set_identity(
+            &mut report,
+            &key,
+            Some("egs"),
+            "Calluna",
+            "your Heroic library",
+        );
+        assert!(ok);
+        // Back on the guess: "guessed", not "corrected to the guess".
+        assert!(report.entries()[&key].store_override.is_none());
+    }
+
+    #[test]
+    fn setting_an_identity_for_a_vanished_entry_fails_honestly() {
+        let (mut report, _) = pick_report("egs", "Catnip");
+        let (lines, ok) = set_identity(&mut report, "gone:key", None, "X", "somewhere");
+        assert!(!ok);
+        assert!(lines[0].contains("gone:key"), "{lines:?}");
+    }
+
+    // ---- The `o` dispatch: refusals happen before any request could fire.
+
+    #[test]
+    fn online_lookup_refuses_store_none_and_unknown_stores() {
+        let err = tui_online_candidates("none", "Some Game").unwrap_err();
+        assert!(err.contains("cycle s first"), "{err}");
+        let err = tui_online_candidates("ubisoft", "Some Game").unwrap_err();
+        assert!(err.contains("only gog and egs"), "{err}");
+    }
+
+    // ---- Online response parsing (shapes from the live APIs; the requests
+    // themselves stay untested — no network in the suite).
+
+    #[test]
+    fn the_gog_catalog_response_yields_product_candidates() {
+        let raw = r#"{"pages":1,"products":[
+            {"id":"2049187585","title":"Control Ultimate Edition","productType":"game","slug":"control"},
+            {"id":1423049311,"title":"Witchery","productType":"game"},
+            {"title":"No Id Ever"},
+            {"id":"","title":"Empty Id"}
+        ]}"#;
+        let hits = parse_gog_catalog(raw).unwrap();
+        assert_eq!(hits.len(), 2);
+        // Both id encodings arrive as the numeric codename string.
+        assert_eq!(
+            hits[0],
+            PickCandidate::GogProduct(GogProduct {
+                id: "2049187585".into(),
+                title: "Control Ultimate Edition".into(),
+                product_type: "game".into(),
+            })
+        );
+        assert!(
+            matches!(&hits[1], PickCandidate::GogProduct(p) if p.id == "1423049311"),
+            "{hits:?}"
+        );
+        assert!(parse_gog_catalog("not json").is_err());
+    }
+
+    #[test]
+    fn egs_offers_rank_base_games_first_and_carry_the_windows_build() {
+        let raw = r#"{"hits":[
+            {"title":"Control DLC","namespace":"calluna","offerType":"DLC","lastBuilds":[]},
+            {"title":"Control","namespace":"calluna","offerType":"BASE_GAME",
+             "lastBuilds":[{"appName":"CallunaMac","labelName":"Live","platform":"Mac"},
+                           {"appName":"Calluna","labelName":"Live","platform":"Windows"}]},
+            {"title":"Mystery","namespace":"mys","offerType":"BASE_GAME"}
+        ]}"#;
+        let hits = parse_egs_offers(raw).unwrap();
+        assert_eq!(hits.len(), 3);
+        let PickCandidate::EgsOffer(first) = &hits[0] else {
+            panic!("{hits:?}");
+        };
+        // BASE_GAME first, and the Windows build's App Name remembered —
+        // the capitalized Builds App Name, never the lowercase namespace.
+        assert_eq!(first.title, "Control");
+        assert_eq!(first.windows_app_name.as_deref(), Some("Calluna"));
+        let PickCandidate::EgsOffer(last) = &hits[2] else {
+            panic!("{hits:?}");
+        };
+        assert_eq!(last.offer_type, "DLC");
+        // No lastBuilds at all parses fine and offers the builds request.
+        let PickCandidate::EgsOffer(mystery) = &hits[1] else {
+            panic!("{hits:?}");
+        };
+        assert!(mystery.windows_app_name.is_none());
+    }
+
+    #[test]
+    fn egs_builds_parse_both_shapes_and_rank_live_windows_first() {
+        let bare = r#"[
+            {"appName":"CallunaMac","labelName":"Live","platform":"Mac"},
+            {"appName":"CallunaStaging","labelName":"Staging","platform":"Windows"},
+            {"appName":"Calluna","labelName":"Live","platform":"Windows"},
+            {"labelName":"Live","platform":"Windows"}
+        ]"#;
+        let hits = parse_egs_builds(bare).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(
+            hits[0],
+            PickCandidate::EgsBuild(EgsBuild {
+                app_name: "Calluna".into(),
+                label_name: "Live".into(),
+                platform: "Windows".into(),
+            })
+        );
+        // The same rows under a top-level key parse identically.
+        let wrapped = format!("{{\"elements\":{bare}}}");
+        assert_eq!(parse_egs_builds(&wrapped).unwrap(), hits);
+        assert!(parse_egs_builds("{\"total\":0}").is_err());
     }
 
     #[test]

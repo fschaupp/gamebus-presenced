@@ -82,6 +82,13 @@ pub struct Miss {
     /// [`Miss::effective_store`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_override: Option<String>,
+    /// The user's codename correction from the setup TUI (a Heroic library
+    /// pick or an online store lookup). `codename` stays the daemon's
+    /// observation; this override is annotation-half like `store_override`,
+    /// so a daemon write never reverts it. Everything downstream reads
+    /// [`Miss::effective_codename`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename_override: Option<String>,
     /// Set (to the date) when the user dismissed this entry in the setup
     /// TUI: not wrong, just not wanted - dropped from the exports and
     /// parked at the bottom of the list. Annotation-half rather than a
@@ -97,6 +104,14 @@ impl Miss {
     /// when present, else the daemon's guess.
     pub fn effective_store(&self) -> &str {
         self.store_override.as_deref().unwrap_or(&self.store)
+    }
+
+    /// The codename every lookup and export should use: the user's
+    /// correction when present, else the daemon's observation.
+    pub fn effective_codename(&self) -> Option<&str> {
+        self.codename_override
+            .as_deref()
+            .or(self.codename.as_deref())
     }
 }
 
@@ -252,6 +267,7 @@ impl UmuReport {
             drafted_id: None,
             possible_pr: None,
             store_override: None,
+            codename_override: None,
             dismissed: None,
         });
         entry.last_seen = today;
@@ -392,6 +408,7 @@ impl UmuReport {
                     ours.drafted_id = theirs.drafted_id;
                     ours.possible_pr = theirs.possible_pr;
                     ours.store_override = theirs.store_override;
+                    ours.codename_override = theirs.codename_override;
                     ours.dismissed = theirs.dismissed;
                 }
             }
@@ -935,6 +952,7 @@ mod tests {
                 basis: DraftBasis::SteamSku,
                 collision_checked: "2026-08-07".into(),
             });
+            m.codename_override = Some("Calluna".into());
         });
         setup.save();
 
@@ -960,6 +978,11 @@ mod tests {
             calluna.drafted_id.as_ref().map(|d| d.id.as_str()),
             Some("umu-870780"),
             "daemon write erased the drafted id"
+        );
+        assert_eq!(
+            calluna.codename_override.as_deref(),
+            Some("Calluna"),
+            "daemon write erased the codename override"
         );
         assert!(
             disk.contains_key("gog:1207600000"),
@@ -1001,6 +1024,9 @@ mod tests {
         assert!(m.verification.is_none());
         assert!(m.drafted_id.is_none());
         assert!(m.possible_pr.is_none());
+        assert!(m.codename_override.is_none());
+        // Without an override the effective codename is the daemon's own.
+        assert_eq!(m.effective_codename(), Some("Calluna"));
     }
 
     // ---- UmuDb parsing - every sample below is captured, not made up.

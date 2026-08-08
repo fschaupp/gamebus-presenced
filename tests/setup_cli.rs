@@ -435,6 +435,48 @@ fn gog_rows_without_a_gogdb_product_id_are_held_back() {
 }
 
 #[test]
+fn a_codename_override_reaches_the_export_and_passes_the_gog_gate() {
+    let home = TempHome::new("umu-codename-override");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    // Two annotated identities: a gog entry whose launcher-reported codename
+    // is name-shaped (held back on its own — see the gogdb-gate test) but
+    // whose override is the numeric product id, and an egs entry whose
+    // override replaces a wrong App Name. The daemon-owned codename field
+    // stays untouched in both; the export must use the overrides.
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        r#"{"gog:witchery":{"title":"Name Shaped","store":"gog","codename":"witchery",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "codename_override":"1423049311"},
+        "egs:WrongName":{"title":"Control","store":"egs","codename":"WrongName",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-08","last_seen":"2026-08-08",
+            "codename_override":"Calluna"}}"#,
+    )
+    .unwrap();
+
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Name Shaped,gog,1423049311,umu-FIXME,,,"),
+        "gog override missing or gate still held it back:\n{text}"
+    );
+    assert!(
+        text.contains("Control,egs,Calluna,umu-FIXME,,,"),
+        "egs override missing:\n{text}"
+    );
+    assert!(
+        !text.contains("witchery") && !text.contains("WrongName"),
+        "a launcher-reported codename leaked past its override:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(!err.contains("held back"), "{err}");
+}
+
+#[test]
 fn umu_misses_export_escapes_external_data_and_strips_paths() {
     let home = TempHome::new("umu-escape");
     let stash_dir = home.path().join(".local/share/gamebus-presenced");
