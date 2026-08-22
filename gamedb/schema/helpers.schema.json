@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/game-corrections/helpers.schema.json",
+  "title": "Shared helper executables",
+  "description": "Executables that ship beside many games and therefore can never identify one. Flattened at build time to shared-helpers.txt, one lowercase basename per line.",
+  "type": "object",
+  "required": ["helper"],
+  "additionalProperties": false,
+  "properties": {
+    "helper": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["exe", "reason", "seen"],
+        "additionalProperties": false,
+        "properties": {
+          "exe": {
+            "type": "string",
+            "pattern": "^[^/\\\\]+$",
+            "description": "Lowercase basename. Matched case-insensitively by consumers."
+          },
+          "reason": {"type": "string", "minLength": 1},
+          "incident": {
+            "type": "string",
+            "description": "The concrete mislabel that proved it, where one exists."
+          },
+          "seen": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        }
+      }
+    }
+  }
+}

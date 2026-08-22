@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/game-corrections/game.schema.json",
+  "title": "Game correction page",
+  "description": "One game, across every store it appears on. Applied to the parsed TOML of games/<slug>.toml; the file name is a human label, and the page's key is the canonical id in its gamedb field.",
+  "type": "object",
+  "required": [
+    "title"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The game's own capitalization, as the store or the game itself writes it."
+    },
+    "year": {
+      "type": "integer",
+      "minimum": 1970,
+      "maximum": 2100,
+      "description": "Release year. The standard way to tell two games apart that share a title, and the qualifier a file name uses when it has to carry one."
+    },
+    "gamedb": {
+      "type": "string",
+      "pattern": "^([a-z]+-[A-Za-z0-9._-]+|gamedb-[a-z0-9]*[a-z][a-z0-9]*)$",
+      "description": "This page's canonical id. Derived where an authority already names the game: steam-<appid>, then the umu id, then a store codename (gog-1660194629, egs-Calluna) taking stores in the order gog, egs, ubisoft, ea, battlenet, amazon, humble, itchio, zoomplatform. Minted as gamedb-<uid> only when nothing names it, and a minted id must contain a letter so it cannot be mistaken for an authority's number. The prefix names the namespace the identifier belongs to; a consumer reads the prefix, never the shape of what follows. Assigned once, from the precedence above, and then frozen: a page that later learns a better identifier records it in [ids] and keeps the id it already had."
+    },
+    "merged_from": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^([a-z]+-[A-Za-z0-9._-]+|gamedb-[a-z0-9]*[a-z][a-z0-9]*)$"
+      },
+      "description": "Ids this page absorbed, when two pages turned out to be one game. They stay reserved forever: never reused for a different game, and carried into the built artifacts as aliases so an old lookup still resolves."
+    },
+    "variant_of": {
+      "type": "string",
+      "pattern": "^([a-z]+-[A-Za-z0-9._-]+|gamedb-[a-z0-9]*[a-z][a-z0-9]*)$",
+      "description": "The base game's canonical id, when this page is a separately sold product with its own store identity (a remaster, a definitive edition). Editions that are only another SKU of the same game are store entries on ONE page, not a page of their own."
+    },
+    "note": {
+      "type": "string"
+    },
+    "ids": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "Identifiers in other people's namespaces, recorded as facts. None of them is this page's key: the canonical id is the gamedb field, taken from the precedence described there and frozen once assigned.",
+      "properties": {
+        "steam": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Steam app id."
+        },
+        "gog": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "GOG product id."
+        },
+        "umu": {
+          "type": "string",
+          "pattern": "^umu-[0-9a-zA-Z._-]+$",
+          "description": "Present only when the game IS in umu-database. A game umu declined has no umu id, and inventing one here would claim membership it does not have."
+        },
+        "source": {
+          "enum": [
+            "steam-sku",
+            "store-id",
+            "umu-database",
+            "manual"
+          ]
+        },
+        "seen": {
+          "$ref": "#/$defs/date"
+        }
+      },
+      "required": [
+        "source",
+        "seen"
+      ]
+    },
+    "exe": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[^/\\\\]+$"
+      },
+      "description": "Executable basenames that identify this game, for a page that has no store identity at all - a correction to somebody else's wrong row, say. This is the only case where nothing can be derived, and therefore the only case where a gamedb id is minted."
+    },
+    "stores": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Keyed by umu's own store spelling. Omitted only by a page identified purely by executable.",
+      "propertyNames": {
+        "enum": [
+          "steam",
+          "gog",
+          "egs",
+          "ubisoft",
+          "zoomplatform",
+          "humble",
+          "itchio",
+          "amazon",
+          "battlenet",
+          "ea",
+          "umu"
+        ]
+      },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "$ref": "#/$defs/storeEntry"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "storeEntry": {
+      "type": "object",
+      "required": [
+        "codename",
+        "seen",
+        "source",
+        "confidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "codename": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The launcher-facing product identifier: an Epic app name, a GOG product id, a Steam app id."
+        },
+        "exe": {
+          "type": "string",
+          "description": "Basename or path as observed. Recorded only where it was actually seen for THIS store's copy."
+        },
+        "seen": {
+          "$ref": "#/$defs/date"
+        },
+        "source": {
+          "enum": [
+            "heroic-config",
+            "heroic-library",
+            "lutris",
+            "detectable",
+            "gog-catalog",
+            "egdata",
+            "umu-database",
+            "manual"
+          ],
+          "description": "How this identity was learned."
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "note": {
+          "type": "string"
+        },
+        "edition": {
+          "type": "string",
+          "description": "Which edition this store product is, when a store sells more than one and they are the same game (Standard, Deluxe, Game of the Year)."
+        }
+      }
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "stores"
+      ]
+    },
+    {
+      "required": [
+        "exe"
+      ]
+    }
+  ]
+}

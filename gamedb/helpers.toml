@@ -1,0 +1,22 @@
+# Executables that ship beside many games and therefore can never identify
+# one. Consumers match these case-insensitively and return no name for them.
+
+[[helper]]
+exe = "unitycrashhandler.exe"
+reason = "Unity's crash handler ships beside every Unity game."
+seen = "2026-08-08"
+
+[[helper]]
+exe = "unitycrashhandler32.exe"
+reason = "Unity's crash handler ships beside every Unity game."
+seen = "2026-08-08"
+
+[[helper]]
+exe = "unitycrashhandler64.exe"
+reason = "Unity's crash handler ships beside every Unity game."
+incident = """
+Project Hospital, installed through Heroic from GOG, resolved \
+UnityCrashHandler64.exe and was named "Spellcraft" at high confidence: the \
+only entry in all 23,900 rows of Discord's detectable list carrying that \
+helper is a staging build of that unrelated game."""
+seen = "2026-08-08"
