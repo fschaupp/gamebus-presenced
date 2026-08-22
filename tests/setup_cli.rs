@@ -64,11 +64,31 @@ fn run_env(home: &TempHome, args: &[&str], envs: &[(&str, &str)]) -> Output {
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("GAMEBUS_UMU_DB")
-        .env_remove("GAMEBUS_UMU_API");
+        .env_remove("GAMEBUS_UMU_API")
+        .env_remove("GAMEBUS_UMU_PROTONFIXES");
     for (k, v) in envs {
         cmd.env(k, v);
     }
     cmd.output().expect("failed to run gamebus-setup")
+}
+
+/// Annotate a stash fixture entry the way `--verify` does for a game that
+/// needs umu: a collision-checked id, plus the protonfix that justifies a
+/// database row at all. Upstream only wants games that require a fix in
+/// Proton, so an export fixture without this is held back — which is what
+/// the fixtures that omit it are there to prove.
+fn needs_umu(stash: &str, key: &str, id: &str) -> String {
+    let anchor = format!("\"{key}\":{{");
+    let annotations = format!(
+        "\"drafted_id\":{{\"id\":\"{id}\",\"basis\":\"steam-sku\",\
+           \"collision_checked\":\"2026-08-22\"}},\
+         \"fix\":{{\"umu_id\":\"{id}\",\"fixes\":[\"gamefixes-steam/{n}.py\"],\
+           \"checked\":\"2026-08-22\"}},",
+        n = id.trim_start_matches("umu-")
+    );
+    let annotated = stash.replacen(&anchor, &format!("{anchor}{annotations}"), 1);
+    assert_ne!(annotated, stash, "no stash entry keyed {key}");
+    annotated
 }
 
 fn stdout(out: &Output) -> String {
@@ -240,12 +260,21 @@ fn umu_misses_lists_and_exports_the_stash() {
     let home = TempHome::new("umu-misses");
     let stash_dir = home.path().join(".local/share/gamebus-presenced");
     std::fs::create_dir_all(&stash_dir).unwrap();
-    std::fs::write(
-        stash_dir.join("umu-misses.json"),
-        r#"{"egs:Calluna":{"title":"Control","store":"egs","codename":"Calluna",
+    // Two verified entries: Control runs under Proton without a protonfix,
+    // so upstream does not want a row for it; Fixture Quest needs one. Both
+    // stay in the review list — only the export tells them apart.
+    let stash = r#"{"egs:Calluna":{"title":"Control","store":"egs","codename":"Calluna",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "executable":"Control_DX12.exe","first_seen":"2026-08-06",
-            "last_seen":"2026-08-07"}}"#,
+            "last_seen":"2026-08-07",
+            "drafted_id":{"id":"umu-870780","basis":"steam-sku","collision_checked":"2026-08-22"},
+            "fix":{"umu_id":"umu-870780","fixes":[],"checked":"2026-08-22"}},
+        "egs:Catnip":{"title":"Fixture Quest","store":"egs","codename":"Catnip",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-06","last_seen":"2026-08-07"}}"#;
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        needs_umu(stash, "egs:Catnip", "umu-397540"),
     )
     .unwrap();
 
@@ -255,16 +284,29 @@ fn umu_misses_lists_and_exports_the_stash() {
     for expected in ["Control", "egs", "Calluna", "high", "heroic-config"] {
         assert!(text.contains(expected), "list missing {expected}:\n{text}");
     }
+    assert!(
+        text.contains("no protonfix for umu-870780"),
+        "the list hides that Control needs no entry:\n{text}"
+    );
 
     let export = run(&home, &["umu-misses", "--export"]);
     assert!(export.status.success());
     let text = stdout(&export);
-    // Submission-shaped: the database's own header and a review placeholder
-    // for the id (umu-<Steam appid> is the reviewer's call).
+    // Submission-shaped: the database's own header, and only the game that
+    // actually needs umu.
     assert!(text.contains("TITLE,STORE,CODENAME,UMU_ID"), "{text}");
     assert!(
-        text.contains("Control,egs,Calluna,umu-FIXME,,,"),
+        text.contains("Fixture Quest,egs,Catnip,umu-397540,,,"),
         "export row malformed:\n{text}"
+    );
+    assert!(
+        !text.contains("Control,egs,Calluna"),
+        "a game that needs no protonfix reached the submission:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(
+        err.contains("Control") && err.contains("no protonfix"),
+        "hold-back reason missing the scope rule:\n{err}"
     );
 }
 
@@ -299,15 +341,28 @@ fn write_s9b_fixtures(home: &TempHome) -> PathBuf {
     db
 }
 
+/// The protonfix list a verification run reads: both fixture games need a
+/// fix, so both belong in the database. Steam files are named by the bare
+/// appid, every other id by itself — the two shapes upstream uses.
+const S9B_FIXES: &str = concat!(
+    "gamefixes-steam/397540.py\n",
+    "gamefixes-umu/umu-zzzfixturequest.py\n",
+);
+
 #[test]
 fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     let home = TempHome::new("umu-verify");
     let db = write_s9b_fixtures(&home);
+    let fixes = home.path().join("protonfixes.txt");
+    std::fs::write(&fixes, S9B_FIXES).unwrap();
 
     let out = run_env(
         &home,
         &["umu-misses", "--verify", "--db", db.to_str().unwrap()],
-        &[CLOSED_PORT_API],
+        &[
+            CLOSED_PORT_API,
+            ("GAMEBUS_UMU_PROTONFIXES", fixes.to_str().unwrap()),
+        ],
     );
     assert!(out.status.success(), "verify failed: {out:?}");
     let text = stdout(&out);
@@ -320,6 +375,16 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     assert!(text.contains("umu-397540"), "{text}");
     // Confirmed missing → a collision-checked title-slug draft.
     assert!(text.contains("drafted umu-zzzfixturequest"), "{text}");
+    // And the scope rule: both games have a protonfix, so both are worth
+    // submitting — the summary names the fix that says so.
+    assert!(
+        text.contains("needs umu: protonfix gamefixes-steam/397540.py"),
+        "{text}"
+    );
+    assert!(
+        text.contains("needs umu: protonfix gamefixes-umu/umu-zzzfixturequest.py"),
+        "{text}"
+    );
 
     // The verdicts persisted into the stash.
     let stash = std::fs::read_to_string(
@@ -333,6 +398,7 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
         "confirmed-missing",
         "umu-zzzfixturequest",
         "title-slug",
+        "gamefixes-steam/397540.py",
     ] {
         assert!(
             stash.contains(expected),
@@ -369,6 +435,12 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     assert!(text.contains("## Evidence"), "{text}");
     assert!(text.contains("## Checklist"), "{text}");
     assert!(text.contains("collision-checked"), "{text}");
+    // Every row states the fix that earns it a place in the database.
+    assert!(text.contains("already has a protonfix"), "{text}");
+    assert!(
+        text.contains("fix: [`gamefixes-steam/397540.py`](https://github.com/"),
+        "the evidence does not link the fix:\n{text}"
+    );
     // One row is a title-slug draft — nothing proves that game is absent
     // from Steam, so the Steam-rule box must stay for the human.
     assert!(
@@ -405,14 +477,18 @@ fn gog_rows_without_a_gogdb_product_id_are_held_back() {
     // The database's GOG rule: codename = numeric gogdb.org product id.
     // Heroic GOG launches carry exactly that; a name-shaped codename means
     // somebody has to look the id up before this row may be submitted.
-    std::fs::write(
-        stash_dir.join("umu-misses.json"),
-        r#"{"gog:1423049311":{"title":"Numeric Fine","store":"gog","codename":"1423049311",
+    let stash = r#"{"gog:1423049311":{"title":"Numeric Fine","store":"gog","codename":"1423049311",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "first_seen":"2026-08-08","last_seen":"2026-08-08"},
         "gog:witchery":{"title":"Name Shaped","store":"gog","codename":"witchery",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
-            "first_seen":"2026-08-08","last_seen":"2026-08-08"}}"#,
+            "first_seen":"2026-08-08","last_seen":"2026-08-08"}}"#;
+    // Both games need umu, so the codename rule is the only thing that can
+    // hold one back.
+    let stash = needs_umu(stash, "gog:1423049311", "umu-1000001");
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        needs_umu(&stash, "gog:witchery", "umu-1000002"),
     )
     .unwrap();
 
@@ -420,7 +496,7 @@ fn gog_rows_without_a_gogdb_product_id_are_held_back() {
     assert!(export.status.success());
     let text = stdout(&export);
     assert!(
-        text.contains("Numeric Fine,gog,1423049311,umu-FIXME,,,"),
+        text.contains("Numeric Fine,gog,1423049311,umu-1000001,,,"),
         "{text}"
     );
     assert!(
@@ -444,16 +520,18 @@ fn a_codename_override_reaches_the_export_and_passes_the_gog_gate() {
     // whose override is the numeric product id, and an egs entry whose
     // override replaces a wrong App Name. The daemon-owned codename field
     // stays untouched in both; the export must use the overrides.
-    std::fs::write(
-        stash_dir.join("umu-misses.json"),
-        r#"{"gog:witchery":{"title":"Name Shaped","store":"gog","codename":"witchery",
+    let stash = r#"{"gog:witchery":{"title":"Name Shaped","store":"gog","codename":"witchery",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "first_seen":"2026-08-08","last_seen":"2026-08-08",
             "codename_override":"1423049311"},
         "egs:WrongName":{"title":"Control","store":"egs","codename":"WrongName",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "first_seen":"2026-08-08","last_seen":"2026-08-08",
-            "codename_override":"Calluna"}}"#,
+            "codename_override":"Calluna"}}"#;
+    let stash = needs_umu(stash, "gog:witchery", "umu-1000001");
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        needs_umu(&stash, "egs:WrongName", "umu-1000002"),
     )
     .unwrap();
 
@@ -461,11 +539,11 @@ fn a_codename_override_reaches_the_export_and_passes_the_gog_gate() {
     assert!(export.status.success());
     let text = stdout(&export);
     assert!(
-        text.contains("Name Shaped,gog,1423049311,umu-FIXME,,,"),
+        text.contains("Name Shaped,gog,1423049311,umu-1000001,,,"),
         "gog override missing or gate still held it back:\n{text}"
     );
     assert!(
-        text.contains("Control,egs,Calluna,umu-FIXME,,,"),
+        text.contains("Control,egs,Calluna,umu-1000002,,,"),
         "egs override missing:\n{text}"
     );
     assert!(
@@ -485,9 +563,7 @@ fn a_title_override_reaches_the_export_and_counts_as_confident() {
     // at high confidence, and a second entry whose resolver only managed a
     // low-confidence stem. Both carry the user's correction — the export
     // must use it, and the correction alone must pass the confidence gate.
-    std::fs::write(
-        stash_dir.join("umu-misses.json"),
-        r#"{"gog:1660194629":{"title":"Spellcraft","store":"gog","codename":"1660194629",
+    let stash = r#"{"gog:1660194629":{"title":"Spellcraft","store":"gog","codename":"1660194629",
             "umu_id":"umu-0","title_source":"detectable","confidence":"high",
             "executable":"UnityCrashHandler64.exe",
             "first_seen":"2026-08-08","last_seen":"2026-08-08",
@@ -495,7 +571,11 @@ fn a_title_override_reaches_the_export_and_counts_as_confident() {
         "egs:Stemmed":{"title":"stemmed","store":"egs","codename":"Stemmed",
             "umu_id":"umu-0","title_source":"stem","confidence":"low",
             "first_seen":"2026-08-08","last_seen":"2026-08-08",
-            "title_override":"The Real Title"}}"#,
+            "title_override":"The Real Title"}}"#;
+    let stash = needs_umu(stash, "gog:1660194629", "umu-1000001");
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        needs_umu(&stash, "egs:Stemmed", "umu-1000002"),
     )
     .unwrap();
 
@@ -503,11 +583,11 @@ fn a_title_override_reaches_the_export_and_counts_as_confident() {
     assert!(export.status.success());
     let text = stdout(&export);
     assert!(
-        text.contains("Project Hospital,gog,1660194629,umu-FIXME,,,"),
+        text.contains("Project Hospital,gog,1660194629,umu-1000001,,,"),
         "overridden title missing from the row:\n{text}"
     );
     assert!(
-        text.contains("The Real Title,egs,Stemmed,umu-FIXME,,,"),
+        text.contains("The Real Title,egs,Stemmed,umu-1000002,,,"),
         "a title override did not pass the confidence gate:\n{text}"
     );
     assert!(
@@ -540,12 +620,13 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
     // comma in it must not shift the CSV columns (that would forge the
     // UMU_ID cell). The executable is an absolute path with the username in
     // it — only the basename may reach a public submission.
-    std::fs::write(
-        stash_dir.join("umu-misses.json"),
-        r#"{"egs:evil":{"title":"Bad Game","store":"egs","codename":"Evil,umu-hijack,x",
+    let stash = r#"{"egs:evil":{"title":"Bad Game","store":"egs","codename":"Evil,umu-hijack,x",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "executable":"/home/private-user/Games/Heroic/Bad Game/Game.exe",
-            "first_seen":"2026-08-07","last_seen":"2026-08-07"}}"#,
+            "first_seen":"2026-08-07","last_seen":"2026-08-07"}}"#;
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        needs_umu(stash, "egs:evil", "umu-1000001"),
     )
     .unwrap();
 
@@ -553,7 +634,7 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
     assert!(export.status.success());
     let text = stdout(&export);
     assert!(
-        text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-FIXME,,,Game.exe"#),
+        text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-1000001,,,Game.exe"#),
         "codename not escaped — columns shifted:\n{text}"
     );
     assert!(
@@ -596,15 +677,17 @@ fn dismissed_entries_stay_in_the_stash_but_out_of_the_exports() {
     let home = TempHome::new("umu-dismissed");
     let stash_dir = home.path().join(".local/share/gamebus-presenced");
     std::fs::create_dir_all(&stash_dir).unwrap();
-    std::fs::write(
-        stash_dir.join("umu-misses.json"),
-        r#"{"egs:Keep":{"title":"Keep Me","store":"egs","codename":"Keep",
+    let stash = r#"{"egs:Keep":{"title":"Keep Me","store":"egs","codename":"Keep",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "first_seen":"2026-08-07","last_seen":"2026-08-07"},
         "egs:Skip":{"title":"Skip Me","store":"egs","codename":"Skip",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "first_seen":"2026-08-07","last_seen":"2026-08-07",
-            "dismissed":"2026-08-07"}}"#,
+            "dismissed":"2026-08-07"}}"#;
+    let stash = needs_umu(stash, "egs:Keep", "umu-1000001");
+    std::fs::write(
+        stash_dir.join("umu-misses.json"),
+        needs_umu(&stash, "egs:Skip", "umu-1000002"),
     )
     .unwrap();
 

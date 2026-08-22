@@ -28,6 +28,11 @@ pub struct Endpoints {
     pub umu_repository: String,
     /// Its open merge requests (GitHub API), for `--check-prs`.
     pub umu_open_prs: String,
+    /// The protonfixes repository's file list (GitHub API, one request):
+    /// which games need umu at all, and so which entries the database wants.
+    pub umu_protonfixes_tree: String,
+    /// One protonfix file's page, for the merge request's evidence lines.
+    pub umu_protonfixes_file: String,
     /// GOG's public catalog search (the misses pane's `o` lookup).
     pub gog_catalog: String,
     /// GOG's products API root: `<product>/<id>` answers with the store's
@@ -69,6 +74,8 @@ impl Endpoints {
             umu_api: get("umu.api"),
             umu_repository: get("umu.repository"),
             umu_open_prs: get("umu.open_prs"),
+            umu_protonfixes_tree: get("umu.protonfixes_tree"),
+            umu_protonfixes_file: get("umu.protonfixes_file"),
             gog_catalog: get("gog.catalog"),
             gog_product: get("gog.product"),
             gog_gogdb_product: get("gog.gogdb_product"),
@@ -148,6 +155,8 @@ mod tests {
             "umu.api",
             "umu.repository",
             "umu.open_prs",
+            "umu.protonfixes_tree",
+            "umu.protonfixes_file",
             "gog.catalog",
             "gog.product",
             "gog.gogdb_product",

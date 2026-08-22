@@ -6,12 +6,15 @@ use serde::Deserialize;
 
 use crate::naming::NamingDb;
 use crate::umu_report::{
-    self, draft_umu_id, DraftOutcome, DraftedId, Miss, UmuDb, UmuReport, Verification,
+    self, draft_umu_id, DraftOutcome, DraftedId, FixCheck, Miss, UmuDb, UmuReport, Verification,
     VerificationState,
 };
 
 use super::export::csv_field;
-use super::{api_base, basis_label, endpoints, plural_y, urlencode, HTTP_TIMEOUT, USER_AGENT};
+use super::fixes;
+use super::{
+    api_base, basis_label, endpoints, plural_y, scope_line, urlencode, HTTP_TIMEOUT, USER_AGENT,
+};
 
 /// `--fetch`: one request to the bare API endpoint (the full dump), validated
 /// by parsing before it replaces the cache. Atomic, like every write here.
@@ -44,6 +47,16 @@ struct Verdict {
     umu_id: Option<String>,
     note: Option<String>,
     drafted: Option<DraftedId>,
+}
+
+/// The umu id a submission for this entry would carry — the database's own
+/// (verified or cross-store) or the drafted one. Without an id there is
+/// nothing to look a protonfix up under.
+fn scope_id(verdict: &Verdict) -> Option<String> {
+    verdict
+        .umu_id
+        .clone()
+        .or_else(|| verdict.drafted.as_ref().map(|d| d.id.clone()))
 }
 
 /// Returns the human-readable summary as lines rather than printing: the
@@ -182,8 +195,37 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
         }
     }
 
+    // Does the game need umu at all? The database takes entries for games
+    // that require a fix in Proton and says so in its opening paragraph, so
+    // an entry without a fix upstream is one the maintainers do not want.
+    // Unreachable list: say so and leave every earlier verdict standing —
+    // "unchecked" and "runs fine" are not the same claim.
+    let fix_list = match fixes::load_for_verify() {
+        Ok(list) => {
+            lines.push(format!(
+                "Read the protonfix list: {} game{} need umu's help.",
+                list.len(),
+                if list.len() == 1 { "" } else { "s" }
+            ));
+            Some(list)
+        }
+        Err(e) => {
+            lines.push(format!(
+                "Could not read the protonfix list ({e}) - whether these games need umu stays unchecked."
+            ));
+            None
+        }
+    };
+
     // Single write-back, then the human-readable summary.
     for (key, verdict) in &verdicts {
+        let scope = fix_list.as_ref().map(|list| {
+            scope_id(verdict).map(|id| FixCheck {
+                fixes: list.fixes_for(&id).to_vec(),
+                umu_id: id,
+                checked: today.clone(),
+            })
+        });
         report.update(key, |m| {
             m.verification = Some(Verification {
                 state: verdict.state,
@@ -192,6 +234,11 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
                 note: verdict.note.clone(),
             });
             m.drafted_id = verdict.drafted.clone();
+            // An id that changed since the last run makes the old check
+            // meaningless; so does losing the id entirely.
+            if let Some(scope) = &scope {
+                m.fix = scope.clone();
+            }
         });
     }
     report.save();
@@ -223,6 +270,9 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
         lines.push(format!("  {title:<28} {line}"));
         if let Some(note) = &verdict.note {
             lines.push(format!("  {:<28} note: {note}", ""));
+        }
+        if let Some(scope) = scope_line(m) {
+            lines.push(format!("  {:<28} {scope}", ""));
         }
     }
     Ok(lines)
@@ -454,6 +504,7 @@ mod tests {
             verification: None,
             drafted_id: None,
             possible_pr: None,
+            fix: None,
             store_override: None,
             codename_override: None,
             title_override: None,

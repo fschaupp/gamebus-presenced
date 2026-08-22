@@ -22,6 +22,10 @@ struct SubmissionRow<'a> {
     /// detectable.json Steam sku. Slug/codename drafts only prove Discord's
     /// file had no entry — NOT that the game is absent from Steam.
     steam_rule_certain: bool,
+    /// The protonfixes this row's id is served by — why the entry belongs in
+    /// the database at all. Never empty: a game that runs out of the box is
+    /// held back before it becomes a row.
+    fixes: &'a [String],
 }
 
 /// Split the stash into rows worth submitting and entries listed after the
@@ -84,6 +88,51 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             ),
             _ => ("umu-FIXME".to_string(), None, false),
         };
+        // The database's scope rule, straight from its opening paragraph:
+        // it collects games that require fixes in Proton, and games that run
+        // out of the box "have no need be added". A row for a game with no
+        // protonfix is review work for the maintainers and nothing for the
+        // player, so it never reaches the submission.
+        if umu_id == "umu-FIXME" {
+            held.push((
+                m,
+                "no id could be drafted, so there is nothing to look a protonfix up under"
+                    .to_string(),
+            ));
+            continue;
+        }
+        let Some(scope) = m
+            .fix
+            .as_ref()
+            .filter(|f| f.umu_id.eq_ignore_ascii_case(&umu_id))
+        else {
+            held.push((
+                m,
+                format!("whether {umu_id} needs a protonfix is unchecked - run --verify (network)"),
+            ));
+            continue;
+        };
+        if !scope.has_fix() {
+            // Same distinction the review list draws: a firm id proves the
+            // game runs without umu's help, a guessed one only means we
+            // could not show that it needs any.
+            held.push((
+                m,
+                match super::id_is_firm(m) {
+                    true => format!(
+                        "no protonfix for {umu_id} - the game runs out of the box, and the \
+                         database only wants games that need a fix (checked {})",
+                        scope.checked
+                    ),
+                    false => format!(
+                        "no protonfix for {umu_id}, and that id is our own guess - nothing \
+                         shows this game needs umu (checked {})",
+                        scope.checked
+                    ),
+                },
+            ));
+            continue;
+        }
         let codename = if m.effective_store() == "none" {
             "none".to_string()
         } else {
@@ -113,6 +162,7 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             id_provenance,
             codename,
             steam_rule_certain,
+            fixes: &scope.fixes,
         });
     }
     (rows, held)
@@ -154,7 +204,9 @@ pub(super) fn export_csv(report: &UmuReport) {
     let (rows, held) = partition(report);
     println!("# umu-database submission draft - review before submitting!");
     println!("# Rules: {}#readme", endpoints().umu_repository);
-    println!("# umu-FIXME means no id could be drafted safely - resolve by hand.");
+    println!(
+        "# Only games with an upstream protonfix are listed - the database takes games that need a fix."
+    );
     println!("{CSV_HEADER}");
     for row in &rows {
         println!("{}", csv_line(row));
@@ -176,10 +228,21 @@ pub(super) fn export_markdown(
 ) -> Result<(), String> {
     let (rows, held) = partition(report);
     if rows.is_empty() {
-        return Err("Nothing to export: no verified, submission-ready entries. Run --verify first, or check the held-back reasons in --export.".into());
+        // The common case now that the scope rule is enforced: every game
+        // ran fine. That is a result, not a failure — say which it was.
+        let out_of_scope = held
+            .iter()
+            .filter(|(_, reason)| reason.contains("protonfix"))
+            .count();
+        return Err(match out_of_scope {
+            0 => "Nothing to export: no verified, submission-ready entries. Run --verify first, or check the held-back reasons in --export.".to_string(),
+            n => format!(
+                "Nothing to export: {n} of {} entries need no protonfix, so the database does not want them - it collects games that require a fix in Proton. The rest is in --export's held-back list.",
+                held.len()
+            ),
+        });
     }
     let titles: Vec<&str> = rows.iter().map(|r| r.title).collect();
-    let all_checked = rows.iter().all(|r| r.umu_id != "umu-FIXME");
     // Only tick the Steam rule when every id provably honors it; a slug or
     // codename draft leaves "is this on Steam?" a genuinely open question
     // for the human submitter.
@@ -193,9 +256,11 @@ pub(super) fn export_markdown(
         titles.join(", ")
     ));
     md.push_str(&format!(
-        "These games launch through umu with `GAMEID=umu-0` (no database entry). \
-         [gamebus-presenced]({}) resolved their titles on a live system from the \
-         launchers' own install records; per-entry evidence below.\n\n",
+        "Each game below already has a protonfix, and these store copies launch \
+         through umu with `GAMEID=umu-0`, so the fix never reaches them. The rows \
+         map each copy onto the id its fix is filed under. \
+         [gamebus-presenced]({}) resolved the titles on a live system from the \
+         launchers' own install records; per-entry evidence, fix included, below.\n\n",
         "https://github.com/fschaupp/gamebus-presenced"
     ));
     md.push_str("Rows for `umu-database.csv`:\n\n```csv\n");
@@ -227,8 +292,17 @@ pub(super) fn export_markdown(
             .and_then(|v| v.note.as_deref())
             .map(|n| format!("; {n}"))
             .unwrap_or_default();
+        // The fix is the reason the row exists, so it is stated per entry
+        // and linked: a reviewer can see in one click that this game needs
+        // umu and that the id is the one its fix is filed under.
+        let fix_refs = row
+            .fixes
+            .iter()
+            .map(|p| format!("[`{p}`]({})", super::fixes::fix_url(p)))
+            .collect::<Vec<_>>()
+            .join(", ");
         md.push_str(&format!(
-            "- **{}** - store `{store}`, codename `{}`{codename_ref}{}; {}; {}{advisory}.\n",
+            "- **{}** - store `{store}`, codename `{}`{codename_ref}{}; {}; {}{advisory}; fix: {fix_refs}.\n",
             row.title,
             row.codename,
             m.executable
@@ -238,7 +312,7 @@ pub(super) fn export_markdown(
             title_provenance(m),
             row.id_provenance
                 .as_deref()
-                .unwrap_or("id left as umu-FIXME - needs a human"),
+                .unwrap_or("id carried over from the database"),
         ));
     }
     md.push_str("\n## Checklist\n\n");
@@ -250,10 +324,6 @@ pub(super) fn export_markdown(
     md.push_str(&format!(
         "- [{}] Every id follows the database rules (Steam appid when the game is on Steam)\n",
         if steam_rule { 'x' } else { ' ' }
-    ));
-    md.push_str(&format!(
-        "- [{}] Drafted ids collision-checked against the full database\n",
-        if all_checked { 'x' } else { ' ' }
     ));
     md.push_str(
         "- [x] Non-Steam ids contain a letter (a numeric id would be parsed as a SteamAppId)\n",
@@ -336,10 +406,124 @@ pub(super) fn csv_field(v: &str) -> String {
 mod tests {
     use super::super::pick_report;
     use super::*;
+    use crate::umu_report::{DraftedId, FixCheck, UmuReport};
+
+    /// A drafted id plus the protonfix that justifies submitting it — the
+    /// state an entry reaches after `--verify` when the game does need umu.
+    fn in_scope(report: &mut UmuReport, key: &str, id: &str) {
+        report.update(key, |m| {
+            m.drafted_id = Some(DraftedId {
+                id: id.to_string(),
+                basis: DraftBasis::SteamSku,
+                collision_checked: "2026-08-22".into(),
+            });
+            m.fix = Some(FixCheck {
+                umu_id: id.to_string(),
+                fixes: vec![format!(
+                    "gamefixes-steam/{}.py",
+                    id.trim_start_matches("umu-")
+                )],
+                checked: "2026-08-22".into(),
+            });
+        });
+    }
+
+    #[test]
+    fn only_games_that_need_a_protonfix_are_submitted() {
+        // The upstream rule: the database collects games that require fixes
+        // in Proton. A game that runs out of the box is held back with that
+        // reason, however well-resolved and collision-checked its id is.
+        let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
+        let (rows, held) = partition(&report);
+        assert_eq!(rows.len(), 1, "a game with a fix belongs in the submission");
+        assert_eq!(rows[0].fixes, ["gamefixes-steam/397540.py"]);
+        assert!(held.is_empty());
+
+        report.update(&key, |m| {
+            m.fix.as_mut().expect("set above").fixes.clear();
+        });
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty(), "a game with no protonfix reached a row");
+        assert!(held[0].1.contains("no protonfix"), "{}", held[0].1);
+        assert!(held[0].1.contains("runs out of the box"), "{}", held[0].1);
+    }
+
+    #[test]
+    fn a_missing_fix_under_a_guessed_id_claims_less_than_one_under_a_real_id() {
+        // A Steam-sku draft is the id the database itself would assign, so
+        // "no fix for it" really does mean the game runs out of the box.
+        let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
+        report.update(&key, |m| m.fix.as_mut().expect("set above").fixes.clear());
+        let (_, held) = partition(&report);
+        assert!(held[0].1.contains("runs out of the box"), "{}", held[0].1);
+
+        // A made-up slug proves nothing about Steam: a fix could sit under
+        // an appid we never learned, so the reason must not claim otherwise.
+        report.update(&key, |m| {
+            m.drafted_id.as_mut().expect("set above").basis = DraftBasis::TitleSlug;
+        });
+        let (_, held) = partition(&report);
+        assert!(held[0].1.contains("our own guess"), "{}", held[0].1);
+        assert!(!held[0].1.contains("runs out of the box"), "{}", held[0].1);
+    }
+
+    #[test]
+    fn an_unchecked_or_stale_scope_is_never_read_as_in_scope() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
+        // Never verified against the fix list: unchecked is not "runs fine",
+        // and it is not "needs umu" either — nothing gets submitted on it.
+        report.update(&key, |m| m.fix = None);
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty());
+        assert!(held[0].1.contains("unchecked"), "{}", held[0].1);
+
+        // A check against a different id (the user assigned a new one since)
+        // says nothing about the id this row would carry.
+        in_scope(&mut report, &key, "umu-397540");
+        report.update(&key, |m| {
+            m.fix.as_mut().expect("set above").umu_id = "umu-somethingelse".into();
+        });
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty());
+        assert!(held[0].1.contains("unchecked"), "{}", held[0].1);
+    }
+
+    #[test]
+    fn an_entry_without_an_id_has_nothing_to_check_a_fix_against() {
+        let (report, _) = pick_report("egs", "Catnip");
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty());
+        assert!(
+            held[0].1.contains("no id could be drafted"),
+            "{}",
+            held[0].1
+        );
+    }
+
+    #[test]
+    fn the_merge_request_names_the_fix_that_justifies_each_row() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
+        let dir = std::env::temp_dir().join(format!("gamebus-md-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("mr.md");
+        export_markdown(&report, Some(&file)).expect("one in-scope row");
+        let md = std::fs::read_to_string(&file).expect("written");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(md.contains("already has a protonfix"), "{md}");
+        assert!(
+            md.contains("fix: [`gamefixes-steam/397540.py`](https://github.com/"),
+            "{md}"
+        );
+    }
 
     #[test]
     fn the_export_partition_uses_the_override_and_its_gog_gate_passes() {
         let (mut report, key) = pick_report("gog", "witchery");
+        in_scope(&mut report, &key, "umu-397540");
         // Name-shaped launcher codename: held back by the gogdb rule…
         let (rows, held) = partition(&report);
         assert!(rows.is_empty(), "non-numeric gog codename reached a row");
@@ -354,6 +538,7 @@ mod tests {
     #[test]
     fn a_title_override_is_confident_and_reaches_the_row() {
         let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
         // Downgrade to the resolver's weakest word: held back…
         report.update(&key, |m| {
             m.title = Some("Spellcraft".into());

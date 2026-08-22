@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::super::umu_misses::{basis_label, confidence_label, PickCandidate};
+use super::super::umu_misses::{basis_label, confidence_label, scope_line, PickCandidate};
 use super::{field, App};
 use crate::umu_report::{Miss, VerificationState};
 
@@ -25,6 +25,9 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             (collision-checked), p picks a match from the local database or\n\
             your Heroic library, and o looks the title up at its store\n\
             (network).\n\
+            Correcting an entry here is what the daemon reads; submitting is\n\
+            a separate, rarer thing: the umu database collects games that\n\
+            need a fix in Proton, so only those reach an export.\n\
             Export a submission from the shell (to stdout, or to a file if\n\
             you name one):\n\n\
             \u{20}   gamebus-setup umu-misses --export-md [file]";
@@ -212,6 +215,20 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         }
         None => detail.push(field("Verified", "not yet — press v to fetch + verify")),
     }
+    if let Some(scope) = scope_line(m) {
+        // Whether upstream wants the entry at all outranks the id details:
+        // a game that runs without a protonfix is nothing to submit, however
+        // well its id checks out.
+        let color = if m.fix.as_ref().is_some_and(|f| f.has_fix()) {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
+        detail.push(Line::from(vec![
+            Span::styled(format!("{:<11} ", "Needs umu"), Style::default().fg(color)),
+            Span::styled(scope, Style::default().fg(color)),
+        ]));
+    }
     if let Some(d) = &m.drafted_id {
         detail.push(field(
             "Drafted id",
@@ -335,6 +352,12 @@ fn miss_state(m: &Miss) -> (&'static str, Style) {
     }
     if m.possible_pr.is_some() {
         return ("↷", Style::default().fg(Color::Magenta));
+    }
+    // A game that needs no protonfix is out of the database's scope whatever
+    // the verification says — the list should not promise a submission the
+    // export will hold back.
+    if m.fix.as_ref().is_some_and(|f| !f.has_fix()) {
+        return ("○", Style::default().fg(Color::DarkGray));
     }
     match &m.verification {
         Some(v) => match v.state {
