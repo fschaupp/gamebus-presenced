@@ -30,6 +30,16 @@ repository = "https://github.com/Open-Wine-Components/umu-database"
 # the opt-in --check-prs duplicate scan.
 open_prs = "https://api.github.com/repos/Open-Wine-Components/umu-database/pulls?state=open"
 
+# The protonfixes repository's file list, in one request. Its gamefixes-*
+# directories hold one file per fix, named by the umu id it serves — which
+# is how --verify tells a game that needs umu from one that runs fine. The
+# database only wants the former.
+protonfixes_tree = "https://api.github.com/repos/Open-Wine-Components/umu-protonfixes/git/trees/master?recursive=1"
+
+# Where a single fix file can be read, for the merge request's evidence:
+# <protonfixes_file>/gamefixes-steam/870780.py
+protonfixes_file = "https://github.com/Open-Wine-Components/umu-protonfixes/blob/master"
+
 [gog]
 # GOG's public catalog search — the misses pane's one-shot online lookup
 # (`o`) for gog entries. Queried as ?limit=10&query=like:<title>&…; the

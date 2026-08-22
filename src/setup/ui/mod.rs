@@ -1521,6 +1521,7 @@ mod tests {
                 verification: None,
                 drafted_id: None,
                 possible_pr: None,
+                fix: None,
                 store_override: None,
                 codename_override: None,
                 title_override: None,

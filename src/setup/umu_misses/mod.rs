@@ -10,9 +10,12 @@
 //!   (`--db`, `GAMEBUS_UMU_DB`, or the cached full dump), then the public
 //!   API for whatever the local copy did not settle. Entries confirmed
 //!   missing get a umu id drafted per the database's own rules, and every
-//!   draft is collision-checked — no exceptions.
-//! - `--fetch`: refresh the cached full dump. One request, only when asked.
-//! - `--export`: submission-shaped CSV on stdout.
+//!   draft is collision-checked — no exceptions. Each entry is also checked
+//!   against the protonfix list: the database collects games that need a fix
+//!   in Proton, so a game that runs out of the box is not a gap to submit.
+//! - `--fetch`: refresh the cached full dump and the protonfix list. One
+//!   request each, only when asked.
+//! - `--export`: submission-shaped CSV on stdout — the games that need umu.
 //! - `--export-md [file]`: a slim, ready-to-paste merge-request text —
 //!   written to the file, or to stdout when none is given.
 //! - `--check-prs`: best-effort scan of open upstream merge requests for
@@ -26,6 +29,7 @@ use crate::endpoints::Endpoints;
 use crate::umu_report::{Confidence, DraftBasis, Miss, UmuDb, UmuReport, VerificationState};
 
 mod export;
+mod fixes;
 mod online;
 mod tui;
 mod verify;
@@ -70,6 +74,13 @@ pub fn run(args: &[String]) -> ExitCode {
                 eprintln!("Fetch failed: {e}");
                 return ExitCode::FAILURE;
             }
+        }
+        // The second half of "what does upstream know": which games need a
+        // fix at all. Non-fatal — verification degrades to an unchecked
+        // scope, and the database copy is still worth having.
+        match fixes::fetch(&endpoints().umu_protonfixes_tree) {
+            Ok((_, n)) => println!("Fetched the protonfix list: {n} games need umu."),
+            Err(e) => eprintln!("Protonfix list unavailable ({e}) - scope stays unchecked."),
         }
     }
 
@@ -281,6 +292,9 @@ fn list(report: &UmuReport) {
         if let Some(status) = status {
             println!("  {:<28} {status}", "");
         }
+        if let Some(scope) = scope_line(m) {
+            println!("  {:<28} {scope}", "");
+        }
         if let Some(pr) = &m.possible_pr {
             println!("  {:<28} possibly already submitted: {pr}", "");
         }
@@ -306,6 +320,49 @@ pub(crate) fn basis_label(basis: DraftBasis) -> &'static str {
         DraftBasis::TitleSlug => "the title, standalone-rule slug",
         DraftBasis::Manual => "manual assignment in the setup TUI",
     }
+}
+
+/// One line on whether the database wants this entry at all. Upstream takes
+/// games that need a fix in Proton; for the rest, a row is noise the
+/// maintainers have to review. Shared by the CLI list, the verify summary,
+/// and the TUI's misses pane. `None` until a verification run could read the
+/// fix list.
+pub(crate) fn scope_line(m: &Miss) -> Option<String> {
+    let scope = m.fix.as_ref()?;
+    Some(match scope.fixes.split_first() {
+        Some((first, rest)) => {
+            let more = if rest.is_empty() {
+                String::new()
+            } else {
+                format!(" +{}", rest.len())
+            };
+            format!("needs umu: protonfix {first}{more} — worth submitting")
+        }
+        None if id_is_firm(m) => format!(
+            "no protonfix for {} — runs out of the box, and the database only wants games that need a fix",
+            scope.umu_id
+        ),
+        None => format!(
+            "no protonfix for {} — but that id is our own guess, so nothing here shows the game needs umu either",
+            scope.umu_id
+        ),
+    })
+}
+
+/// Whether the id the scope check ran against is the game's real one: the
+/// database's own, or a Steam appid from detectable.json. A codename or slug
+/// draft is a guess — a fix could exist under the Steam appid we never
+/// learned, so "no fix found" must not be read as "runs out of the box".
+pub(super) fn id_is_firm(m: &Miss) -> bool {
+    if m.verification
+        .as_ref()
+        .is_some_and(|v| v.umu_id.is_some() && v.state != VerificationState::ConfirmedMissing)
+    {
+        return true;
+    }
+    m.drafted_id
+        .as_ref()
+        .is_some_and(|d| matches!(d.basis, DraftBasis::SteamSku | DraftBasis::Manual))
 }
 
 /// Shared with the TUI's misses pane (`super::ui`).

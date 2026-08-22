@@ -76,6 +76,10 @@ pub struct Miss {
     /// entry (`--check-prs`, best-effort).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub possible_pr: Option<String>,
+    /// Whether this game has a protonfix upstream — the database's own scope
+    /// rule. Absent until a `--verify` run could read the fix list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<FixCheck>,
     /// The user's store correction from the setup TUI. `store` stays the
     /// daemon's guess (its half of the entry); this override is annotation-
     /// half, so a daemon write never reverts it. Everything downstream reads
@@ -151,6 +155,28 @@ pub enum VerificationState {
     CrossStoreId,
     /// Genuinely absent as of the check date.
     ConfirmedMissing,
+}
+
+/// Whether the game a miss names actually needs umu: the umu-database takes
+/// entries for games that require a fix in Proton, and says so in its first
+/// paragraph ("Games that run out of the box have no need be added"). A row
+/// earns its place when a protonfix exists for its umu id and this store's
+/// copy is not mapped to it yet; without a fix, submitting is noise for the
+/// maintainers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixCheck {
+    /// The umu id the check ran against — a later id change invalidates it.
+    pub umu_id: String,
+    /// The fix files found upstream, repository-relative
+    /// (`gamefixes-steam/870780.py`). Empty means: no fix, out of scope.
+    pub fixes: Vec<String>,
+    pub checked: String,
+}
+
+impl FixCheck {
+    pub fn has_fix(&self) -> bool {
+        !self.fixes.is_empty()
+    }
 }
 
 /// A proposed umu id and where it came from.
@@ -280,6 +306,7 @@ impl UmuReport {
             verification: None,
             drafted_id: None,
             possible_pr: None,
+            fix: None,
             store_override: None,
             codename_override: None,
             title_override: None,
@@ -422,6 +449,7 @@ impl UmuReport {
                     ours.verification = theirs.verification;
                     ours.drafted_id = theirs.drafted_id;
                     ours.possible_pr = theirs.possible_pr;
+                    ours.fix = theirs.fix;
                     ours.store_override = theirs.store_override;
                     ours.codename_override = theirs.codename_override;
                     ours.title_override = theirs.title_override;
