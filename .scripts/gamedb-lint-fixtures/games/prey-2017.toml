@@ -1,0 +1,9 @@
+title = "Prey"
+year = 2017
+gamedb = "egs-PreyApp"
+
+[[stores.egs]]
+codename = "PreyApp"
+seen = "2026-08-22"
+source = "manual"
+confidence = "high"
