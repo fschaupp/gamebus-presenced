@@ -1,0 +1,36 @@
+# Invented, not observed. This directory is test scaffolding for the builder
+# and never a source of game facts - gamedb/games/ is the data set.
+#
+# Exercises: a umu id as the canonical id, two editions on one store, a store
+# whose codename the lint's precedence never looks at (steam entries come from
+# [ids]), an executable recorded against one store copy, and an optional year.
+title = "Aurora"
+year = 2019
+gamedb = "umu-1450"
+note = "Two editions on Epic; the Steam copy names the executable."
+
+[ids]
+umu = "umu-1450"
+source = "umu-database"
+seen = "2026-08-20"
+
+[[stores.egs]]
+codename = "AuroraApp"
+edition = "Standard"
+seen = "2026-08-20"
+source = "heroic-config"
+confidence = "high"
+
+[[stores.egs]]
+codename = "AuroraDeluxe"
+edition = "Deluxe"
+seen = "2026-08-20"
+source = "heroic-config"
+confidence = "medium"
+
+[[stores.steam]]
+codename = "1450"
+exe = "bin/Aurora.exe"
+seen = "2026-08-20"
+source = "manual"
+confidence = "high"

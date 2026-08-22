@@ -1,0 +1,14 @@
+# Invented, not observed. Test scaffolding for the builder.
+#
+# Exercises: a remaster sold as its own product, pointing home with
+# variant_of, and a numeric GOG product id as a canonical id.
+title = "Aurora Remastered"
+gamedb = "gog-1207000001"
+variant_of = "umu-1450"
+
+[[stores.gog]]
+codename = "1207000001"
+exe = "AuroraRemastered.exe"
+seen = "2026-08-21"
+source = "gog-catalog"
+confidence = "high"
