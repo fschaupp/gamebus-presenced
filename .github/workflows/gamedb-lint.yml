@@ -1,0 +1,175 @@
+# Gate every change to the gamedb data set on the lint that guards it.
+#
+# The lint is stdlib-only Python, so nothing is installed beyond an
+# interpreter: `tomllib` arrived in 3.11, which is the floor this pins.
+# Two checks run, and both must pass:
+#
+#   .scripts/gamedb-lint.py gamedb    the data set itself
+#   .scripts/gamedb-lint-selftest.sh  the lint, against its fixture set
+#
+# The data lint runs first and the self-test runs even when it failed, so a
+# contributor sees every problem in one round rather than one per push. Both
+# reports land in the job summary as well as the log, because the failure a
+# contributor actually hits - two pages claiming one identifier - is a
+# sentence they need to read, not a line to go hunting for.
+
+name: gamedb Lint
+
+on:
+  pull_request:
+    paths:
+      - "gamedb/**"
+      - "gamedb-build/**"
+      - ".scripts/gamedb-lint*"
+      - ".github/workflows/gamedb-lint.yml"
+
+permissions: {}
+
+concurrency:
+  group: gamedb-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # tomllib needs 3.11+; the lint imports nothing else off the stdlib, so
+      # there is deliberately no pip step anywhere in this workflow.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Both checks are committed mode 644, and the self-test executes the
+      # lint by path, so a fresh checkout cannot run either without this. It
+      # is a property of the checkout, not of the repository state.
+      - name: Make the checks executable
+        run: chmod +x .scripts/gamedb-lint.py .scripts/gamedb-lint-selftest.sh
+
+      - name: Validate the data set
+        id: data
+        run: |
+          set -u
+          out="$RUNNER_TEMP/gamedb-lint.out"
+          status=0
+          .scripts/gamedb-lint.py gamedb > "$out" 2>&1 || status=$?
+          cat "$out"
+
+          {
+            echo "## gamedb lint"
+            echo
+            if [ "$status" -eq 0 ]; then
+              echo "The data set validates."
+            else
+              echo "**The data set does not validate.** Every line below has to be"
+              echo "resolved before this can merge."
+            fi
+            echo
+            echo '```'
+            cat "$out"
+            echo '```'
+            if grep -q 'the same game cannot live on two pages' "$out"; then
+              echo
+              echo "### Two pages claim one identifier"
+              echo
+              echo "A game lives on exactly one page, and every identifier a page"
+              echo "carries - its \`gamedb\` id, each \`<store>-<codename>\`, the Steam"
+              echo "app id, the umu id, every executable it names - resolves to that"
+              echo "one page. The usual cause is adding a second page for a game that"
+              echo "is already here under another store."
+              echo
+              echo "The fix is to consolidate: move the new store entry onto the page"
+              echo "that already exists and drop the new file. Do not rename an id to"
+              echo "dodge the collision - ids are frozen once assigned."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Annotations put each finding on the Checks tab too. Warnings are
+          # informational (an id that predates a better one) and never fail.
+          while IFS= read -r line; do
+            case "$line" in
+              "") ;;
+              "OK:"*) ;;
+              "warning: "*) echo "::warning::${line#warning: }" ;;
+              *) [ "$status" -eq 0 ] || echo "::error::$line" ;;
+            esac
+          done < "$out"
+
+          exit "$status"
+
+      # Runs even when the data lint failed: a broken lint and broken data are
+      # different problems and a contributor should see both at once.
+      - name: Self-test the lint
+        if: ${{ !cancelled() && steps.data.conclusion != 'skipped' }}
+        run: |
+          set -u
+          out="$RUNNER_TEMP/gamedb-selftest.out"
+          status=0
+          .scripts/gamedb-lint-selftest.sh > "$out" 2>&1 || status=$?
+          cat "$out"
+
+          {
+            echo
+            echo "## gamedb lint self-test"
+            echo
+            if [ "$status" -eq 0 ]; then
+              echo "The lint still reports exactly what its fixture set expects."
+            else
+              echo "**The lint's own report changed.** The diff below is"
+              echo "\`.scripts/gamedb-lint-fixtures/expected.txt\` against what the lint"
+              echo "produced. If the change is intended, update the fixture set in the"
+              echo "same pull request."
+            fi
+            echo
+            echo '```diff'
+            cat "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$status"
+
+  # default-members = ["."] keeps the daemon's own cargo commands unchanged,
+  # which also means a root `cargo test` never reaches this crate. It has to
+  # be named, or its tests run nowhere.
+  builder:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: gamedb-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain') }}
+          restore-keys: |
+            gamedb-build-${{ runner.os }}-
+
+      # The Rust lint is held to the Python lint's fixture set byte for byte,
+      # so this is also what stops the two implementations drifting apart.
+      - name: Gate
+        run: |
+          cargo fmt --all --check
+          cargo clippy -p gamedb-build --all-targets --all-features -- -D warnings
+          cargo test -p gamedb-build
+
+      # The daemon must gain nothing from any of this.
+      - name: The daemon's tree stays clean
+        run: |
+          set -eu
+          if cargo tree -p gamebus-presenced | grep -qiE "arrow|parquet|rusqlite|libsqlite"; then
+            echo "::error::the daemon's dependency tree has picked up a builder dependency"
+            cargo tree -p gamebus-presenced | grep -iE "arrow|parquet|rusqlite|libsqlite"
+            exit 1
+          fi
