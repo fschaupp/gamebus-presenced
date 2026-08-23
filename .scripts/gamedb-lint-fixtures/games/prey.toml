@@ -1,0 +1,8 @@
+title = "Prey"
+gamedb = "gog-1207658770"
+
+[[stores.gog]]
+codename = "1207658770"
+seen = "2026-08-22"
+source = "manual"
+confidence = "high"

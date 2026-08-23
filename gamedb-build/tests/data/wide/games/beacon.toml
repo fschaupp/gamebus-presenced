@@ -1,0 +1,9 @@
+# Invented, not observed. Test scaffolding for the builder.
+#
+# Exercises: a page with no store identity at all, so its id is minted, and
+# two ids it absorbed when other pages turned out to be the same game. Both
+# absorbed ids stay reserved and become aliases, so an old lookup resolves.
+title = "Beacon"
+gamedb = "gamedb-b3ac0n77"
+merged_from = ["egs-BeaconOld", "gamedb-oldbeac0"]
+exe = ["Beacon.exe", "beacon64.exe"]

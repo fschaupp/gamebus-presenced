@@ -1,0 +1,71 @@
+# Publish the gamedb tools as a release, for the data repository to pin.
+#
+# gamebus-gamedb is data only: its workflows download gamedb-lint and
+# gamedb-build from a release here, check the digest they have pinned, and
+# run them. This is the workflow that produces those releases. The tag
+# namespace is gamedb-tools-v*, apart from the daemon's v* tags, so a tools
+# release and a daemon release never collide.
+#
+# The binaries are built from the workspace member alone. Pure Rust plus
+# bundled C, no system package, the same as everywhere else.
+
+name: gamedb Tools Release
+
+on:
+  push:
+    tags: ["gamedb-tools-v*"]
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Nothing ships that has not passed the same gate the pull requests do.
+      - name: Gate
+        run: |
+          chmod +x .scripts/gamedb-lint.py .scripts/gamedb-lint-selftest.sh
+          .scripts/gamedb-lint-selftest.sh
+          cargo fmt --all --check
+          cargo clippy -p gamedb-build --all-targets --all-features -- -D warnings
+          cargo test -p gamedb-build
+
+      - name: Build
+        run: cargo build --release -p gamedb-build
+
+      # Both binaries, plus one digest file. The data repository copies the
+      # digests into its workflow pins, so they are part of the release.
+      - name: Bundle
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#gamedb-tools-v}"
+          grep -q "^version = \"$VERSION\"" gamedb-build/Cargo.toml || {
+            echo "tag $GITHUB_REF_NAME does not match gamedb-build/Cargo.toml version" >&2
+            exit 1
+          }
+          mkdir -p dist
+          cp target/release/gamedb-lint target/release/gamedb-build dist/
+          (cd dist && sha256sum gamedb-lint gamedb-build > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "gamedb-lint and gamedb-build for x86_64 Linux. Pin the tag and the digests from SHA256SUMS in gamebus-gamedb's workflows." \
+            dist/gamedb-lint dist/gamedb-build dist/SHA256SUMS

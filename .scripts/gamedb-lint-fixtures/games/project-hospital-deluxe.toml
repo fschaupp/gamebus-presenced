@@ -1,0 +1,13 @@
+title = "Project Hospital Deluxe"
+gamedb = "steam-868360"
+
+[ids]
+steam = 868360
+source = "steam-sku"
+seen = "2026-08-22"
+
+[[stores.egs]]
+codename = "PHDeluxe"
+seen = "2026-08-22"
+source = "manual"
+confidence = "high"

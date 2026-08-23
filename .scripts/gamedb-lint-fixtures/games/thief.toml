@@ -1,0 +1,9 @@
+title = "Thief"
+gamedb = "gog-777"
+merged_from = ["steam-870780"]
+
+[[stores.gog]]
+codename = "777"
+seen = "2026-08-22"
+source = "manual"
+confidence = "high"

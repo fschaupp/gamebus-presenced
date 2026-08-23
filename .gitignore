@@ -1,4 +1,8 @@
 /target
+
+# gamedb artifacts. Built from the TOML pages and published as release
+# assets; a binary blob per merge would bloat the repository permanently.
+/build
 Cargo.lock.bak
 *.swp
 .direnv/

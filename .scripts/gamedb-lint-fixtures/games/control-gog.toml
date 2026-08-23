@@ -1,0 +1,14 @@
+title = "Control"
+gamedb = "gog-1998721385"
+
+[[stores.gog]]
+codename = "1998721385"
+seen = "2026-08-22"
+source = "manual"
+confidence = "high"
+
+[[stores.egs]]
+codename = "Calluna"
+seen = "2026-08-22"
+source = "manual"
+confidence = "high"

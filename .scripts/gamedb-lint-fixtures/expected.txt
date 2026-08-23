@@ -1,0 +1,9 @@
+warning: late-bloomer.toml: id 'gamedb-k7m2p9qz' predates 'steam-1234567'; kept, since ids are never re-pointed
+bad-mint.toml: minted id 'gamedb-12345678' must be gamedb-<uid> and must contain a letter
+bogus.toml: gamedb is 'steam-999999', which none of this page's identifiers justifies
+'egs-Calluna' is claimed by both control-gog.toml and control.toml - the same game cannot live on two pages, so consolidate them into one
+empty.toml: names neither a store entry nor an executable, so it identifies nothing
+'steam-868360' is claimed by both project-hospital-deluxe.toml and project-hospital.toml - the same game cannot live on two pages, so consolidate them into one
+'exe:projecthospital.exe' is claimed by both ghost.toml and project-hospital.toml - the same game cannot live on two pages, so consolidate them into one
+'steam-870780' is claimed by both control.toml and thief.toml - the same game cannot live on two pages, so consolidate them into one
+thief.toml: merged_from 'steam-870780' is the live id of control.toml
