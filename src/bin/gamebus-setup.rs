@@ -41,6 +41,9 @@ fn usage() {
     eprintln!("  apply <action> [options]  Perform an action non-interactively");
     eprintln!("  umu-misses [options]      Games umu had no database entry for, and what");
     eprintln!("                            this machine resolved them to");
+    eprintln!("  gamedb [options]          Those same games as gamebus-gamedb pages: one");
+    eprintln!("                            page per game, the store codenames and");
+    eprintln!("                            executables that identify it");
     eprintln!("  help                      Show this help");
     eprintln!();
     eprintln!("Actions:");
@@ -70,6 +73,18 @@ fn usage() {
     eprintln!("  --check-prs               Also scan open upstream merge requests for");
     eprintln!("                            already-submitted entries (best-effort)");
     eprintln!();
+    eprintln!("gamedb options:");
+    eprintln!("  --fetch                   Refresh the cached index of what gamebus-gamedb");
+    eprintln!("                            already carries (one request)");
+    eprintln!("  --export                  Write a page per ready game to <dir>/games/,");
+    eprintln!("                            never overwriting one that is already there");
+    eprintln!("  --out <dir>               Where --export writes (a checkout of");
+    eprintln!("                            gamebus-gamedb is the useful thing to name)");
+    eprintln!("  --documents               Write to <documents>/gamebus-gamedb instead");
+    eprintln!("  --stale-ok                Export against an index older than 7 days");
+    eprintln!("                            (GAMEBUS_GAMEDB_INDEX points the check at a");
+    eprintln!("                            local identities.json)");
+    eprintln!();
     eprintln!("Every remote endpoint the tools talk to is configured in endpoints.toml,");
     eprintln!("and shared-helpers.txt lists helper executables that never name a game");
     eprintln!("(~/.config/gamebus-presenced/ overrides the installed copies in the data");
@@ -87,6 +102,7 @@ async fn main() -> ExitCode {
         Some("plan") => cmd_plan(&args, &flags),
         Some("apply") => cmd_apply(&args, &flags),
         Some("umu-misses") => setup::umu_misses::run(&args),
+        Some("gamedb") => setup::gamedb::run(&args),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             ExitCode::SUCCESS
@@ -165,6 +181,9 @@ enum Msg {
     Probed(Box<Status>),
     Activities(Vec<client::ActivityView>),
     Misses(Vec<(String, umu_report::Miss)>),
+    /// The gamedb pane's rows, the index state and the export directory,
+    /// loaded off the render path like the miss list.
+    Gamedb(Box<setup::gamedb::GamedbView>),
     Done(Action, Vec<actions::StepOutcome>),
     /// A umu flow (verify / assign / pick / store cycle) finished: its log
     /// lines and whether it completed. Clears `busy` and refreshes the pane.
@@ -225,6 +244,7 @@ async fn cmd_tui() -> ExitCode {
     app.probing = true;
     spawn_probe(&tx, &dirs);
     spawn_misses(&tx);
+    spawn_gamedb(&tx);
 
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -245,9 +265,17 @@ async fn cmd_tui() -> ExitCode {
             },
             _ = ticker.tick() => Msg::Tick,
             _ = monitor_tick.tick(),
-                if matches!(app.view, ui::View::Monitor | ui::View::Misses) =>
+                if matches!(
+                    app.view,
+                    ui::View::Monitor | ui::View::Misses | ui::View::Gamedb
+                ) =>
             {
-                if app.view == ui::View::Monitor {
+                if app.view == ui::View::Gamedb {
+                    // The same stash the misses pane watches, folded into
+                    // pages - and the same convention: no I/O on the render
+                    // path, so it arrives as a message.
+                    spawn_gamedb(&tx);
+                } else if app.view == ui::View::Monitor {
                     if monitor_conn.is_none() {
                         monitor_conn =
                             tokio::time::timeout(BUS_TIMEOUT, zbus::Connection::session())
@@ -329,6 +357,17 @@ fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
     });
 }
 
+/// Refresh the gamedb pane: the stash folded into pages, the cached index,
+/// and the configured export directory. Local files only - the pane's `r`
+/// is the one key that reaches the network.
+fn spawn_gamedb(tx: &tokio::sync::mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let view = setup::gamedb::tui_view();
+        let _ = tx.blocking_send(Msg::Gamedb(Box::new(view)));
+    });
+}
+
 /// Run one of the misses pane's blocking flows (network and disk) off the
 /// render path, delivering its log lines as a message.
 fn spawn_umu_flow(
@@ -340,6 +379,17 @@ fn spawn_umu_flow(
         let (lines, ok) = flow();
         let _ = tx.blocking_send(Msg::UmuOutcome(lines, ok));
     });
+}
+
+/// Start the gamedb pane's export. Reached twice: straight from `e` when
+/// the index is fresh, and from the confirm dialog when it is not - which
+/// is the only place `force` comes from.
+fn start_gamedb_export(app: &mut ui::App, tx: &tokio::sync::mpsc::Sender<Msg>, force: bool) {
+    if app.busy.is_some() {
+        return;
+    }
+    app.busy = Some("writing gamedb pages".into());
+    spawn_umu_flow(tx, move || setup::gamedb::tui_export(force));
 }
 
 /// Run a plan that needs no privileges, off the render path. Subprocesses and
@@ -487,6 +537,7 @@ async fn handle(
         }
         Msg::Activities(activities) => app.activities = activities,
         Msg::Misses(misses) => app.set_misses(misses),
+        Msg::Gamedb(view) => app.set_gamedb(*view),
         Msg::UmuOutcome(lines, ok) => {
             for line in lines {
                 app.log_styled(
@@ -501,6 +552,7 @@ async fn handle(
             app.busy = None;
             // Show what the flow changed without waiting for the next tick.
             spawn_misses(tx);
+            spawn_gamedb(tx);
         }
         Msg::UmuCandidates {
             key,
@@ -562,6 +614,7 @@ async fn handle(
                     app.probing = true;
                     spawn_probe(tx, dirs);
                     spawn_misses(tx);
+                    spawn_gamedb(tx);
                 }
                 // The misses pane's flows share the busy gate with the
                 // install actions: one mutating thing at a time.
@@ -740,6 +793,21 @@ async fn handle(
                     app.busy = Some("updating the entry".into());
                     spawn_umu_flow(tx, move || setup::umu_misses::tui_toggle_dismiss(&key));
                 }
+                ui::Intent::GamedbFetch => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("fetching the gamebus-gamedb index".into());
+                    spawn_umu_flow(tx, setup::gamedb::tui_fetch);
+                }
+                ui::Intent::GamedbExport { force } => start_gamedb_export(app, tx, force),
+                ui::Intent::GamedbSetDir { dir } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("saving the export directory".into());
+                    spawn_umu_flow(tx, move || setup::gamedb::tui_set_dir(&dir));
+                }
                 ui::Intent::Run(action) => {
                     if app.busy.is_some() {
                         return;
@@ -757,28 +825,45 @@ async fn handle(
                         explanation: actions::explain(&plan),
                         scope: actions::scope_note(&plan, &dirs.home),
                         details: false,
-                        action,
+                        action: Some(action),
                         plan,
                         needs_root,
+                        on_yes: None,
+                        label: None,
                     });
                 }
                 ui::Intent::ConfirmYes => {
-                    if let Some(confirm) = app.confirm.take() {
+                    let Some(confirm) = app.confirm.take() else {
+                        return;
+                    };
+                    // A confirmation that runs an intent rather than an
+                    // install plan: the gamedb export against an index the
+                    // pane could not vouch for.
+                    if let Some(intent) = confirm.on_yes {
+                        if let ui::Intent::GamedbExport { force } = intent {
+                            start_gamedb_export(app, tx, force);
+                        }
+                        return;
+                    }
+                    {
+                        let Some(action) = confirm.action else {
+                            return;
+                        };
                         app.log_styled(
-                            confirm.action.label(),
+                            action.label(),
                             Style::default().add_modifier(ratatui::style::Modifier::BOLD),
                         );
-                        match (confirm.needs_root, confirm.action.target()) {
+                        match (confirm.needs_root, action.target()) {
                             // Escalation is offered for the system target only.
                             // pkexec resets the environment, and only the system
                             // layout is environment-free - escalating a *user*
                             // action would resolve $HOME to /root in the child
                             // and install somewhere the user never confirmed.
                             (true, Some(Target::System)) => {
-                                app.busy = Some(confirm.action.label());
+                                app.busy = Some(action.label());
                                 run_escalated(
                                     app,
-                                    confirm.action,
+                                    action,
                                     Target::System,
                                     dirs,
                                     terminal,
@@ -800,8 +885,8 @@ async fn handle(
                                 );
                             }
                             (false, _) => {
-                                app.busy = Some(confirm.action.label());
-                                spawn_action(tx, confirm.action, dirs);
+                                app.busy = Some(action.label());
+                                spawn_action(tx, action, dirs);
                             }
                         }
                     }

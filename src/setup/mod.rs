@@ -10,6 +10,7 @@
 //! list of steps (pure) that `execute` then performs.
 
 pub mod actions;
+pub mod gamedb;
 pub mod heroic_library;
 pub mod paths;
 pub mod status;

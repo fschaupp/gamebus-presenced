@@ -77,57 +77,8 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, panes[0], &mut app.miss_list);
 
-    // Pick mode replaces the detail with the candidate list. It is bound to
-    // the stash key it was opened for, not to the (frozen) selection. The
-    // candidates arrive grouped by kind; section headers are rows of their
-    // own and can never be selected — `selected` indexes candidates, and
-    // [`pick_display_index`] maps it onto the row list at render time.
-    if let Some(pick) = &app.pick {
-        // A library identity from a different store than the one already on
-        // the miss still works (picking it changes the store), but it is
-        // probably not the row the user is after — greyed, not hidden.
-        let miss_store = app
-            .misses
-            .iter()
-            .find(|(k, _)| k == &pick.key)
-            .map(|(_, m)| m.effective_store().to_string());
-        let mut last_section: Option<String> = None;
-        let mut items: Vec<ListItem> = Vec::new();
-        for c in &pick.candidates {
-            let section = c.section_label();
-            if last_section.as_deref() != Some(section.as_str()) {
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("— {section} —"),
-                    Style::default().fg(Color::Cyan),
-                ))));
-                last_section = Some(section);
-            }
-            let (name, detail) = candidate_row(c);
-            let (name_style, detail_style) = if cross_store_library(c, miss_store.as_deref()) {
-                let dim = Style::default().fg(Color::DarkGray);
-                (dim, dim)
-            } else {
-                (
-                    Style::default().add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::DarkGray),
-                )
-            };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(name, name_style),
-                Span::styled(format!("  {detail}"), detail_style),
-            ])));
-        }
-        let mut state = ListState::default();
-        state.select(Some(pick_display_index(&pick.candidates, pick.selected)));
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Pick a match ")
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-        f.render_stateful_widget(list, panes[1], &mut state);
+    // Pick mode replaces the detail with the candidate list.
+    if render_pick(f, panes[1], app) {
         return;
     }
 
@@ -291,6 +242,69 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).title(" Detail ")),
         panes[1],
     );
+}
+
+/// Draw pick mode over `area`, if it is open: the candidate list that owns
+/// the keyboard until Enter or Esc. Returns whether anything was drawn.
+///
+/// Shared with the gamedb tab, which opens the same mode through the same
+/// keys — it belongs to the stash entry being corrected, not to the pane the
+/// correction was started from. The mode is bound to the stash key it was
+/// opened for, not to the (frozen) selection. Candidates arrive grouped by
+/// kind; section headers are rows of their own and can never be selected —
+/// `selected` indexes candidates, and [`pick_display_index`] maps it onto
+/// the row list at render time.
+pub(super) fn render_pick(f: &mut Frame, area: Rect, app: &App) -> bool {
+    let Some(pick) = &app.pick else {
+        return false;
+    };
+
+    // A library identity from a different store than the one already on
+    // the miss still works (picking it changes the store), but it is
+    // probably not the row the user is after — greyed, not hidden.
+    let miss_store = app
+        .misses
+        .iter()
+        .find(|(k, _)| k == &pick.key)
+        .map(|(_, m)| m.effective_store().to_string());
+    let mut last_section: Option<String> = None;
+    let mut items: Vec<ListItem> = Vec::new();
+    for c in &pick.candidates {
+        let section = c.section_label();
+        if last_section.as_deref() != Some(section.as_str()) {
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!("— {section} —"),
+                Style::default().fg(Color::Cyan),
+            ))));
+            last_section = Some(section);
+        }
+        let (name, detail) = candidate_row(c);
+        let (name_style, detail_style) = if cross_store_library(c, miss_store.as_deref()) {
+            let dim = Style::default().fg(Color::DarkGray);
+            (dim, dim)
+        } else {
+            (
+                Style::default().add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(name, name_style),
+            Span::styled(format!("  {detail}"), detail_style),
+        ])));
+    }
+    let mut state = ListState::default();
+    state.select(Some(pick_display_index(&pick.candidates, pick.selected)));
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Pick a match ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(list, area, &mut state);
+    true
 }
 
 /// Where candidate `selected` lands in the rendered row list, counting the

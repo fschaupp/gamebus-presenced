@@ -52,6 +52,14 @@ pub const SHARED_HELPERS_NAME: &str = "shared-helpers.txt";
 /// adds entries, so a local file can extend the shipped protections but never
 /// remove them. Parsed once per process; the daemon is long-running and the
 /// files do not change under it.
+/// Whether a basename is one of the helper executables that ship beside many
+/// games and therefore never identify one. Case-insensitive, like the lookup.
+/// Used by the setup tool; the daemon reaches the set through the lookup.
+#[allow(dead_code)]
+pub(crate) fn is_shared_helper(basename: &str) -> bool {
+    shared_helper_exes().contains(&basename.to_lowercase())
+}
+
 fn shared_helper_exes() -> &'static HashSet<String> {
     static EXES: OnceLock<HashSet<String>> = OnceLock::new();
     EXES.get_or_init(|| {

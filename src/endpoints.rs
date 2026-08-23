@@ -45,6 +45,17 @@ pub struct Endpoints {
     pub egs_search: String,
     /// egdata.app's sandboxes root: `<sandboxes>/<namespace>/builds`.
     pub egs_sandboxes: String,
+    /// gamebus-gamedb's built identity index (`identities.json`), from the
+    /// data set's latest release - what the gamedb export checks a page
+    /// against before writing it.
+    pub gamedb_identities: String,
+    /// The raw game pages on gamebus-gamedb's main branch, one file per
+    /// page: `<pages>/<page>.toml`. An enhancement needs the text of the
+    /// page it is adding to, and this is where it comes from when no local
+    /// checkout has it.
+    pub gamedb_pages: String,
+    /// The gamebus-gamedb repository, where an exported page goes next.
+    pub gamedb_project: String,
 }
 
 impl Endpoints {
@@ -81,6 +92,9 @@ impl Endpoints {
             gog_gogdb_product: get("gog.gogdb_product"),
             egs_search: get("egs.search"),
             egs_sandboxes: get("egs.sandboxes"),
+            gamedb_identities: get("gamedb.identities"),
+            gamedb_pages: get("gamedb.pages"),
+            gamedb_project: get("gamedb.project"),
         }
     }
 }
@@ -162,6 +176,9 @@ mod tests {
             "gog.gogdb_product",
             "egs.search",
             "egs.sandboxes",
+            "gamedb.identities",
+            "gamedb.pages",
+            "gamedb.project",
         ] {
             assert!(
                 values.get(key).is_some_and(|v| v.starts_with("https://")),

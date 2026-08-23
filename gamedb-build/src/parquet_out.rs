@@ -58,6 +58,7 @@ fn schema() -> Schema {
     Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("title", DataType::Utf8, false),
+        Field::new("page", DataType::Utf8, false),
         Field::new("year", DataType::Int32, true),
         Field::new("variant_of", DataType::Utf8, true),
         Field::new("note", DataType::Utf8, true),
@@ -96,6 +97,7 @@ pub fn batch(tables: &Tables) -> Result<RecordBatch> {
 
     let mut ids: Vec<&str> = Vec::with_capacity(tables.games.len());
     let mut titles: Vec<&str> = Vec::with_capacity(tables.games.len());
+    let mut pages: Vec<&str> = Vec::with_capacity(tables.games.len());
     let mut years: Vec<Option<i32>> = Vec::with_capacity(tables.games.len());
     let mut variant_of: Vec<Option<&str>> = Vec::with_capacity(tables.games.len());
     let mut notes: Vec<Option<&str>> = Vec::with_capacity(tables.games.len());
@@ -114,6 +116,7 @@ pub fn batch(tables: &Tables) -> Result<RecordBatch> {
     for game in &tables.games {
         ids.push(&game.id);
         titles.push(&game.title);
+        pages.push(&game.page);
         years.push(game.year.map(|y| y as i32));
         variant_of.push(game.variant_of.as_deref());
         notes.push(game.note.as_deref());
@@ -173,6 +176,7 @@ pub fn batch(tables: &Tables) -> Result<RecordBatch> {
         vec![
             Arc::new(StringArray::from(ids)) as ArrayRef,
             Arc::new(StringArray::from(titles)) as ArrayRef,
+            Arc::new(StringArray::from(pages)) as ArrayRef,
             Arc::new(Int32Array::from(years)) as ArrayRef,
             Arc::new(StringArray::from(variant_of)) as ArrayRef,
             Arc::new(StringArray::from(notes)) as ArrayRef,

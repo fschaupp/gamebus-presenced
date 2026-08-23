@@ -1060,6 +1060,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "ureq",
@@ -1068,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "gamedb-build"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
