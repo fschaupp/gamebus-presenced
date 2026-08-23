@@ -469,7 +469,20 @@ impl Enricher {
         if is_wrapper_executable(raw_exe) {
             (MemberClass::Helper, None)
         } else {
-            (MemberClass::Plain, None)
+            // A game binary Lutris launched directly — a native Linux game,
+            // `gamemoderun ./Game.x86_64` — registers with GameMode itself,
+            // so no wrapper pid ever runs the ancestor layer on its behalf
+            // (`apply_descendant_walk` is wrappers-only) and the record kept
+            // the executable stem. Ask the lutris-wrapper ancestor here. The
+            // member stays Plain (this changes no election) and the identity
+            // is launcher-class, so a curated hit still replaces it:
+            // set_identity is monotone by class.
+            let identity = identify_via_lutris_ancestor(pid).map(|(name, exe)| Identity {
+                name,
+                exe,
+                class: IdentityClass::Wrapper,
+            });
+            (MemberClass::Plain, identity)
         }
     }
 
@@ -3099,6 +3112,85 @@ mod tests {
 
         child.kill().ok();
         child.wait().ok();
+    }
+
+    #[test]
+    fn a_native_game_binary_takes_its_title_from_the_lutris_wrapper_ancestor() {
+        // The live case (Danger Scavenger, itch.io via Lutris, 2026-08-23):
+        // `lutris-wrapper Danger Scavenger 0 0 gamemoderun ./Game.x86_64`.
+        // The binary registers with GameMode itself, its exe is no wrapper,
+        // detectable.json does not know it - and the bus showed the stem.
+        let dir = std::env::temp_dir().join(format!("gamebus-native-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("lutris-wrapper");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30 &\nwait\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut wrapper = None;
+        for _ in 0..40 {
+            match std::process::Command::new(&script)
+                .args([
+                    "Danger",
+                    "Scavenger",
+                    "0",
+                    "0",
+                    "gamemoderun",
+                    "./Danger_Scavenger.x86_64",
+                ])
+                .spawn()
+            {
+                Ok(child) => {
+                    wrapper = Some(child);
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => panic!("wrapper spawn failed: {e}"),
+            }
+        }
+        let mut wrapper = wrapper.expect("wrapper spawn kept hitting ETXTBSY");
+        let wrapper_pid = wrapper.id();
+        let mut child_pid = None;
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            child_pid = std::fs::read_dir("/proc").ok().and_then(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+                    .find(|&pid| read_ppid(pid) == Some(wrapper_pid))
+            });
+            if child_pid.is_some() {
+                break;
+            }
+        }
+        let child = child_pid.expect("wrapper never spawned its child");
+
+        // No naming database at all: this is the one layer that works
+        // without one, and it must reach a non-wrapper member.
+        let e = Enricher::with_naming(None);
+        let (class, identity) = e.classify_member(
+            child,
+            "/games/danger-scavenger/Danger_Scavenger.x86_64",
+            "lutris:test",
+            None,
+        );
+        let _ = wrapper.kill();
+        let _ = wrapper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            class,
+            MemberClass::Plain,
+            "the launcher title must not inflate the member's class"
+        );
+        let identity = identity.expect("the lutris-wrapper ancestor names a native game binary");
+        assert_eq!(identity.name, "Danger Scavenger");
+        assert_eq!(
+            identity.class,
+            IdentityClass::Wrapper,
+            "a launcher title is launcher-class, so a curated hit can still win"
+        );
     }
 
     #[test]
