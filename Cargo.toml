@@ -39,7 +39,7 @@ required-features = ["setup"]
 default = ["setup"]
 # The setup/status TUI. On by default because you need it to install the
 # daemon; `--no-default-features` builds the daemon and CLI without ratatui.
-setup = ["dep:ratatui"]
+setup = ["dep:ratatui", "dep:toml_edit"]
 
 [dependencies]
 zbus = { version = "4", features = ["tokio"] }
@@ -61,6 +61,12 @@ ratatui = { version = "0.30", optional = true, default-features = false, feature
     "layout-cache",
     "underline-color",
 ] }
+# Tooling only, same rule. The gamedb export edits a page gamebus-gamedb
+# already publishes, and everything it does not touch - comments, notes,
+# merged_from, the wrapping of a note - has to come out byte for byte as it
+# went in. That is a format-preserving editor's job, not an emitter's. It is
+# already in Cargo.lock through gamedb-build, so the lock gains nothing.
+toml_edit = { version = "0.22", optional = true }
 
 [dev-dependencies]
 discord-rich-presence = "1"
