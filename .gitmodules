@@ -1,0 +1,3 @@
+[submodule "gamedb"]
+	url = https://github.com/fschaupp/gamebus-gamedb.git
+	path = gamedb
