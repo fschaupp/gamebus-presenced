@@ -290,6 +290,93 @@ fn find_detectable_json() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// Known non-game wrapper, helper, and plumbing executables. Their stems are
+/// never useful game names, and they must never be classified as the game.
+///
+/// Three rules over a backslash-aware lowercase basename (Wine paths like
+/// `C:\windows\system32\services.exe` contain no `/`):
+/// 1. literal basenames — shells, launchers, Wine service processes;
+/// 2. prefix families — the pressure-vessel / steam-runtime-tools crowd,
+///    which ships dozens of helpers (`pv-verify`, `srt-logger`,
+///    `x86_64-linux-gnu-check-vulkan`, …) that appear and vanish around a
+///    launch, all preloaded into GameMode by libgamemodeauto;
+/// 3. version-suffixed interpreters — `/usr/bin/python3.13` must match like
+///    `python3` did (observed live: a python3.13 wrapper identified as a
+///    game exe because the bare-literal list missed it).
+///
+/// Deliberately OFF the list, both load-bearing:
+/// - `wine64-preloader` / `wine-preloader` / `wine64` — Wine games are only
+///   identifiable through the cmdline layer, which `classify_member`
+///   restricts for listed wrappers;
+/// - `sleep` — the integration fixtures register real `sleep` processes and
+///   assert their stem publishes.
+fn wrapper_basename(executable: &str) -> Option<String> {
+    let base = executable.rsplit(['/', '\\']).next()?;
+    (!base.is_empty()).then(|| base.to_lowercase())
+}
+
+/// Lives here rather than in the enricher so both binaries can reach it:
+/// the daemon classifies live processes with it, the setup tool reads
+/// stashed launches. No `allow(dead_code)` needed - the daemon uses it,
+/// and gamebus-setup already allows the whole module.
+pub(crate) fn is_wrapper_executable(executable: &str) -> bool {
+    let Some(name) = wrapper_basename(executable) else {
+        return false;
+    };
+
+    const LITERALS: &[&str] = &[
+        // Shells and launch plumbing.
+        "env",
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "dash",
+        "ash",
+        "reaper",
+        "bwrap",
+        "umu-run",
+        "umu-shim",
+        "gamemoderun",
+        "lutris-wrapper",
+        // Wine service processes — prefix-shaped like games, never the game.
+        "wineserver",
+        "services.exe",
+        "winedevice.exe",
+        "explorer.exe",
+        "rpcss.exe",
+        "plugplay.exe",
+        "conhost.exe",
+        "start.exe",
+        "tabtip.exe",
+        "svchost.exe",
+        // Steam client plumbing.
+        "steamwebhelper",
+    ];
+    if LITERALS.contains(&name.as_str()) {
+        return true;
+    }
+
+    const PREFIXES: &[&str] = &[
+        "steam-runtime-",
+        "pressure-vessel-",
+        "pv-",
+        "srt-",
+        "i386-linux-gnu-",
+        "x86_64-linux-gnu-",
+    ];
+    if PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return true;
+    }
+
+    // `python3.13` → `python`; a name that merely CONTAINS an interpreter
+    // name ("pythia") or ends in digits of its own ("portal2") never trims
+    // to an exact interpreter match.
+    const INTERPRETERS: &[&str] = &["python", "perl", "ruby", "node"];
+    let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    INTERPRETERS.contains(&trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +572,57 @@ mod tests {
             ),
             Some("Call of Duty: Black Ops Cold War")
         );
+    }
+
+    #[test]
+    fn wrapper_patterns_match_live_inventory() {
+        // Positives drawn from the real pressure-vessel inventory, the Wine
+        // service set, and the live journal's python3.13 incident.
+        for name in [
+            "/x/pv-verify",
+            "/x/srt-logger",
+            "/x/steam-runtime-launcher-service",
+            "/x/steam-runtime-system-info",
+            "/x/steam-runtime-launch-client",
+            "/x/pressure-vessel-wrap",
+            "/x/i386-linux-gnu-check-vulkan",
+            "/x/x86_64-linux-gnu-capsule-capture-libs",
+            "/x/x86_64-linux-gnu-detect-platform",
+            "/x/x86_64-linux-gnu-inspect-library",
+            "/usr/bin/python3.13",
+            "/usr/bin/python3",
+            "/usr/bin/perl5.36.0",
+            "/usr/bin/node22",
+            "/x/wineserver",
+            "C:\\windows\\system32\\services.exe",
+            "C:\\windows\\system32\\winedevice.exe",
+            "C:\\windows\\system32\\conhost.exe",
+            "/x/steamwebhelper",
+        ] {
+            assert!(is_wrapper_executable(name), "{name} must be a wrapper");
+        }
+    }
+
+    #[test]
+    fn wrapper_patterns_keep_games_and_preloader_off() {
+        for (name, guards) in [
+            // Wine games are only identifiable via the cmdline layer, which
+            // classify_member restricts for listed wrappers.
+            ("/x/wine64-preloader", "wine cmdline identification"),
+            ("/x/wine-preloader", "wine cmdline identification"),
+            ("/x/wine64", "wine cmdline identification"),
+            // Integration fixtures register real sleeps and assert the stem.
+            ("/usr/bin/sleep", "test fixture"),
+            // Real games with digits or interpreter-ish substrings.
+            ("/games/Brotato.x86_64", "real game"),
+            ("Z:\\game\\Portal2.exe", "trailing digits are not a version"),
+            ("/games/pythia", "contains an interpreter name"),
+            ("/games/eldenring.exe", "real game"),
+        ] {
+            assert!(
+                !is_wrapper_executable(name),
+                "{name} must stay off ({guards})"
+            );
+        }
     }
 }
