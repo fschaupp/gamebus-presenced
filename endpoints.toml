@@ -65,3 +65,13 @@ search = "https://api.egdata.app/multisearch/offers"
 # The Builds App Name in there is the codename the database wants — the
 # namespace itself never is.
 sandboxes = "https://api.egdata.app/sandboxes"
+
+[gamedb]
+# gamebus-gamedb's built identity index, from the data set's latest release.
+# `gamebus-setup gamedb --fetch` caches it; the export reads it to hold back
+# games the data set already carries. GitHub redirects this to the tagged
+# asset, and the tag it lands on is what the cache records as the release.
+identities = "https://github.com/fschaupp/gamebus-gamedb/releases/latest/download/identities.json"
+
+# The data set itself, printed as the place an exported page goes next.
+project = "https://github.com/fschaupp/gamebus-gamedb"

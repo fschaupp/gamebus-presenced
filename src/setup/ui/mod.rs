@@ -12,16 +12,19 @@ use ratatui::widgets::{Block, Borders, Clear, ListState, Paragraph};
 use ratatui::Frame;
 
 use super::actions::{Action, Plan};
+use super::gamedb::{GamedbRow, GamedbView};
 use super::paths::Target;
 use super::status::{Health, Row, Status};
 use super::umu_misses::PickCandidate;
 use crate::client::ActivityView;
 use crate::umu_report::Miss;
 
+mod gamedb;
 mod misses;
 mod monitor;
 mod status;
 
+use self::gamedb::render_gamedb;
 use self::misses::render_misses;
 use self::monitor::render_monitor;
 use self::status::render_status;
@@ -39,17 +42,23 @@ pub enum View {
     /// `s` corrects the store guess, `t` corrects the title,
     /// `d` dismisses/restores an entry.
     Misses,
+    /// The same stash, folded into gamebus-gamedb pages: one row per GAME
+    /// rather than per launch identity, checked against what the data set
+    /// already publishes. `r` refreshes that index (network, and the footer
+    /// says so), `e` writes the ready pages, `d` sets where they go.
+    Gamedb,
 }
 
 impl View {
     /// Tab-bar order; `Tab` cycles it.
-    pub const ALL: [View; 3] = [View::Status, View::Monitor, View::Misses];
+    pub const ALL: [View; 4] = [View::Status, View::Monitor, View::Misses, View::Gamedb];
 
     pub fn title(self) -> &'static str {
         match self {
             View::Status => "status",
             View::Monitor => "monitor",
             View::Misses => "umu misses",
+            View::Gamedb => "gamedb",
         }
     }
 }
@@ -69,13 +78,32 @@ pub enum Focus {
 /// exact list is one keypress away because some people want exactly that, and
 /// hiding it from them would make the tool untrustworthy.
 pub struct Confirm {
-    pub action: Action,
+    /// The install action this dialog is about, when it is about one. `None`
+    /// for a confirmation that runs an [`Intent`] instead - see `on_yes`.
+    pub action: Option<Action>,
     pub plan: Plan,
     pub needs_root: bool,
     pub explanation: Vec<String>,
     pub scope: String,
     /// Whether the exact command list is currently on screen.
     pub details: bool,
+    /// When set, `y` fires this intent rather than running `action`'s plan.
+    /// The gamedb pane's export uses it to ask before writing pages against
+    /// an index too old to be trusted.
+    pub on_yes: Option<Intent>,
+    /// The dialog's heading, for a confirmation with no action to name it.
+    pub label: Option<String>,
+}
+
+impl Confirm {
+    /// What the dialog calls itself.
+    pub fn heading(&self) -> String {
+        match (&self.label, self.action) {
+            (Some(label), _) => label.clone(),
+            (None, Some(action)) => action.label(),
+            (None, None) => "Confirm".to_string(),
+        }
+    }
 }
 
 /// The misses pane's pick mode: candidates for one miss, waiting for the
@@ -121,6 +149,21 @@ pub struct App {
     /// keyboard ownership as `id_input`. Starts empty; the input line shows
     /// the current effective title beside it.
     pub title_input: Option<String>,
+    /// The gamedb pane's rows: the same stash folded into one page per
+    /// game, with what the published index made of each. Loaded off the
+    /// render path and arriving as a message, like the miss list.
+    pub gamedb: Vec<GamedbRow>,
+    pub gamedb_list: ListState,
+    /// The one-line index state the pane's header shows.
+    pub gamedb_index: String,
+    /// Whether an index is cached and fresh enough to export against. `e`
+    /// asks before exporting when it is not.
+    pub gamedb_index_ok: bool,
+    /// Where an export would write, as configured.
+    pub gamedb_dir: String,
+    /// While `Some`, the gamedb pane is in directory-entry mode (`d`) and
+    /// printable keys land here - same keyboard ownership as `id_input`.
+    pub dir_input: Option<String>,
     /// While `Some`, the misses pane is in pick mode and the candidate list
     /// owns the keyboard: ↑↓/j/k choose, Enter records the pick, Esc
     /// cancels. Remembers the stash key it was opened for; a refresh that
@@ -156,6 +199,12 @@ impl Default for App {
             monitor: ListState::default(),
             misses: Vec::new(),
             miss_list: ListState::default(),
+            gamedb: Vec::new(),
+            gamedb_list: ListState::default(),
+            gamedb_index: "loading…".to_string(),
+            gamedb_index_ok: false,
+            gamedb_dir: String::new(),
+            dir_input: None,
             id_input: None,
             title_input: None,
             pick: None,
@@ -279,11 +328,32 @@ impl App {
         }
     }
 
+    /// Replace the gamedb rows, keeping the selection on the same game by
+    /// its fold key - the pane refreshes once a second, and a bare index
+    /// would move the detail onto a different game mid-read.
+    pub fn set_gamedb(&mut self, view: GamedbView) {
+        let selected_key = self
+            .gamedb_list
+            .selected()
+            .and_then(|i| self.gamedb.get(i))
+            .map(|row| row.key.clone());
+        self.gamedb = view.rows;
+        self.gamedb_index = view.index;
+        self.gamedb_index_ok = view.index_ok;
+        self.gamedb_dir = view.export_dir;
+        if let Some(key) = selected_key {
+            if let Some(idx) = self.gamedb.iter().position(|row| row.key == key) {
+                self.gamedb_list.select(Some(idx));
+            }
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let action_count = self.action_list().len();
         let (state, len) = match (self.view, self.focus) {
             (View::Monitor, _) => (&mut self.monitor, self.activities.len()),
             (View::Misses, _) => (&mut self.miss_list, self.misses.len()),
+            (View::Gamedb, _) => (&mut self.gamedb_list, self.gamedb.len()),
             (_, Focus::Checks) => (&mut self.checks, self.rows.len()),
             (_, Focus::Actions) => (&mut self.actions, action_count),
         };
@@ -368,6 +438,20 @@ pub enum Intent {
     UmuDismiss {
         key: String,
     },
+    /// gamedb pane `r`: fetch the published identity index. Network - the
+    /// footer labels the key as such.
+    GamedbFetch,
+    /// gamedb pane `e`: write every ready page to the configured directory.
+    /// `force` is set only by the confirm dialog an aging or absent index
+    /// puts up first.
+    GamedbExport {
+        force: bool,
+    },
+    /// gamedb pane, Enter in directory-entry mode: remember where the
+    /// export writes.
+    GamedbSetDir {
+        dir: String,
+    },
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
@@ -385,6 +469,37 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                 Intent::None
             }
             _ => Intent::ConfirmNo,
+        };
+    }
+
+    // Directory-entry mode owns printable keys on the gamedb pane, for the
+    // same reason id entry does on the misses pane: a path with a q in it
+    // must not quit.
+    if app.view == View::Gamedb && app.dir_input.is_some() {
+        let buffer = app.dir_input.as_mut().expect("checked");
+        return match key.code {
+            KeyCode::Esc => {
+                app.dir_input = None;
+                Intent::None
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+                Intent::None
+            }
+            KeyCode::Enter => {
+                let dir = app.dir_input.take().expect("checked");
+                if dir.trim().is_empty() {
+                    Intent::None
+                } else {
+                    Intent::GamedbSetDir { dir }
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                buffer.push(c);
+                Intent::None
+            }
+            KeyCode::Char('c') => Intent::Quit, // ctrl-c stays an exit
+            _ => Intent::None,
         };
     }
 
@@ -535,6 +650,42 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Intent::Quit,
         KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
+        // The gamedb pane's own verbs. `r` shadows the global refresh here:
+        // the pane's own "bring it up to date" is the index fetch, and the
+        // rows themselves refresh once a second anyway.
+        KeyCode::Char('r') if app.view == View::Gamedb => Intent::GamedbFetch,
+        KeyCode::Char('e') if app.view == View::Gamedb => {
+            if app.gamedb_index_ok {
+                Intent::GamedbExport { force: false }
+            } else {
+                // Without a trustworthy index nothing can say whether a page
+                // duplicates one the data set already carries, which is the
+                // one mistake that costs a reviewer real work. Ask first.
+                app.confirm = Some(Confirm {
+                    action: None,
+                    plan: Plan::default(),
+                    needs_root: false,
+                    label: Some("Export pages without checking the data set".to_string()),
+                    explanation: vec![
+                        format!("gamebus-gamedb index: {}", app.gamedb_index),
+                        "write every ready page anyway, unchecked".to_string(),
+                    ],
+                    scope: "A page that duplicates one the data set already has fails its \
+                            lint, and consolidating the two is a reviewer's work. Press r \
+                            to fetch the index (network) instead."
+                        .to_string(),
+                    details: false,
+                    on_yes: Some(Intent::GamedbExport { force: true }),
+                });
+                Intent::None
+            }
+        }
+        KeyCode::Char('d') if app.view == View::Gamedb => {
+            // Prefilled with the directory in force, so changing it is an
+            // edit rather than a retype.
+            app.dir_input = Some(app.gamedb_dir.clone());
+            Intent::None
+        }
         KeyCode::Char('r') => Intent::Refresh,
         KeyCode::Tab => {
             let idx = View::ALL.iter().position(|v| *v == app.view).unwrap_or(0);
@@ -659,6 +810,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         View::Status => render_status(f, chunks[2], app),
         View::Monitor => render_monitor(f, chunks[2], app),
         View::Misses => render_misses(f, chunks[2], app),
+        View::Gamedb => render_gamedb(f, chunks[2], app),
     }
     render_output(f, chunks[3], app);
     render_footer(f, chunks[4], app);
@@ -787,6 +939,12 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         View::Misses => {
             "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · d dismiss · q quit"
         }
+        View::Gamedb if app.dir_input.is_some() => {
+            "type the export directory · ⏎ save · esc cancel"
+        }
+        View::Gamedb => {
+            "↑↓ · tab view · r fetch index (net) · e export pages · d export directory · q quit"
+        }
     };
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
@@ -804,7 +962,7 @@ fn render_confirm(f: &mut Frame, app: &App) {
 
     let mut lines = vec![
         Line::from(Span::styled(
-            confirm.action.label(),
+            confirm.heading(),
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -817,7 +975,11 @@ fn render_confirm(f: &mut Frame, app: &App) {
         .saturating_sub(6 + trailer)
         .max(3);
 
-    let body: Vec<String> = if confirm.details {
+    // A confirmation with no plan behind it (the gamedb export) has no
+    // "exact commands" layer to open, so the detail toggle stays shut and
+    // the trailer below never offers it.
+    let details = confirm.details && confirm.action.is_some();
+    let body: Vec<String> = if details {
         confirm
             .plan
             .all_steps()
@@ -849,7 +1011,7 @@ fn render_confirm(f: &mut Frame, app: &App) {
     }
 
     // How far the change reaches — the question behind the dialog.
-    if !confirm.details {
+    if !details {
         lines.push(Line::from(""));
         for line in wrap(&confirm.scope, inner) {
             lines.push(Line::from(Span::styled(
@@ -874,10 +1036,10 @@ fn render_confirm(f: &mut Frame, app: &App) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        if confirm.details {
-            "y to proceed · d for the plain summary · any other key to cancel"
-        } else {
-            "y to proceed · d for the exact commands · any other key to cancel"
+        match (details, confirm.action.is_some()) {
+            (true, _) => "y to proceed · d for the plain summary · any other key to cancel",
+            (false, true) => "y to proceed · d for the exact commands · any other key to cancel",
+            (false, false) => "y to proceed · any other key to cancel",
         },
         Style::default().fg(Color::DarkGray),
     )));
@@ -912,6 +1074,8 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
 mod tests {
     use super::*;
     use ratatui::crossterm::event::KeyEventKind;
+
+    use super::super::gamedb::RowState;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -974,12 +1138,14 @@ mod tests {
     fn the_modal_swallows_every_key_and_only_y_proceeds() {
         let mut app = app_with_rows();
         app.confirm = Some(Confirm {
-            action: Action::Install(Target::User),
+            action: Some(Action::Install(Target::User)),
             plan: Plan::default(),
             needs_root: false,
             explanation: vec!["copy 3 programs".to_string()],
             scope: "Everything stays inside your home directory.".to_string(),
             details: false,
+            on_yes: None,
+            label: None,
         });
         assert_eq!(
             handle_key(&mut app, key(KeyCode::Char('y'))),
@@ -1004,12 +1170,14 @@ mod tests {
     fn d_toggles_the_detail_layer_instead_of_cancelling() {
         let mut app = app_with_rows();
         app.confirm = Some(Confirm {
-            action: Action::Install(Target::User),
+            action: Some(Action::Install(Target::User)),
             plan: Plan::default(),
             needs_root: false,
             explanation: vec!["copy 3 programs".to_string()],
             scope: "Everything stays inside your home directory.".to_string(),
             details: false,
+            on_yes: None,
+            label: None,
         });
 
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('d'))), Intent::None);
@@ -1044,8 +1212,155 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.view, View::Misses);
         handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.view, View::Gamedb);
+        handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.view, View::Status);
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
+    fn sample_gamedb_row(title: &str, state: RowState) -> GamedbRow {
+        GamedbRow {
+            key: format!("steam-{}", title.len()),
+            title: title.to_string(),
+            file: format!("{}.toml", title.to_lowercase()),
+            state,
+            id: Some("steam-870780".into()),
+            stores: vec!["egs/Calluna".into()],
+            exes: vec!["Control_DX12.exe".into()],
+            steam: Some(870780),
+            note: None,
+            entries: 9,
+        }
+    }
+
+    fn gamedb_view(index_ok: bool) -> GamedbView {
+        GamedbView {
+            rows: vec![
+                sample_gamedb_row("Control", RowState::Ready),
+                sample_gamedb_row(
+                    "Project Hospital",
+                    RowState::InGamedb("steam-868360".into()),
+                ),
+            ],
+            index: if index_ok {
+                "release v2026.08.23, fetched today".to_string()
+            } else {
+                "no index cached - r fetches it (net)".to_string()
+            },
+            index_ok,
+            export_dir: "/home/tester/Documents/gamebus-gamedb".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_gamedb_verbs_fire_only_in_the_gamedb_view() {
+        let mut app = app_with_rows();
+        app.set_gamedb(gamedb_view(true));
+        // Inert everywhere else - and `r` keeps its global meaning there.
+        for view in [View::Status, View::Monitor, View::Misses] {
+            app.view = view;
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char('e'))), Intent::None);
+            assert_eq!(
+                handle_key(&mut app, key(KeyCode::Char('r'))),
+                Intent::Refresh
+            );
+            assert!(app.dir_input.is_none(), "d opened the field on {view:?}");
+        }
+        app.view = View::Gamedb;
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('r'))),
+            Intent::GamedbFetch
+        );
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('e'))),
+            Intent::GamedbExport { force: false }
+        );
+        assert!(app.confirm.is_none(), "a fresh index asked anyway");
+    }
+
+    /// Without an index nothing can say whether a page duplicates one the
+    /// data set already has, so `e` must ask before writing.
+    #[test]
+    fn exporting_without_a_usable_index_asks_first() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        app.set_gamedb(gamedb_view(false));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('e'))), Intent::None);
+        let confirm = app.confirm.as_ref().expect("no dialog");
+        assert!(confirm.action.is_none());
+        assert_eq!(
+            confirm.on_yes,
+            Some(Intent::GamedbExport { force: true }),
+            "the dialog would run something else"
+        );
+        assert!(confirm.heading().contains("without checking"));
+        // The modal still owns the keyboard, and y is still the only yes.
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('y'))),
+            Intent::ConfirmYes
+        );
+    }
+
+    #[test]
+    fn directory_entry_mode_owns_the_keyboard_and_commits_on_enter() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        app.set_gamedb(gamedb_view(true));
+
+        // d opens the field, prefilled with the directory in force.
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(
+            app.dir_input.as_deref(),
+            Some("/home/tester/Documents/gamebus-gamedb")
+        );
+        // Printable keys type - including q, r and e, which must not quit,
+        // fetch or export while the field is open.
+        for c in ['q', 'r', 'e'] {
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
+        }
+        assert_eq!(handle_key(&mut app, key(KeyCode::Backspace)), Intent::None);
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::GamedbSetDir {
+                dir: "/home/tester/Documents/gamebus-gamedbqr".into()
+            }
+        );
+        assert!(app.dir_input.is_none(), "field stayed open after commit");
+
+        // An empty buffer commits nothing; Esc cancels without an intent.
+        app.gamedb_dir = String::new();
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
+        assert!(app.dir_input.is_none());
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Intent::None);
+        assert!(app.dir_input.is_none());
+        // And the pane is back to normal keys.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
+    }
+
+    #[test]
+    fn the_gamedb_pane_owns_its_own_selection_and_keeps_it_across_a_refresh() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        app.set_gamedb(gamedb_view(true));
+        handle_key(&mut app, key(KeyCode::Down));
+        let selected = |app: &App| {
+            app.gamedb_list
+                .selected()
+                .and_then(|i| app.gamedb.get(i))
+                .map(|r| r.title.clone())
+        };
+        assert_eq!(selected(&app).as_deref(), Some("Project Hospital"));
+        // A refresh that reorders keeps the selection on the same game.
+        let mut view = gamedb_view(true);
+        view.rows.reverse();
+        app.set_gamedb(view);
+        assert_eq!(selected(&app).as_deref(), Some("Project Hospital"));
+        // Wrap-around, like every other list here: the reversed refresh put
+        // the selection on row 0, and ↑ from there wraps to the last row.
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(app.gamedb_list.selected(), Some(1));
     }
 
     #[test]

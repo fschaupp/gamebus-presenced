@@ -65,7 +65,8 @@ fn run_env(home: &TempHome, args: &[&str], envs: &[(&str, &str)]) -> Output {
         .env_remove("XDG_CACHE_HOME")
         .env_remove("GAMEBUS_UMU_DB")
         .env_remove("GAMEBUS_UMU_API")
-        .env_remove("GAMEBUS_UMU_PROTONFIXES");
+        .env_remove("GAMEBUS_UMU_PROTONFIXES")
+        .env_remove("GAMEBUS_GAMEDB_INDEX");
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -820,4 +821,220 @@ fn umu_misses_verify_without_any_database_fails_and_touches_nothing() {
 
     // Honest failure means an untouched stash — byte for byte.
     assert_eq!(before, std::fs::read(&stash_path).unwrap());
+}
+
+// ---- gamedb: the same stash, as pages for the gamebus-gamedb data set.
+
+/// A real build of the data set (`gamedb-build --data gamedb`), trimmed to
+/// the tables the setup tool reads. Control is published here; anything else
+/// the stash carries is not, which is the whole point of the check.
+const FIXTURE_GAMEDB_INDEX: &str = r#"{
+  "schema_version": 1,
+  "games": [
+    {"id": "steam-870780", "title": "Control", "steam": 870780, "umu": null}
+  ],
+  "stores": [
+    {"id": "steam-870780", "store": "egs", "codename": "Calluna",
+     "seen": "2026-08-15", "source": "heroic-config", "confidence": "high"}
+  ],
+  "aliases": [
+    {"alias": "egs-Calluna", "id": "steam-870780"},
+    {"alias": "steam-870780", "id": "steam-870780"}
+  ],
+  "helpers": []
+}"#;
+
+/// Two games: Control, which the data set already carries, and Fixture
+/// Quest, which nothing upstream knows - one of each, so the listing and
+/// the export both have something to hold back and something to write.
+const FIXTURE_GAMEDB_STASH: &str = r#"{
+    "egs:Calluna":{"title":"Control","store":"egs","codename":"Calluna",
+        "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+        "first_seen":"2026-08-06","last_seen":"2026-08-15",
+        "drafted_id":{"id":"umu-870780","basis":"steam-sku","collision_checked":"2026-08-22"},
+        "fix":{"umu_id":"umu-870780","fixes":[],"checked":"2026-08-22"}},
+    "egs:Catnip":{"title":"Fixture Quest","store":"egs","codename":"Catnip",
+        "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+        "executable":"Z:\\games\\FixtureQuest\\FixtureQuest.exe",
+        "first_seen":"2026-08-06","last_seen":"2026-08-07"}}"#;
+
+/// Stash plus a local index, and the path the environment override points
+/// the tool at instead of the network.
+fn write_gamedb_fixtures(home: &TempHome) -> PathBuf {
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(stash_dir.join("umu-misses.json"), FIXTURE_GAMEDB_STASH).unwrap();
+    let index = home.path().join("identities.json");
+    std::fs::write(&index, FIXTURE_GAMEDB_INDEX).unwrap();
+    index
+}
+
+#[test]
+fn gamedb_lists_what_the_data_set_already_has_and_what_is_ready() {
+    let home = TempHome::new("gamedb-list");
+    let index = write_gamedb_fixtures(&home);
+
+    let out = run_env(
+        &home,
+        &["gamedb"],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "gamedb exited {:?}", out.status);
+    let text = stdout(&out);
+    assert!(
+        text.contains("Control") && text.contains("in gamebus-gamedb as steam-870780"),
+        "the published game is not marked as such:\n{text}"
+    );
+    assert!(
+        text.contains("Fixture Quest") && text.contains("egs/Catnip"),
+        "the ready game is missing its identity:\n{text}"
+    );
+    // The listing says how much the index can be trusted and where an
+    // export would go - both are decisions the user has to make.
+    assert!(text.contains("gamebus-gamedb index: local file"), "{text}");
+    assert!(text.contains("Export directory:"), "{text}");
+}
+
+#[test]
+fn gamedb_export_writes_a_page_per_ready_game_and_never_twice() {
+    let home = TempHome::new("gamedb-export");
+    let index = write_gamedb_fixtures(&home);
+    let out_dir = home.path().join("checkout");
+    let env = [("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())];
+
+    let out = run_env(
+        &home,
+        &["gamedb", "--export", "--out", out_dir.to_str().unwrap()],
+        &env,
+    );
+    assert!(out.status.success(), "export exited {:?}", out.status);
+    let text = stdout(&out);
+    assert!(
+        text.contains("held back") && text.contains("already in gamebus-gamedb as steam-870780"),
+        "the published game was not held back:\n{text}"
+    );
+    assert!(text.contains("1 page(s) written"), "{text}");
+    assert!(
+        text.contains("open a pull request at https://github.com/fschaupp/gamebus-gamedb"),
+        "the export never says where the page goes:\n{text}"
+    );
+
+    // The page itself: named by the title's slug, under games/.
+    let page = out_dir.join("games/fixture-quest.toml");
+    let toml = std::fs::read_to_string(&page).expect("no page written");
+    assert!(
+        !out_dir.join("games/control.toml").exists(),
+        "a second page for a published game was written"
+    );
+    for expected in [
+        "title = \"Fixture Quest\"",
+        "gamedb = \"egs-Catnip\"",
+        "[[stores.egs]]",
+        "codename = \"Catnip\"",
+        "exe = \"FixtureQuest.exe\"",
+        "seen = \"2026-08-07\"",
+        "source = \"heroic-config\"",
+        "confidence = \"high\"",
+    ] {
+        assert!(
+            toml.contains(expected),
+            "page missing {expected:?}:\n{toml}"
+        );
+    }
+    // Every line is either blank, a table header, or key = value - the
+    // shape a TOML parser needs, checked without pulling one in.
+    for line in toml.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(
+            line.starts_with('[') || line.split_once(" = ").is_some(),
+            "not a TOML line: {line:?}\n{toml}"
+        );
+    }
+
+    // A second run must never overwrite: the file on disk may carry a
+    // reviewer's edits, and this is the only copy of them.
+    let before = std::fs::read(&page).unwrap();
+    let out = run_env(
+        &home,
+        &["gamedb", "--export", "--out", out_dir.to_str().unwrap()],
+        &env,
+    );
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(
+        text.contains("already written at") && text.contains("delete it to regenerate"),
+        "the second run did not say the page was already there:\n{text}"
+    );
+    assert!(text.contains("0 page(s) written"), "{text}");
+    assert_eq!(
+        before,
+        std::fs::read(&page).unwrap(),
+        "the page was rewritten"
+    );
+}
+
+#[test]
+fn gamedb_export_without_a_destination_refuses_and_names_both_ways_to_give_one() {
+    let home = TempHome::new("gamedb-nodest");
+    let index = write_gamedb_fixtures(&home);
+    let out = run_env(
+        &home,
+        &["gamedb", "--export"],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(!out.status.success(), "export wrote somewhere unnamed");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--out"), "{err}");
+    assert!(err.contains("--documents"), "{err}");
+}
+
+#[test]
+fn gamedb_export_without_an_index_refuses_and_points_at_the_fetch() {
+    let home = TempHome::new("gamedb-noindex");
+    write_gamedb_fixtures(&home); // the index exists, but nothing points at it
+    let out_dir = home.path().join("checkout");
+    let out = run(
+        &home,
+        &["gamedb", "--export", "--out", out_dir.to_str().unwrap()],
+    );
+    assert!(
+        !out.status.success(),
+        "a page was written without checking the data set"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("No gamebus-gamedb index") && err.contains("--fetch"),
+        "{err}"
+    );
+    assert!(
+        !out_dir.exists(),
+        "the export directory was created before the check"
+    );
+}
+
+#[test]
+fn gamedb_documents_follows_the_users_own_documents_directory() {
+    let home = TempHome::new("gamedb-documents");
+    let index = write_gamedb_fixtures(&home);
+    // The localized name is why xdg's own file has to be read rather than
+    // "Documents" assumed.
+    std::fs::create_dir_all(home.path().join(".config")).unwrap();
+    std::fs::write(
+        home.path().join(".config/user-dirs.dirs"),
+        "XDG_DESKTOP_DIR=\"$HOME/Schreibtisch\"\nXDG_DOCUMENTS_DIR=\"$HOME/Dokumente\"\n",
+    )
+    .unwrap();
+
+    let out = run_env(
+        &home,
+        &["gamedb", "--export", "--documents"],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "export exited {:?}", out.status);
+    assert!(
+        home.path()
+            .join("Dokumente/gamebus-gamedb/games/fixture-quest.toml")
+            .exists(),
+        "the page did not land in the documents directory:\n{}",
+        stdout(&out)
+    );
 }
