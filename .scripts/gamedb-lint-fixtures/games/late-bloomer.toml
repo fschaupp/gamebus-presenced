@@ -1,0 +1,15 @@
+title = "Late Bloomer"
+gamedb = "gamedb-k7m2p9qz"
+merged_from = ["egs-LateBloomerApp"]
+exe = ["latebloomer.exe"]
+
+[ids]
+steam = 1234567
+source = "steam-sku"
+seen = "2026-08-22"
+
+[[stores.egs]]
+codename = "LateBloomerApp"
+seen = "2026-08-22"
+source = "manual"
+confidence = "high"

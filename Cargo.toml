@@ -1,3 +1,11 @@
+[workspace]
+# The daemon stays the default target: `cargo build`, `cargo test` and
+# `cargo clippy` at the repo root behave exactly as they did before
+# gamedb-build joined the workspace, and the daemon's dependency tree gains
+# nothing. Reach the builder explicitly with `-p gamedb-build`.
+members = [".", "gamedb-build"]
+default-members = ["."]
+
 [package]
 name = "gamebus-presenced"
 version = "0.1.0"
