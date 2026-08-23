@@ -398,6 +398,8 @@ fn set_title(report: &mut UmuReport, key: &str, title: &str, source: &str) -> (V
 
 /// Every store id the database actually uses (counted from the upstream
 /// CSV, 2026-08-07), most common first — the TUI's `s` key cycles these.
+/// The tail holds the ids a launcher can hand us but the CSV rarely
+/// carries, in umu's own order; `none` stays last, as the way out.
 pub(crate) const KNOWN_STORES: &[&str] = &[
     "egs",
     "gog",
@@ -406,6 +408,9 @@ pub(crate) const KNOWN_STORES: &[&str] = &[
     "humble",
     "ea",
     "zoomplatform",
+    "steam",
+    "itchio",
+    "battlenet",
     "none",
 ];
 
