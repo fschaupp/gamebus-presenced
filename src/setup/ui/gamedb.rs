@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::super::gamedb::{GamedbRow, RowState};
+use super::misses::render_pick;
 use super::{field, App};
 
 pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
@@ -75,6 +76,12 @@ pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, panes[0], &mut app.gamedb_list);
 
+    // The pick list belongs to the stash entry being corrected, not to the
+    // tab the correction was started from, so it draws here too.
+    if render_pick(f, panes[1], app) {
+        return;
+    }
+
     let Some(row) = app.gamedb_list.selected().and_then(|i| app.gamedb.get(i)) else {
         return;
     };
@@ -91,6 +98,17 @@ pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled(
                 format!("already in gamebus-gamedb as {id}"),
                 Style::default().fg(Color::Green),
+            ),
+        ])),
+        // Not held back and not a new file: an edit to the published page.
+        RowState::Enhance { id, additions } => detail.push(Line::from(vec![
+            Span::styled(
+                format!("{:<11} ", "Enhances"),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("{id} in gamebus-gamedb: {}", additions.join(", ")),
+                Style::default().fg(Color::Cyan),
             ),
         ])),
         RowState::Incomplete(reason) => detail.push(Line::from(vec![
@@ -125,8 +143,26 @@ pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
             if row.entries == 1 { "entry" } else { "entries" }
         ),
     ));
+    // Which entry a correction typed here lands on.
+    if !row.rep_key.is_empty() {
+        detail.push(field("Corrects", &row.rep_key));
+    }
     if let Some(note) = &row.note {
         detail.push(field("Note", note));
+    }
+    if let Some(buffer) = &app.id_input {
+        detail.push(input_line(
+            "Assign id",
+            buffer,
+            "  ⏎ check+save · esc cancel",
+        ));
+    }
+    if let Some(buffer) = &app.title_input {
+        detail.push(input_line(
+            "Set title",
+            buffer,
+            &format!("  now: {} · ⏎ save · esc cancel", row.title),
+        ));
     }
     if let Some(buffer) = &app.dir_input {
         detail.push(Line::from(vec![
@@ -154,6 +190,18 @@ pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).title(" Detail ")),
         panes[1],
     );
+}
+
+/// One open text field, as the detail pane draws it.
+fn input_line(label: &str, buffer: &str, hint: &str) -> Line<'static> {
+    let cyan = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    Line::from(vec![
+        Span::styled(format!("{label:<11} "), cyan),
+        Span::styled(format!("{buffer}▏"), cyan),
+        Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 /// The two lines above the list: how much the index can be trusted, and
@@ -185,6 +233,12 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 
 /// The gray line under each title: what identifies the game.
 fn summary(row: &GamedbRow) -> String {
+    if let RowState::Enhance { id, additions } = &row.state {
+        return format!(
+            "in gamebus-gamedb as {id}, enhancement: {}",
+            additions.join(", ")
+        );
+    }
     let mut parts = Vec::new();
     if let Some(id) = &row.id {
         parts.push(id.clone());
@@ -207,6 +261,7 @@ fn row_state(row: &GamedbRow) -> (&'static str, Style) {
                 .fg(Color::Green)
                 .add_modifier(Modifier::DIM),
         ),
+        RowState::Enhance { .. } => ("+", Style::default().fg(Color::Cyan)),
         RowState::Ready => ("●", Style::default().fg(Color::Cyan)),
         RowState::Incomplete(_) => ("○", Style::default().fg(Color::DarkGray)),
     }
@@ -228,6 +283,8 @@ mod tests {
             steam: None,
             note: None,
             entries: 1,
+            entry_keys: vec!["egs:Calluna".into()],
+            rep_key: "egs:Calluna".into(),
         }
     }
 
@@ -259,9 +316,34 @@ mod tests {
         };
         let glyphs = [
             row_state(&published).0,
+            row_state(&enhancing()).0,
             row_state(&row(Some("steam-1"), &[], &[])).0,
             row_state(&unfinished).0,
         ];
-        assert_eq!(glyphs, ["✓", "●", "○"]);
+        assert_eq!(glyphs, ["✓", "+", "●", "○"]);
+    }
+
+    fn enhancing() -> GamedbRow {
+        GamedbRow {
+            state: RowState::Enhance {
+                id: "steam-870780".into(),
+                additions: vec!["+exe Control_DX12.exe".into()],
+            },
+            ..row(
+                Some("steam-870780"),
+                &["egs/Calluna"],
+                &["Control_DX12.exe"],
+            )
+        }
+    }
+
+    /// A published page with something to add reads as neither "held back"
+    /// nor "ready": the line has to say what the edit would be.
+    #[test]
+    fn an_enhancement_line_says_what_it_would_add() {
+        assert_eq!(
+            summary(&enhancing()),
+            "in gamebus-gamedb as steam-870780, enhancement: +exe Control_DX12.exe"
+        );
     }
 }

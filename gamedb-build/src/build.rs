@@ -4,7 +4,7 @@
 //! is the seam between them. One relational shape backs all of it:
 //!
 //! ```text
-//! games(id PK, title, year, variant_of, note, steam, umu)
+//! games(id PK, title, page, year, variant_of, note, steam, umu)
 //! stores(id, store, codename, edition, exe, seen, source, confidence)
 //! aliases(alias PK, id)
 //! helpers(exe PK, reason, incident, seen)
@@ -52,6 +52,11 @@ pub struct Options {
 pub struct Game {
     pub id: String,
     pub title: String,
+    /// The file stem of the page this row was folded from (`control`,
+    /// `prey-2017`) - a human label, never a key. It is here so a tool
+    /// holding an id can name the file to edit; the title's slug stops
+    /// being that name the moment two games share a title.
+    pub page: String,
     pub year: Option<i64>,
     pub variant_of: Option<String>,
     pub note: Option<String>,
@@ -193,6 +198,7 @@ pub fn tables(data: &DataSet) -> Result<Tables> {
         games.push(Game {
             id: id.clone(),
             title: page.str_field("title").unwrap_or_default().to_string(),
+            page: page.slug.clone(),
             year: page.int_field("year"),
             variant_of: page.str_field("variant_of").map(str::to_string),
             note: page.str_field("note").map(str::to_string),

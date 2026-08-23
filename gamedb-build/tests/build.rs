@@ -269,6 +269,7 @@ fn optional_columns_carry_what_the_page_wrote_and_nothing_else() {
         .iter()
         .find(|g| g.id == "gog-1207000001")
         .expect("the remaster");
+    assert_eq!(remaster.page, "aurora-remastered");
     assert_eq!(remaster.variant_of.as_deref(), Some("umu-1450"));
     assert_eq!(remaster.year, None);
     assert_eq!(remaster.note, None);
@@ -317,7 +318,16 @@ fn the_json_is_the_shape_and_nothing_more() {
     };
     assert_eq!(
         column_order(&json["games"]),
-        ["id", "title", "year", "variant_of", "note", "steam", "umu"]
+        [
+            "id",
+            "title",
+            "page",
+            "year",
+            "variant_of",
+            "note",
+            "steam",
+            "umu"
+        ]
     );
     assert_eq!(
         column_order(&json["stores"]),
@@ -373,14 +383,17 @@ fn the_sqlite_holds_the_same_rows_as_the_json() {
         .expect("alias resolves");
     assert_eq!(id, "umu-1450");
 
-    let (title, year, umu): (String, Option<i64>, Option<String>) = db
+    let (title, page, year, umu): (String, String, Option<i64>, Option<String>) = db
         .query_row(
-            "SELECT title, year, umu FROM games WHERE id = ?1",
+            "SELECT title, page, year, umu FROM games WHERE id = ?1",
             [&id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .expect("game row");
     assert_eq!(title, "Aurora");
+    // The file the row was folded from, so a tool holding the id can name
+    // the page to edit without re-deriving a slug from the title.
+    assert_eq!(page, "aurora");
     assert_eq!(year, Some(2019));
     assert_eq!(umu.as_deref(), Some("umu-1450"));
 

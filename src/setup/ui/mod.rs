@@ -46,12 +46,24 @@ pub enum View {
     /// rather than per launch identity, checked against what the data set
     /// already publishes. `r` refreshes that index (network, and the footer
     /// says so), `e` writes the ready pages, `d` sets where they go.
+    ///
+    /// It also carries the misses pane's matchup verbs, acting on the
+    /// selected game's representative stash entry - `p`, `o`, `t`, `s`, `a`,
+    /// and `x` for dismiss, because `d` is the directory here. This is the
+    /// tab where you find out an identity is wrong.
     Gamedb,
 }
 
 impl View {
     /// Tab-bar order; `Tab` cycles it.
     pub const ALL: [View; 4] = [View::Status, View::Monitor, View::Misses, View::Gamedb];
+
+    /// Whether this view's keys correct a stash entry. Both stash views do,
+    /// so the text-entry and pick modes are gated on this rather than on one
+    /// view - a title typed from the gamedb tab has to land somewhere.
+    pub fn edits_misses(self) -> bool {
+        matches!(self, View::Misses | View::Gamedb)
+    }
 
     pub fn title(self) -> &'static str {
         match self {
@@ -287,6 +299,24 @@ impl App {
             .map(|(k, _)| k.clone())
     }
 
+    /// The gamedb row under the cursor, if any.
+    pub fn selected_gamedb_row(&self) -> Option<&GamedbRow> {
+        self.gamedb_list.selected().and_then(|i| self.gamedb.get(i))
+    }
+
+    /// The stash entry a correction typed right now would land on: the
+    /// selected entry on the misses pane, and on the gamedb pane — whose
+    /// rows are games, not entries — that game's representative entry.
+    pub fn edit_key(&self) -> Option<String> {
+        match self.view {
+            View::Gamedb => self
+                .selected_gamedb_row()
+                .map(|row| row.rep_key.clone())
+                .filter(|key| !key.is_empty()),
+            _ => self.selected_miss_key(),
+        }
+    }
+
     /// Move the selection off the current entry onto its list neighbor —
     /// the one below, or the one above when the cursor sits on the last
     /// row. Used before an action that resorts the current entry away
@@ -345,6 +375,11 @@ impl App {
             if let Some(idx) = self.gamedb.iter().position(|row| row.key == key) {
                 self.gamedb_list.select(Some(idx));
             }
+        }
+        // The pane's keys act on the selected game; without this they stay
+        // inert until the first keypress.
+        if self.gamedb_list.selected().is_none() && !self.gamedb.is_empty() {
+            self.gamedb_list.select(Some(0));
         }
     }
 
@@ -505,7 +540,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
 
     // Id-entry mode owns printable keys next: typing "status" into the id
     // field must not switch views or quit.
-    if app.view == View::Misses && app.id_input.is_some() {
+    if app.view.edits_misses() && app.id_input.is_some() {
         let buffer = app.id_input.as_mut().expect("checked");
         return match key.code {
             KeyCode::Esc => {
@@ -518,7 +553,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             }
             KeyCode::Enter => {
                 let id = app.id_input.take().expect("checked");
-                match app.selected_miss_key() {
+                match app.edit_key() {
                     Some(key) if !id.trim().is_empty() => Intent::UmuAssign { key, id },
                     _ => Intent::None,
                 }
@@ -533,7 +568,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
     }
 
     // Title-entry mode owns printable keys the same way.
-    if app.view == View::Misses && app.title_input.is_some() {
+    if app.view.edits_misses() && app.title_input.is_some() {
         let buffer = app.title_input.as_mut().expect("checked");
         return match key.code {
             KeyCode::Esc => {
@@ -546,7 +581,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             }
             KeyCode::Enter => {
                 let title = app.title_input.take().expect("checked");
-                match app.selected_miss_key() {
+                match app.edit_key() {
                     Some(key) if !title.trim().is_empty() => Intent::UmuSetTitle {
                         key,
                         title,
@@ -567,7 +602,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
     // Pick mode owns the keyboard likewise: the candidate list is a modal
     // choice, so the selection keys move through candidates and no pane verb
     // fires underneath it.
-    if app.view == View::Misses && app.pick.is_some() {
+    if app.view.edits_misses() && app.pick.is_some() {
         let pick = app.pick.as_mut().expect("checked");
         return match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Intent::Quit,
@@ -686,6 +721,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             app.dir_input = Some(app.gamedb_dir.clone());
             Intent::None
         }
+        // `d` is taken here, so dismiss gets its own key. It parks the
+        // representative entry only - the other launches folded into this
+        // game are separate judgements.
+        KeyCode::Char('x') if app.view == View::Gamedb => match app.edit_key() {
+            Some(key) => Intent::UmuDismiss { key },
+            None => Intent::None,
+        },
         KeyCode::Char('r') => Intent::Refresh,
         KeyCode::Tab => {
             let idx = View::ALL.iter().position(|v| *v == app.view).unwrap_or(0);
@@ -694,14 +736,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         }
         // The misses pane's own verbs.
         KeyCode::Char('v') if app.view == View::Misses => Intent::UmuVerify,
-        KeyCode::Char('a') if app.view == View::Misses => {
-            if app.selected_miss_key().is_some() {
+        KeyCode::Char('a') if app.view.edits_misses() => {
+            if let Some(key) = app.edit_key() {
                 // Prefill with the existing draft so a small correction is
                 // an edit, not a retype.
                 let current = app
-                    .miss_list
-                    .selected()
-                    .and_then(|i| app.misses.get(i))
+                    .misses
+                    .iter()
+                    .find(|(k, _)| *k == key)
                     .and_then(|(_, m)| m.drafted_id.as_ref())
                     .map(|d| d.id.clone())
                     .unwrap_or_else(|| "umu-".to_string());
@@ -709,24 +751,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             }
             Intent::None
         }
-        KeyCode::Char('t') if app.view == View::Misses => {
+        KeyCode::Char('t') if app.view.edits_misses() => {
             // Empty on purpose, not prefilled with the resolver's title: the
             // point of the verb is that the resolver got it wrong. The input
             // line shows the current effective title beside the buffer.
-            if app.selected_miss_key().is_some() {
+            if app.edit_key().is_some() {
                 app.title_input = Some(String::new());
             }
             Intent::None
         }
-        KeyCode::Char('p') if app.view == View::Misses => match app.selected_miss_key() {
+        KeyCode::Char('p') if app.view.edits_misses() => match app.edit_key() {
             Some(key) => Intent::UmuPick { key },
             None => Intent::None,
         },
-        KeyCode::Char('o') if app.view == View::Misses => match app.selected_miss_key() {
+        KeyCode::Char('o') if app.view.edits_misses() => match app.edit_key() {
             Some(key) => Intent::UmuOnline { key },
             None => Intent::None,
         },
-        KeyCode::Char('s') if app.view == View::Misses => match app.selected_miss_key() {
+        KeyCode::Char('s') if app.view.edits_misses() => match app.edit_key() {
             Some(key) => Intent::UmuStore { key },
             None => Intent::None,
         },
@@ -771,6 +813,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.move_selection(-1);
+            Intent::None
+        }
+        // The seam between the two tabs: this game, as the stash actually
+        // recorded it. The misses selection is key-stable, so it stays put.
+        KeyCode::Enter if app.view == View::Gamedb => {
+            if let Some(key) = app.edit_key() {
+                if let Some(idx) = app.misses.iter().position(|(k, _)| *k == key) {
+                    app.view = View::Misses;
+                    app.miss_list.select(Some(idx));
+                }
+            }
             Intent::None
         }
         KeyCode::Enter if app.view == View::Status => match app.selected_action() {
@@ -939,11 +992,21 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         View::Misses => {
             "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · d dismiss · q quit"
         }
+        View::Gamedb if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
+            "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
+        }
+        View::Gamedb if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
+        View::Gamedb if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
+        View::Gamedb if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
         View::Gamedb if app.dir_input.is_some() => {
             "type the export directory · ⏎ save · esc cancel"
         }
+        // The pane's own verbs, then the matchup verbs - which act on this
+        // game's representative stash entry only.
         View::Gamedb => {
-            "↑↓ · tab view · r fetch index (net) · e export pages · d export directory · q quit"
+            "↑↓ · tab view · ⏎ show entry · r index (net) · e export · d directory · \
+             on the entry: o lookup (net) · a assign · t title · p pick · s store · \
+             x dismiss · q quit"
         }
     };
     f.render_widget(
@@ -1230,6 +1293,8 @@ mod tests {
             steam: Some(870780),
             note: None,
             entries: 9,
+            entry_keys: vec![format!("egs:{title}")],
+            rep_key: format!("egs:{title}"),
         }
     }
 
@@ -1361,6 +1426,162 @@ mod tests {
         // the selection on row 0, and ↑ from there wraps to the last row.
         handle_key(&mut app, key(KeyCode::Up));
         assert_eq!(app.gamedb_list.selected(), Some(1));
+    }
+
+    /// Gap 2: the gamedb tab shows a game whose identity is wrong and, until
+    /// now, offered nothing to fix it with. The matchup verbs work here, and
+    /// each one acts on the game's REPRESENTATIVE stash entry - the one the
+    /// fold reads first, so correcting it corrects the page.
+    #[test]
+    fn the_matchup_verbs_work_on_the_gamedb_tab_and_act_on_the_representative_entry() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        app.set_gamedb(gamedb_view(true));
+        app.set_misses(vec![
+            sample_miss("Control"),
+            sample_miss("Project Hospital"),
+        ]);
+        // Row 0 is Control, whose representative entry is egs:Control.
+        assert_eq!(app.edit_key().as_deref(), Some("egs:Control"));
+
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('p'))),
+            Intent::UmuPick {
+                key: "egs:Control".into()
+            }
+        );
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('o'))),
+            Intent::UmuOnline {
+                key: "egs:Control".into()
+            }
+        );
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('s'))),
+            Intent::UmuStore {
+                key: "egs:Control".into()
+            }
+        );
+        // `d` is the export directory here, so dismiss moved to `x`.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('d'))), Intent::None);
+        assert!(app.dir_input.is_some(), "d stopped opening the directory");
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('x'))),
+            Intent::UmuDismiss {
+                key: "egs:Control".into()
+            }
+        );
+
+        // And the verbs follow the selection: row 1 is a different game.
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('p'))),
+            Intent::UmuPick {
+                key: "egs:Project Hospital".into()
+            }
+        );
+    }
+
+    /// The text-entry modes are gated on "this view edits stash entries",
+    /// not on the misses view: a title typed from the gamedb tab has to land
+    /// on the representative entry rather than nowhere.
+    #[test]
+    fn the_title_and_id_fields_commit_against_the_representative_entry() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        app.set_gamedb(gamedb_view(true));
+        app.set_misses(vec![sample_miss("Control")]);
+
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        assert_eq!(app.title_input.as_deref(), Some(""));
+        // The field owns printable keys here too: e, r and q must not
+        // export, fetch or quit while it is open.
+        for c in ['P', 'e', 'r', 'q'] {
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
+        }
+        for _ in 0..3 {
+            handle_key(&mut app, key(KeyCode::Backspace));
+        }
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuSetTitle {
+                key: "egs:Control".into(),
+                title: "P".into(),
+                source: "you".into(),
+            }
+        );
+
+        // `a` prefills from the entry's own draft, exactly as it does on the
+        // misses tab - the entry is the same entry.
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        assert_eq!(app.id_input.as_deref(), Some("umu-"));
+        for c in ['8', '7'] {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuAssign {
+                key: "egs:Control".into(),
+                id: "umu-87".into()
+            }
+        );
+    }
+
+    /// Pick mode is bound to a stash entry, so it has to survive being
+    /// opened from the gamedb tab - and Enter still commits the candidate.
+    #[test]
+    fn pick_mode_opens_and_commits_from_the_gamedb_tab_too() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        app.set_gamedb(gamedb_view(true));
+        app.set_misses(vec![sample_miss("Control")]);
+        app.pick = Some(Pick {
+            key: "egs:Control".into(),
+            candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
+            selected: 0,
+            stale: None,
+        });
+        // The mode owns the keyboard: q does not quit underneath it.
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::None);
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Enter)),
+            Intent::UmuPickEntry {
+                key: "egs:Control".into(),
+                store: "egs".into(),
+                codename: "Calluna".into(),
+                umu_id: "umu-870780".into(),
+            }
+        );
+        assert!(app.pick.is_none());
+    }
+
+    /// Enter crosses the seam between the two tabs: this game, as the stash
+    /// actually recorded it.
+    #[test]
+    fn enter_on_a_gamedb_row_jumps_to_the_entry_behind_it() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        app.set_gamedb(gamedb_view(true));
+        app.set_misses(vec![
+            sample_miss("Brotato"),
+            sample_miss("Control"),
+            sample_miss("Project Hospital"),
+        ]);
+        handle_key(&mut app, key(KeyCode::Down)); // row 1: Project Hospital
+        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
+        assert_eq!(app.view, View::Misses);
+        assert_eq!(
+            app.selected_miss_key().as_deref(),
+            Some("egs:Project Hospital")
+        );
+
+        // A row whose entry the stash no longer has leaves the view alone -
+        // jumping to nothing would be worse than not jumping.
+        app.view = View::Gamedb;
+        app.set_misses(vec![sample_miss("Brotato")]);
+        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
+        assert_eq!(app.view, View::Gamedb);
     }
 
     #[test]

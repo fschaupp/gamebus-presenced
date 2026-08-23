@@ -49,6 +49,11 @@ pub struct Endpoints {
     /// data set's latest release - what the gamedb export checks a page
     /// against before writing it.
     pub gamedb_identities: String,
+    /// The raw game pages on gamebus-gamedb's main branch, one file per
+    /// page: `<pages>/<page>.toml`. An enhancement needs the text of the
+    /// page it is adding to, and this is where it comes from when no local
+    /// checkout has it.
+    pub gamedb_pages: String,
     /// The gamebus-gamedb repository, where an exported page goes next.
     pub gamedb_project: String,
 }
@@ -88,6 +93,7 @@ impl Endpoints {
             egs_search: get("egs.search"),
             egs_sandboxes: get("egs.sandboxes"),
             gamedb_identities: get("gamedb.identities"),
+            gamedb_pages: get("gamedb.pages"),
             gamedb_project: get("gamedb.project"),
         }
     }
@@ -171,6 +177,7 @@ mod tests {
             "egs.search",
             "egs.sandboxes",
             "gamedb.identities",
+            "gamedb.pages",
             "gamedb.project",
         ] {
             assert!(

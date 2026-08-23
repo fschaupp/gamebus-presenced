@@ -33,13 +33,27 @@ pub struct GamedbRow {
     pub note: Option<String>,
     /// How many stash entries folded into this one page.
     pub entries: usize,
+    /// Every stash key folded in, so the pane can say what a correction on
+    /// this row does and does not touch.
+    pub entry_keys: Vec<String>,
+    /// The stash entry the matchup keys act on: the one carrying a store
+    /// identity, else the most recently seen.
+    pub rep_key: String,
 }
 
-/// Where a row stands - the three glyphs the pane draws.
+/// Where a row stands - the four glyphs the pane draws.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowState {
-    /// Already published, with the id it resolves to upstream.
+    /// Already published, with the id it resolves to upstream, and carrying
+    /// everything this machine knows.
     InGamedb(String),
+    /// Already published, but this machine knows more: the id it resolves
+    /// to, and what an export would add to that page.
+    Enhance {
+        id: String,
+        /// One phrase per addition, `+gog/1660194629` style. Never empty.
+        additions: Vec<String>,
+    },
     Ready,
     /// Would not pass the lint, and why.
     Incomplete(String),
@@ -87,6 +101,10 @@ pub(crate) fn tui_view() -> GamedbView {
             id: c.canonical_id(),
             state: match &c.status {
                 Status::InGamedb { id, .. } => RowState::InGamedb(id.clone()),
+                Status::Enhance { id, additions, .. } => RowState::Enhance {
+                    id: id.clone(),
+                    additions: additions.iter().map(|a| a.label()).collect(),
+                },
                 Status::Ready => RowState::Ready,
                 Status::Incomplete { reason } => RowState::Incomplete(reason.clone()),
             },
@@ -100,6 +118,8 @@ pub(crate) fn tui_view() -> GamedbView {
             steam: c.steam,
             note: c.note.clone(),
             entries: c.entries,
+            entry_keys: c.entry_keys,
+            rep_key: c.rep_key,
             key: c.key,
         })
         .collect();
@@ -176,16 +196,20 @@ pub(crate) fn tui_export(force: bool) -> (Vec<String>, bool) {
         Err(e) => return (vec![e], false),
     };
 
-    match export::export(&report, &loaded, &out_dir) {
+    // Never `--fetch-pages` from here: `r` is this pane's one network key,
+    // and the directory it writes to should be a checkout that has the page
+    // already.
+    match export::export(&report, &loaded, &out_dir, false) {
         Ok(summary) => {
             lines.extend(summary.lines);
             lines.push(format!(
-                "{} page(s) written to {}, {} held back.",
+                "{} page(s) written to {}, {} enhanced, {} held back.",
                 summary.written,
                 out_dir.join("games").display(),
+                summary.enhanced,
                 summary.held
             ));
-            if summary.written > 0 {
+            if summary.written > 0 || summary.enhanced > 0 {
                 lines.push(export::hint());
             }
             (lines, true)

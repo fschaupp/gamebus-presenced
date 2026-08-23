@@ -11,7 +11,11 @@
 //! - default: the candidate list, with what the data set already carries.
 //! - `--fetch`: refresh the cached identity index. One request, on the
 //!   user's word, like every other fetch in this tool.
-//! - `--export --out DIR` (or `--documents`): write the ready pages.
+//! - `--export --out DIR` (or `--documents`): write the ready pages, and
+//!   enhance the published ones this machine knows more about.
+//! - `--fetch-pages`: let an enhancement fetch the page it is adding to,
+//!   for when `--out` is not a checkout of the data set. One request per
+//!   page, on the user's word, like every other fetch in this tool.
 //!
 //! Nothing here runs without being asked, nothing overwrites a file, and
 //! the export refuses to run against an index too old to be trusted -
@@ -26,6 +30,7 @@ use crate::endpoints::Endpoints;
 use crate::umu_report::UmuReport;
 
 mod config;
+mod enhance;
 mod export;
 mod index;
 mod pages;
@@ -35,7 +40,7 @@ pub(crate) use self::tui::{
     tui_export, tui_fetch, tui_set_dir, tui_view, GamedbRow, GamedbView, RowState,
 };
 
-use self::pages::{candidates, Status};
+use self::pages::{additions_label, candidates, Status};
 
 /// The endpoints, from endpoints.toml - loaded once per process, like the
 /// umu side's.
@@ -113,19 +118,20 @@ pub fn run(args: &[String]) -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-        return match export::export(&report, &loaded, &out_dir) {
+        return match export::export(&report, &loaded, &out_dir, opts.fetch_pages) {
             Ok(summary) => {
                 for line in &summary.lines {
                     println!("{line}");
                 }
                 println!();
                 println!(
-                    "{} page(s) written to {}, {} held back.",
+                    "{} page(s) written to {}, {} enhanced, {} held back.",
                     summary.written,
                     out_dir.join("games").display(),
+                    summary.enhanced,
                     summary.held
                 );
-                if summary.written > 0 {
+                if summary.written > 0 || summary.enhanced > 0 {
                     println!("{}", export::hint());
                 }
                 ExitCode::SUCCESS
@@ -149,6 +155,9 @@ struct Opts {
     out: Option<PathBuf>,
     documents: bool,
     stale_ok: bool,
+    /// Let an enhancement fetch the published page it adds to, when the
+    /// destination is not a checkout that already has it.
+    fetch_pages: bool,
 }
 
 impl Opts {
@@ -159,6 +168,7 @@ impl Opts {
             out: None,
             documents: false,
             stale_ok: false,
+            fetch_pages: false,
         };
         let mut it = args.iter();
         while let Some(arg) = it.next() {
@@ -167,6 +177,7 @@ impl Opts {
                 "--export" => opts.export = true,
                 "--documents" => opts.documents = true,
                 "--stale-ok" => opts.stale_ok = true,
+                "--fetch-pages" => opts.fetch_pages = true,
                 "--out" => {
                     let path = it.next().ok_or("--out needs a directory")?;
                     opts.out = Some(PathBuf::from(path));
@@ -203,6 +214,15 @@ fn list(report: &UmuReport, loaded: Option<&index::Loaded>) {
         let title = candidate.title.as_deref().unwrap_or("(unresolved)");
         let (glyph, note) = match &candidate.status {
             Status::InGamedb { id, .. } => ("✓", format!("in gamebus-gamedb as {id}")),
+            // Not a page to write: a page to add to. The glyph says so, and
+            // the line says exactly what would be added.
+            Status::Enhance { id, additions, .. } => (
+                "+",
+                format!(
+                    "in gamebus-gamedb as {id}, enhancement: {}",
+                    additions_label(additions)
+                ),
+            ),
             Status::Ready => (
                 "●",
                 format!(
@@ -230,6 +250,8 @@ fn list(report: &UmuReport, loaded: Option<&index::Loaded>) {
     println!("Refresh what the data set carries:  gamebus-setup gamedb --fetch");
     println!("Write the ready pages:              gamebus-setup gamedb --export --out DIR");
     println!("                                    (--documents writes to the directory above)");
+    println!("A + above is an edit to a page that already exists: point --out at a checkout");
+    println!("of gamebus-gamedb, or add --fetch-pages to fetch the page it adds to (net).");
 }
 
 /// The stores and executables behind a ready page, for the listing's line.
@@ -256,7 +278,8 @@ mod tests {
     fn the_flags_parse_and_an_unknown_one_is_refused() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let opts = Opts::parse(&args(&["--fetch", "--export", "--out", "/tmp/x"])).unwrap();
-        assert!(opts.fetch && opts.export && !opts.stale_ok);
+        assert!(opts.fetch && opts.export && !opts.stale_ok && !opts.fetch_pages);
+        assert!(Opts::parse(&args(&["--fetch-pages"])).unwrap().fetch_pages);
         assert_eq!(opts.out.as_deref(), Some(std::path::Path::new("/tmp/x")));
         assert!(
             Opts::parse(&args(&["--out"])).is_err(),

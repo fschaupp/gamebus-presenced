@@ -1,20 +1,18 @@
 //! What gamebus-gamedb already knows: the published identity index.
 //!
 //! The data set builds `identities.json` on every release - four flat
-//! tables, of which two matter here: `games` (id and title) and `aliases`
-//! (every identifier that resolves to a page - the canonical id, each
-//! `<store>-<codename>`, the Steam app id, the umu id, `exe:<basename>` for
-//! every executable named, and everything absorbed through `merged_from`).
-//! One lookup per identifier answers "does a page for this game exist
-//! already?", which is the first thing `gamedb/CONTRIBUTING.md` asks a
-//! contributor to check.
+//! tables, of which three matter here. `aliases` (every identifier that
+//! resolves to a page) answers "does a page for this game exist already?",
+//! which is the first thing `gamedb/CONTRIBUTING.md` asks a contributor to
+//! check. `games` and `stores` answer the follow-up: does that page already
+//! carry everything this machine knows, or is there something to add?
 //!
 //! Cached exactly like the protonfix list next door (`umu_misses::fixes`):
 //! one request on the user's word, a sidecar recording when it happened and
 //! which release it came from, a staleness window, and an environment
 //! override so tests never touch the network.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,13 +20,22 @@ use serde::Deserialize;
 
 use super::{endpoints, HTTP_TIMEOUT, USER_AGENT};
 
-/// The published index, reduced to the two lookups the export needs.
+/// The published index, reduced to the lookups the export needs.
 #[derive(Debug, Default)]
 pub(super) struct GamedbIndex {
     /// Every alias the data set publishes → the page's canonical id.
     by_alias: HashMap<String, String>,
     /// Canonical id → the page's title, for "already in gamebus-gamedb as".
     titles: HashMap<String, String>,
+    /// Canonical id → the page's file stem (`control`). Absent in an index
+    /// built before the column existed; see [`GamedbIndex::page`].
+    pages: HashMap<String, String>,
+    /// Canonical id → `games.steam`. A missing entry is what makes a Steam
+    /// app id worth contributing.
+    steam: HashMap<String, u64>,
+    /// `(canonical id, store, codename)` for every row of `stores`: whether
+    /// a store identity this machine saw is already on the page.
+    store_rows: HashSet<(String, String, String)>,
 }
 
 impl GamedbIndex {
@@ -40,6 +47,8 @@ impl GamedbIndex {
             #[serde(default)]
             games: Vec<RawGame>,
             #[serde(default)]
+            stores: Vec<RawStore>,
+            #[serde(default)]
             aliases: Vec<RawAlias>,
         }
         #[derive(Deserialize)]
@@ -47,6 +56,17 @@ impl GamedbIndex {
             id: String,
             #[serde(default)]
             title: String,
+            /// Added in gamedb-build 0.1.1; the published index predates it.
+            #[serde(default)]
+            page: Option<String>,
+            #[serde(default)]
+            steam: Option<u64>,
+        }
+        #[derive(Deserialize)]
+        struct RawStore {
+            id: String,
+            store: String,
+            codename: String,
         }
         #[derive(Deserialize)]
         struct RawAlias {
@@ -55,11 +75,32 @@ impl GamedbIndex {
         }
         let raw: Raw =
             serde_json::from_str(raw).map_err(|e| format!("not a gamebus-gamedb index: {e}"))?;
-        let titles: HashMap<String, String> =
-            raw.games.into_iter().map(|g| (g.id, g.title)).collect();
+        let mut titles = HashMap::with_capacity(raw.games.len());
+        let mut pages = HashMap::new();
+        let mut steam = HashMap::new();
+        for game in raw.games {
+            if let Some(page) = game.page.filter(|p| !p.is_empty()) {
+                pages.insert(game.id.clone(), page);
+            }
+            if let Some(appid) = game.steam {
+                steam.insert(game.id.clone(), appid);
+            }
+            titles.insert(game.id, game.title);
+        }
+        let store_rows: HashSet<(String, String, String)> = raw
+            .stores
+            .into_iter()
+            .map(|s| (s.id, s.store, s.codename))
+            .collect();
         let by_alias: HashMap<String, String> =
             raw.aliases.into_iter().map(|a| (a.alias, a.id)).collect();
-        Ok(Self { by_alias, titles })
+        Ok(Self {
+            by_alias,
+            titles,
+            pages,
+            steam,
+            store_rows,
+        })
     }
 
     /// The page one identifier resolves to: its canonical id and title.
@@ -70,6 +111,24 @@ impl GamedbIndex {
         let id = self.by_alias.get(alias)?;
         let title = self.titles.get(id).map(String::as_str).unwrap_or("");
         Some((id.as_str(), title))
+    }
+
+    /// The file `games/<page>.toml` this game's page lives in. `None` for an
+    /// index built before the column existed; the caller falls back to the
+    /// title's slug, which the file name derives from anyway.
+    pub(super) fn page(&self, id: &str) -> Option<&str> {
+        self.pages.get(id).map(String::as_str)
+    }
+
+    /// The Steam app id the page records, if any.
+    pub(super) fn steam(&self, id: &str) -> Option<u64> {
+        self.steam.get(id).copied()
+    }
+
+    /// Whether the page already lists this store product.
+    pub(super) fn has_store(&self, id: &str, store: &str, codename: &str) -> bool {
+        self.store_rows
+            .contains(&(id.to_string(), store.to_string(), codename.to_string()))
     }
 
     /// How many games the data set carries.
@@ -328,21 +387,24 @@ pub(super) fn ago(age: Duration) -> String {
     }
 }
 
-/// A real build of the data set as it stood on 2026-08-23: two pages,
-/// produced by `gamedb-build --data gamedb`. Trimmed to the two tables
-/// this module reads, which is exactly what a newer artifact carrying
-/// more of them has to survive.
+/// A real build of the data set as it stood on 2026-08-23, from
+/// `gamedb-build --data gamedb`. Trimmed to the three tables this module
+/// reads, which is exactly what a newer artifact carrying more of them has
+/// to survive.
 #[cfg(test)]
 pub(super) const FIXTURE: &str = r#"{
   "schema_version": 1,
   "games": [
-    {"id": "steam-868360", "title": "Project Hospital", "year": null,
-     "variant_of": null, "note": "No protonfix exists upstream.",
+    {"id": "steam-868360", "title": "Project Hospital", "page": "project-hospital",
+     "year": null, "variant_of": null, "note": "No protonfix exists upstream.",
      "steam": 868360, "umu": null},
-    {"id": "steam-870780", "title": "Control", "year": null,
+    {"id": "steam-870780", "title": "Control", "page": "control", "year": null,
      "variant_of": null, "note": null, "steam": 870780, "umu": null}
   ],
   "stores": [
+    {"id": "steam-868360", "store": "gog", "codename": "1660194629",
+     "edition": null, "exe": "ProjectHospital.exe", "seen": "2026-08-16",
+     "source": "manual", "confidence": "high"},
     {"id": "steam-870780", "store": "egs", "codename": "Calluna",
      "edition": null, "exe": null, "seen": "2026-08-15",
      "source": "heroic-config", "confidence": "high"}

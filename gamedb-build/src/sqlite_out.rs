@@ -26,6 +26,9 @@ const SCHEMA: &str = "\
 CREATE TABLE games (
     id         TEXT PRIMARY KEY,
     title      TEXT NOT NULL,
+    -- The page's file stem. A label, not a key: unlike `id` it is not
+    -- unique by construction.
+    page       TEXT NOT NULL,
     year       INTEGER,
     variant_of TEXT,
     note       TEXT,
@@ -104,13 +107,14 @@ pub fn write(path: &Path, tables: &Tables) -> Result<()> {
         .map_err(|e| fail("beginning", e))?;
     {
         let mut games = connection
-            .prepare("INSERT INTO games (id, title, year, variant_of, note, steam, umu) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
+            .prepare("INSERT INTO games (id, title, page, year, variant_of, note, steam, umu) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
             .map_err(|e| fail("preparing games", e))?;
         for row in &tables.games {
             games
                 .execute(params![
                     row.id,
                     row.title,
+                    row.page,
                     row.year,
                     row.variant_of,
                     row.note,

@@ -73,5 +73,12 @@ sandboxes = "https://api.egdata.app/sandboxes"
 # asset, and the tag it lands on is what the cache records as the release.
 identities = "https://github.com/fschaupp/gamebus-gamedb/releases/latest/download/identities.json"
 
+# The raw game pages on the data set's main branch: <pages>/<page>.toml.
+# An enhancement edits the page that is already published, so the export
+# needs its text. It reads a local checkout first (--out), and only reaches
+# here when asked to with --fetch-pages. GAMEBUS_GAMEDB_PAGES overrides this
+# with a local directory of pages.
+pages = "https://raw.githubusercontent.com/fschaupp/gamebus-gamedb/main/games"
+
 # The data set itself, printed as the place an exported page goes next.
 project = "https://github.com/fschaupp/gamebus-gamedb"

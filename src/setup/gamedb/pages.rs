@@ -45,12 +45,55 @@ pub(super) struct StoreEntry {
     pub(super) confidence: String,
 }
 
+/// Something this machine knows that the published page does not: one fact,
+/// and one edit to that page's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Addition {
+    /// A store product the page does not list.
+    Store(StoreEntry),
+    /// An executable no alias on the page resolves.
+    Exe(String),
+    /// The Steam app id, for a page whose `games.steam` is null.
+    Steam { appid: u64, seen: String },
+}
+
+impl Addition {
+    /// How the addition reads in a report line: `+gog/1660194629`,
+    /// `+exe Control_DX12.exe`, `+steam 870780`.
+    pub(super) fn label(&self) -> String {
+        match self {
+            Addition::Store(entry) => format!("+{}/{}", entry.store, entry.codename),
+            Addition::Exe(exe) => format!("+exe {exe}"),
+            Addition::Steam { appid, .. } => format!("+steam {appid}"),
+        }
+    }
+}
+
+/// Every addition, in one phrase: `+gog/1660194629, +exe Control_DX12.exe`.
+pub(super) fn additions_label(additions: &[Addition]) -> String {
+    additions
+        .iter()
+        .map(Addition::label)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Where a page stands against what gamebus-gamedb already publishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Status {
-    /// One of the page's own identifiers already resolves upstream. Adding
-    /// a second page for it is the mistake `CONTRIBUTING.md` opens with.
+    /// One of the page's own identifiers already resolves upstream, and the
+    /// page carries everything this machine knows. Adding a second page for
+    /// it is the mistake `CONTRIBUTING.md` opens with.
     InGamedb { id: String, title: String },
+    /// The same, except this machine knows something the page does not - a
+    /// store the data set never saw, an executable, a Steam app id. Not a
+    /// new page: an edit to the one that exists.
+    Enhance {
+        id: String,
+        title: String,
+        /// Never empty; an enhancement with nothing to add is `InGamedb`.
+        additions: Vec<Addition>,
+    },
     /// Nothing upstream claims it, and it identifies itself.
     Ready,
     /// It would not pass the lint, and says why.
@@ -75,6 +118,13 @@ pub(super) struct Candidate {
     pub(super) seen: String,
     /// How many stash entries this page speaks for.
     pub(super) entries: usize,
+    /// Every stash key folded into this page, sorted - the gamedb pane shows
+    /// games, but its correction keys act on stash entries.
+    pub(super) entry_keys: Vec<String>,
+    /// The one of [`Candidate::entry_keys`] a correction should land on: the
+    /// entry carrying a store identity, else the most recently seen. It is
+    /// the entry the fold reads first, so correcting it corrects the page.
+    pub(super) rep_key: String,
     pub(super) status: Status,
 }
 
@@ -148,7 +198,7 @@ pub(super) fn candidates(report: &UmuReport, index: Option<&GamedbIndex>) -> Vec
         if group.key.is_empty() {
             group.key = group_key;
         }
-        group.absorb(miss);
+        group.absorb(key, miss);
     }
 
     groups
@@ -208,11 +258,35 @@ struct Group {
     no_fix_checked: Option<String>,
     seen: String,
     entries: usize,
+    /// Every stash key absorbed, in the order they were walked (sorted).
+    entry_keys: Vec<String>,
+    /// The representative so far, as `(carries a store identity, last_seen,
+    /// key)`. The tuple is the precedence: comparing two picks the winner,
+    /// with the key breaking a same-day tie so runs stay deterministic.
+    rep: Option<(bool, String, String)>,
 }
 
 impl Group {
-    fn absorb(&mut self, miss: &Miss) {
+    fn absorb(&mut self, key: &str, miss: &Miss) {
         self.entries += 1;
+        self.entry_keys.push(key.to_string());
+        let has_store = matches!(
+            (miss.effective_store(), miss.effective_codename()),
+            (store, Some(codename)) if store != "none" && !codename.is_empty()
+        );
+        // Reverse on the key so "smallest" wins a tie, while "largest" wins
+        // on the other two fields.
+        let rank = (has_store, miss.last_seen.clone(), key.to_string());
+        let better = match &self.rep {
+            None => true,
+            Some((r_store, r_seen, r_key)) => {
+                (rank.0, &rank.1, std::cmp::Reverse(&rank.2))
+                    > (*r_store, r_seen, std::cmp::Reverse(r_key))
+            }
+        };
+        if better {
+            self.rep = Some(rank);
+        }
         if miss.last_seen > self.seen {
             self.seen.clone_from(&miss.last_seen);
         }
@@ -290,6 +364,8 @@ impl Group {
             note,
             seen: self.seen,
             entries: self.entries,
+            rep_key: self.rep.map(|(_, _, key)| key).unwrap_or_default(),
+            entry_keys: self.entry_keys,
             status: Status::Ready,
         }
     }
@@ -349,17 +425,26 @@ fn game_exe(path: &str) -> Option<String> {
     Some(name)
 }
 
-/// Where a candidate stands: already published, ready to write, or missing
-/// what the lint would demand.
+/// Where a candidate stands: already published (with or without something
+/// to add to it), ready to write, or missing what the lint would demand.
 fn status(candidate: &Candidate, index: Option<&GamedbIndex>) -> Status {
     if let Some(index) = index {
-        for identifier in candidate.identifiers() {
-            if let Some((id, title)) = index.resolve(&identifier) {
-                return Status::InGamedb {
-                    id: id.to_string(),
-                    title: title.to_string(),
-                };
-            }
+        let hit = candidate.identifiers().into_iter().find_map(|identifier| {
+            index
+                .resolve(&identifier)
+                .map(|(id, title)| (id.to_string(), title.to_string()))
+        });
+        if let Some((id, title)) = hit {
+            let additions = additions(candidate, index, &id);
+            return if additions.is_empty() {
+                Status::InGamedb { id, title }
+            } else {
+                Status::Enhance {
+                    id,
+                    title,
+                    additions,
+                }
+            };
         }
     }
     if candidate
@@ -380,6 +465,54 @@ fn status(candidate: &Candidate, index: Option<&GamedbIndex>) -> Status {
         };
     }
     Status::Ready
+}
+
+/// What this machine knows about `id` that the published page does not.
+///
+/// Every check is "the index resolves this to nobody", never "to somebody
+/// else". An identifier another page claims must never be added here:
+/// two pages claiming one identifier is the failure
+/// `gamedb/CONTRIBUTING.md` spends its longest section on.
+fn additions(candidate: &Candidate, index: &GamedbIndex, id: &str) -> Vec<Addition> {
+    let mut out = Vec::new();
+    // Executables a new store entry carries in its own `exe` field: already
+    // written, so they must not also land in the page-level list.
+    let mut carried: Vec<String> = Vec::new();
+
+    for entry in &candidate.stores {
+        let alias = format!("{}-{}", entry.store, entry.codename);
+        if index.has_store(id, &entry.store, &entry.codename) || index.resolve(&alias).is_some() {
+            continue;
+        }
+        if let Some(exe) = &entry.exe {
+            carried.push(exe.to_lowercase());
+        }
+        out.push(Addition::Store(entry.clone()));
+    }
+
+    let mut written: Vec<String> = Vec::new();
+    let store_exes = candidate.stores.iter().filter_map(|e| e.exe.as_ref());
+    for exe in candidate.exes.iter().chain(store_exes) {
+        let lower = exe.to_lowercase();
+        if carried.contains(&lower)
+            || written.contains(&lower)
+            || index.resolve(&format!("exe:{lower}")).is_some()
+        {
+            continue;
+        }
+        written.push(lower);
+        out.push(Addition::Exe(exe.clone()));
+    }
+
+    if let Some(appid) = candidate.steam {
+        if index.steam(id).is_none() {
+            out.push(Addition::Steam {
+                appid,
+                seen: candidate.seen.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// The file name a title belongs under: its lowercase slug, exactly as
@@ -747,18 +880,9 @@ mod tests {
     #[test]
     fn a_game_the_data_set_already_carries_is_never_written_twice() {
         let index = GamedbIndex::parse(super::super::index::FIXTURE).expect("fixture");
-        let stash = control();
-        let pages = candidates(&stash.report, Some(&index));
-        assert_eq!(
-            pages[0].status,
-            Status::InGamedb {
-                id: "steam-870780".into(),
-                title: "Control".into()
-            }
-        );
 
-        // And it is caught through ANY identifier, not just the id: a page
-        // whose Steam appid nobody knows still hits on its store codename.
+        // A page is caught through ANY identifier, not just the id: this one
+        // has no Steam appid and still hits on its store codename.
         let mut stash = Stash::default();
         stash.launch(
             "egs",
@@ -779,14 +903,15 @@ mod tests {
             }
         );
 
-        // The executable route too - the Project Hospital page names one.
+        // The executable route too - the Project Hospital page names one,
+        // and the published entry already carries it.
         let mut stash = Stash::default();
         stash.launch(
-            "none",
-            None,
-            "wrapper:ph",
-            Some("Spellcraft"),
-            "detectable",
+            "gog",
+            Some("1660194629"),
+            "gog:1660194629",
+            Some("Project Hospital"),
+            "heroic-config",
             Confidence::High,
             Some("C:\\ProjectHospital\\ProjectHospital.exe"),
             "2026-08-16",
@@ -799,6 +924,137 @@ mod tests {
                 title: "Project Hospital".into()
             }
         );
+    }
+
+    /// The real Control case. The published page carries the Epic codename
+    /// and the Steam app id; this machine also saw a top-level executable.
+    /// Holding the whole game back over that throws the executable away, so
+    /// what comes back is an edit to the page rather than a hold-back.
+    #[test]
+    fn a_published_page_this_machine_knows_more_about_is_an_edit_not_a_hold_back() {
+        let index = GamedbIndex::parse(super::super::index::FIXTURE).expect("fixture");
+        let stash = control();
+        let pages = candidates(&stash.report, Some(&index));
+        assert_eq!(
+            pages[0].status,
+            Status::Enhance {
+                id: "steam-870780".into(),
+                title: "Control".into(),
+                // Not the egs entry: the index already lists egs/Calluna.
+                // Not the Steam app id either: games.steam is already 870780.
+                additions: vec![Addition::Exe("Control_DX12.exe".into())],
+            }
+        );
+    }
+
+    /// A store the data set never saw, and the label a report prints for it.
+    #[test]
+    fn a_store_the_published_page_does_not_list_is_an_addition() {
+        let index = GamedbIndex::parse(super::super::index::FIXTURE).expect("fixture");
+        let mut stash = control();
+        let key = stash.launch(
+            "gog",
+            Some("2049187585"),
+            "gog:2049187585",
+            Some("Control"),
+            "heroic-library",
+            Confidence::Medium,
+            None,
+            "2026-08-18",
+        );
+        stash.steam_sku(&key, 870780);
+        let pages = candidates(&stash.report, Some(&index));
+        let Status::Enhance { additions, .. } = &pages[0].status else {
+            panic!("{:?}", pages[0].status);
+        };
+        assert_eq!(
+            additions_label(additions),
+            "+gog/2049187585, +exe Control_DX12.exe"
+        );
+    }
+
+    /// An identifier that resolves to a DIFFERENT page is never an addition:
+    /// writing it here would make two pages claim it.
+    #[test]
+    fn an_identifier_another_page_already_claims_is_never_added_to_this_one() {
+        let index = GamedbIndex::parse(super::super::index::FIXTURE).expect("fixture");
+        let mut stash = Stash::default();
+        // Control's Epic copy, launched through a wrapper that reported
+        // Project Hospital's executable - the mislabel helpers.toml exists
+        // for, arriving from the other direction.
+        stash.launch(
+            "egs",
+            Some("Calluna"),
+            "egs:Calluna",
+            Some("Control"),
+            "heroic-config",
+            Confidence::High,
+            Some("C:\\ProjectHospital\\ProjectHospital.exe"),
+            "2026-08-15",
+        );
+        let pages = candidates(&stash.report, Some(&index));
+        assert_eq!(pages.len(), 1, "{pages:#?}");
+        assert_eq!(
+            pages[0].status,
+            Status::InGamedb {
+                id: "steam-870780".into(),
+                title: "Control".into()
+            },
+            "an executable belonging to another page became an addition"
+        );
+    }
+
+    /// The Steam app id is worth contributing exactly when the page has
+    /// none. The fixture's Project Hospital page has one, so a candidate
+    /// carrying the same fact adds nothing.
+    #[test]
+    fn a_steam_app_id_is_an_addition_only_where_the_page_has_none() {
+        let raw = super::super::index::FIXTURE.replace(
+            r#""page": "control", "year": null,
+     "variant_of": null, "note": null, "steam": 870780"#,
+            r#""page": "control", "year": null,
+     "variant_of": null, "note": null, "steam": null"#,
+        );
+        let index = GamedbIndex::parse(&raw).expect("fixture");
+        let stash = control();
+        let pages = candidates(&stash.report, Some(&index));
+        let Status::Enhance { additions, .. } = &pages[0].status else {
+            panic!("{:?}", pages[0].status);
+        };
+        assert_eq!(
+            additions_label(additions),
+            "+exe Control_DX12.exe, +steam 870780"
+        );
+    }
+
+    /// The gamedb pane's rows are games, but its correction keys act on
+    /// stash entries, so the fold has to name which one.
+    #[test]
+    fn the_fold_names_the_entry_a_correction_should_land_on() {
+        let stash = control();
+        let pages = candidates(&stash.report, None);
+        assert_eq!(pages[0].entry_keys.len(), 9);
+        // Eight wrapper launches with no store, and one Epic entry with a
+        // codename: the codename is what a title or store correction has to
+        // land on, because it is the entry the fold reads first.
+        assert_eq!(pages[0].rep_key, "egs:Calluna");
+
+        // With nothing carrying a store identity, the newest entry wins.
+        let mut stash = Stash::default();
+        for (i, seen) in [(0, "2026-08-07"), (1, "2026-08-19")] {
+            stash.launch(
+                "none",
+                None,
+                &format!("wrapper:x-{i}"),
+                Some("Mystery"),
+                "detectable",
+                Confidence::High,
+                Some("Mystery.exe"),
+                seen,
+            );
+        }
+        let pages = candidates(&stash.report, None);
+        assert_eq!(pages[0].rep_key, "wrapper:x-1");
     }
 
     #[test]
@@ -882,6 +1138,8 @@ mod tests {
             note: None,
             seen: "2026-08-15".into(),
             entries: 2,
+            entry_keys: vec!["egs:Calluna".into(), "gog:2049187585".into()],
+            rep_key: "egs:Calluna".into(),
             status: Status::Ready,
         };
         assert_eq!(merged.canonical_id().as_deref(), Some("gog-2049187585"));
@@ -968,6 +1226,8 @@ mod tests {
             note: None,
             seen: "2026-08-16".into(),
             entries: 1,
+            entry_keys: vec!["gog:1660194629".into()],
+            rep_key: "gog:1660194629".into(),
             status: Status::Ready,
         };
         assert_eq!(
@@ -1004,6 +1264,8 @@ mod tests {
             note: None,
             seen: "2026-08-16".into(),
             entries: 1,
+            entry_keys: vec!["gog:1660194629".into()],
+            rep_key: "gog:1660194629".into(),
             status: Status::Ready,
         };
         let text = render_page(&candidate);

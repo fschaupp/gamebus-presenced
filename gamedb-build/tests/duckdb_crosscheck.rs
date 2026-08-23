@@ -114,7 +114,7 @@ fn duckdb_reads_back_what_the_parquet_crate_wrote() {
     let rows = query(
         &binary,
         &format!(
-            "SELECT id, title, year, variant_of, note, steam, umu, stores, aliases \
+            "SELECT id, title, page, year, variant_of, note, steam, umu, stores, aliases \
              FROM {source} ORDER BY id;"
         ),
     );
@@ -152,6 +152,7 @@ fn duckdb_reads_back_what_the_parquet_crate_wrote() {
             &json!({
                 "id": game.id,
                 "title": game.title,
+                "page": game.page,
                 "year": game.year,
                 "variant_of": game.variant_of,
                 "note": game.note,
