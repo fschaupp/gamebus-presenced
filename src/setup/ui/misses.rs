@@ -24,11 +24,11 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
             Launches Lutris or Heroic handed over without a store identity\n\
             land here too - they feed gamebus-gamedb, never the umu database.\n\
-            Review them here - v fetches the database and verifies, s corrects\n\
-            a store guess, t corrects a title, a assigns an id by hand\n\
-            (collision-checked), p picks a match from the local database or\n\
-            your Heroic library, and o looks the title up at its store\n\
-            (network).\n\
+            Review them here - v fetches the database and verifies (network);\n\
+            once an entry exists, s corrects a store guess, t corrects a title,\n\
+            a assigns an id by hand (collision-checked), p picks a match from\n\
+            the local database or your Heroic library, and o looks the title\n\
+            up at its store (network).\n\
             Correcting an entry here is what the daemon reads; submitting is\n\
             a separate, rarer thing: umu candidacy is opt-in - an entry is\n\
             exported when a protonfix or a cross-store match suggests it, or\n\
