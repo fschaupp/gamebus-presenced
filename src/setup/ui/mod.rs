@@ -682,6 +682,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                         codename: g.codename.clone(),
                         source: "your Heroic library".into(),
                     },
+                    // A Lutris library pick commits exactly like a Heroic
+                    // one: the identity the launcher itself installed under.
+                    Some(PickCandidate::Lutris(g)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: Some(g.store.clone()),
+                        codename: g.codename.clone(),
+                        source: "your Lutris library".into(),
+                    },
                     Some(PickCandidate::GogProduct(p)) => Intent::UmuSetIdentity {
                         key: pick.key,
                         store: None,
@@ -2164,6 +2172,24 @@ mod tests {
                     store: Some("egs".into()),
                     codename: "Calluna".into(),
                     source: "your Heroic library".into(),
+                },
+            ),
+            // A Lutris library pick commits the same identity, from the
+            // other launcher's own records.
+            (
+                PickCandidate::Lutris(crate::setup::lutris_library::LutrisGame {
+                    name: "Control".into(),
+                    slug: "control".into(),
+                    store: "egs".into(),
+                    codename: "Calluna".into(),
+                    runner: None,
+                    directory: None,
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: Some("egs".into()),
+                    codename: "Calluna".into(),
+                    source: "your Lutris library".into(),
                 },
             ),
             (

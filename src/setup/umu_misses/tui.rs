@@ -112,6 +112,9 @@ pub enum PickCandidate {
     /// overrides. NOT a verdict: the game may still be missing from the
     /// database; identity and verdict are different facts.
     Library(super::super::heroic_library::LibraryGame),
+    /// A Lutris library identity (pga.db) - Enter writes the store+codename
+    /// overrides, exactly like a Heroic library pick. NOT a verdict either.
+    Lutris(super::super::lutris_library::LutrisGame),
     /// A GOG catalog hit (`o`) - Enter writes the product id as the
     /// codename override.
     GogProduct(GogProduct),
@@ -141,6 +144,7 @@ impl PickCandidate {
         match self {
             PickCandidate::Db(_) => "umu database - Enter records the verdict".into(),
             PickCandidate::Library(_) => "your Heroic library - Enter sets the identity".into(),
+            PickCandidate::Lutris(_) => "your Lutris library - Enter sets the identity".into(),
             PickCandidate::GogProduct(_) => "GOG catalog - Enter sets the codename".into(),
             PickCandidate::GogById { id, .. } => {
                 format!("GOG product {id} - Enter sets the title")
@@ -153,17 +157,36 @@ impl PickCandidate {
 
 /// Candidates for the TUI's `p`: a title search against the local database
 /// ([`UmuDb::search_title`] ranks and caps them) plus the user's Heroic
-/// store_cache libraries - both local files, no network, ever; `v` stays
-/// the only pane key that fetches. Blocking - run it off the render path.
-/// The second value is a warning: an aging fetch cache, or a missing
-/// database when the libraries still produced something to pick.
+/// store_cache libraries and Lutris library - all local files, no network,
+/// ever; `v` stays the only pane key that fetches. Blocking - run it off
+/// the render path. The second value is a warning: an aging fetch cache, a
+/// missing database when the libraries still produced something to pick,
+/// or a Lutris library that exists but cannot be read.
 pub(crate) fn tui_pick_candidates(
     title: &str,
 ) -> Result<(Vec<PickCandidate>, Option<String>), String> {
-    let library: Vec<PickCandidate> = super::super::heroic_library::candidates(title)
+    let mut library: Vec<PickCandidate> = super::super::heroic_library::candidates(title)
         .into_iter()
         .map(PickCandidate::Library)
         .collect();
+    // The Lutris library joins the pick on equal footing with Heroic's: the
+    // same identity class, the same Enter. An unreadable pga.db is a
+    // warning naming its path, never a failure - the database and Heroic
+    // still pick without it.
+    let mut lutris_warning = None;
+    match super::super::lutris_library::load() {
+        Ok(games) => library.extend(
+            super::super::lutris_library::candidates(&games, title)
+                .into_iter()
+                .cloned()
+                .map(PickCandidate::Lutris),
+        ),
+        Err(e) => lutris_warning = Some(format!("Lutris library unreadable ({e}).")),
+    }
+    let merged = |stale: Option<String>, lutris: Option<String>| -> Option<String> {
+        let parts: Vec<String> = stale.into_iter().chain(lutris).collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    };
     match load_db(&Opts::none()) {
         Ok(Some(db)) => {
             let mut candidates: Vec<PickCandidate> = db
@@ -173,18 +196,30 @@ pub(crate) fn tui_pick_candidates(
                 .map(PickCandidate::Db)
                 .collect();
             candidates.extend(library);
-            Ok((candidates, cache_staleness()))
+            Ok((candidates, merged(cache_staleness(), lutris_warning)))
         }
         Ok(None) if !library.is_empty() => Ok((
             library,
-            Some(
-                "No local umu database - candidates are your Heroic library only; \
-                 v fetches the database (net)."
-                    .to_string(),
+            merged(
+                Some(
+                    "No local umu database - candidates are your launcher libraries only; \
+                     v fetches the database (net)."
+                        .to_string(),
+                ),
+                lutris_warning,
             ),
         )),
         Ok(None) => {
-            Err("No local database - press v to fetch, or set --db/GAMEBUS_UMU_DB.".to_string())
+            // Nothing to pick from at all; if the Lutris library could not
+            // even be read, say so - it is why this list is emptier than
+            // the machine's games deserve.
+            let mut e =
+                "No local database - press v to fetch, or set --db/GAMEBUS_UMU_DB.".to_string();
+            if let Some(w) = lutris_warning {
+                e.push(' ');
+                e.push_str(&w);
+            }
+            Err(e)
         }
         Err(e) => Err(e),
     }
@@ -524,6 +559,91 @@ fn toggle_promote(report: &mut UmuReport, key: &str) -> (Vec<String>, bool) {
 mod tests {
     use super::super::{pick_db, pick_report};
     use super::*;
+
+    /// The `p` pick's local sources are the umu database, the Heroic store
+    /// caches, and the Lutris library. Database rows come first; a Lutris
+    /// row arrives as an identity candidate; and a pga.db that exists but
+    /// cannot be read is a warning naming the path, not a failure - the
+    /// database still picks.
+    #[test]
+    fn the_pick_joins_the_lutris_library_and_survives_an_unreadable_one() {
+        let _env = crate::setup::lutris_library::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("gamebus-pick-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+
+        // A one-row umu database (a game the query must NOT match, so the
+        // Lutris rows are the only hits) and a pga.db carrying Control
+        // twice, on two stores - the choice the pick exists to offer.
+        let db = dir.join("umu.csv");
+        std::fs::write(
+            &db,
+            "TITLE,STORE,CODENAME,UMU_ID\nBorderlands 3,egs,Catnip,umu-397540\n",
+        )
+        .expect("scratch csv");
+        let pga = dir.join("pga.db");
+        {
+            let conn = rusqlite::Connection::open(&pga).expect("scratch pga.db");
+            conn.execute_batch(
+                "create table games (id integer primary key, name text, slug text, \
+                 runner text, service text, service_id text, directory text)",
+            )
+            .expect("create games table");
+            for (service, service_id) in [("egs", "Calluna"), ("gog", "2049187585")] {
+                conn.execute(
+                    "insert into games (name, slug, runner, service, service_id, directory) \
+                     values ('Control', 'control', 'wine', ?1, ?2, null)",
+                    rusqlite::params![service, service_id],
+                )
+                .expect("insert row");
+            }
+        }
+
+        std::env::set_var("GAMEBUS_UMU_DB", &db);
+        std::env::set_var("GAMEBUS_LUTRIS_DB", &pga);
+        let (candidates, warning) = tui_pick_candidates("control").expect("the pick resolves");
+        // The explicit --db-style override never ages into a warning.
+        assert_eq!(
+            warning, None,
+            "an explicit db and a healthy pga.db warn about nothing"
+        );
+        let lutris: Vec<&str> = candidates
+            .iter()
+            .filter_map(|c| match c {
+                PickCandidate::Lutris(g) => Some(g.codename.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lutris,
+            vec!["Calluna", "2049187585"],
+            "the library's editions, as identities"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|c| !matches!(c, PickCandidate::Db(_))),
+            "the database row is for another game"
+        );
+
+        // An unreadable pga.db: the pick still answers, with a warning that
+        // names the file instead of hiding the library's absence.
+        let corrupt = dir.join("corrupt.db");
+        std::fs::write(&corrupt, "this is not a sqlite database at all").unwrap();
+        std::env::set_var("GAMEBUS_LUTRIS_DB", &corrupt);
+        let (candidates, warning) =
+            tui_pick_candidates("control").expect("the pick still resolves");
+        assert!(
+            candidates
+                .iter()
+                .all(|c| !matches!(c, PickCandidate::Lutris(_))),
+            "a corrupt library contributed identities"
+        );
+        let warning = warning.expect("the corruption must be said, not hidden");
+        assert!(warning.contains("corrupt.db"), "{warning}");
+
+        std::env::remove_var("GAMEBUS_UMU_DB");
+        std::env::remove_var("GAMEBUS_LUTRIS_DB");
+    }
 
     #[test]
     fn a_week_old_cache_warns_a_fresher_one_does_not() {

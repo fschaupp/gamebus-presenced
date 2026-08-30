@@ -15,9 +15,6 @@
 //! error naming the path - silently showing "no codenames" over a corrupt
 //! library would hide real data.
 
-// No call sites yet: the wiring into the misses pane and the umu-misses CLI
-// happens at integration. Tests below exercise the whole API.
-
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
@@ -146,8 +143,6 @@ pub fn lookup<'a>(games: &'a [LutrisGame], name: &str, store: &str) -> Option<&'
 
 /// Every library row matching a title case-insensitively, all stores - the
 /// pick list for a human choosing among a game's editions.
-// Not wired yet: the misses pane's `p` pick is the intended caller.
-#[allow(dead_code)]
 pub fn candidates<'a>(games: &'a [LutrisGame], title: &str) -> Vec<&'a LutrisGame> {
     let t = title.trim().to_lowercase();
     if t.is_empty() {
@@ -226,15 +221,18 @@ pub fn fill_codenames(report: &mut UmuReport, games: &[LutrisGame]) -> Vec<Strin
     lines
 }
 
+/// `GAMEBUS_LUTRIS_DB` is process-global; tests that set it take this lock
+/// so parallel test threads never read each other's override. The
+/// pick-flow integration test in `umu_misses::tui` takes it too, for the
+/// same reason.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
+    use super::ENV_LOCK;
     use super::*;
     use crate::umu_report::LaunchFacts;
-    use std::sync::Mutex;
-
-    /// `GAMEBUS_LUTRIS_DB` is process-global; tests that set it take this
-    /// lock so parallel test threads never read each other's override.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// One scratch row: (name, slug, runner, service, service_id, directory).
     type Row<'a> = (
