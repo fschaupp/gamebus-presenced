@@ -336,6 +336,8 @@ fn set_identity(
     }
     report.update(key, |m| {
         m.codename_override = Some(codename.to_string());
+        // A hand correction never wears a tool's provenance.
+        m.codename_override_source = None;
         if let Some(s) = &store {
             // Mirrors the s-cycle: landing on the daemon's own guess means
             // the entry is back to "guessed", not "corrected to the guess".

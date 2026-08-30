@@ -17,7 +17,6 @@
 
 // No call sites yet: the wiring into the misses pane and the umu-misses CLI
 // happens at integration. Tests below exercise the whole API.
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 
@@ -147,6 +146,8 @@ pub fn lookup<'a>(games: &'a [LutrisGame], name: &str, store: &str) -> Option<&'
 
 /// Every library row matching a title case-insensitively, all stores — the
 /// pick list for a human choosing among a game's editions.
+// Not wired yet: the misses pane's `p` pick is the intended caller.
+#[allow(dead_code)]
 pub fn candidates<'a>(games: &'a [LutrisGame], title: &str) -> Vec<&'a LutrisGame> {
     let t = title.trim().to_lowercase();
     if t.is_empty() {
@@ -177,7 +178,11 @@ pub fn fill_codenames(report: &mut UmuReport, games: &[LutrisGame]) -> Vec<Strin
     // stash cannot be iterated and updated at once.
     let mut hits: Vec<(String, String, String, String)> = Vec::new();
     for (key, miss) in report.entries() {
-        if miss.launcher.as_deref() != Some("lutris") {
+        // Entries written before the launcher facts existed carry no
+        // `launcher` field but still wear the lutris key prefix; the
+        // library's knowledge applies to them just the same.
+        let is_lutris = miss.launcher.as_deref() == Some("lutris") || key.starts_with("lutris:");
+        if !is_lutris {
             continue;
         }
         let has_codename = miss.codename.as_deref().is_some_and(|c| !c.is_empty())
@@ -188,7 +193,15 @@ pub fn fill_codenames(report: &mut UmuReport, games: &[LutrisGame]) -> Vec<Strin
         if has_codename {
             continue;
         }
-        let Some(name) = miss.launcher_name.as_deref() else {
+        // The launcher's own name for the game where recorded; the resolved
+        // title otherwise (pre-widening entries) - Lutris names match the
+        // curated titles for every game measured so far.
+        let Some(name) = miss
+            .launcher_name
+            .as_deref()
+            .or_else(|| miss.effective_title())
+            .filter(|n| !n.is_empty())
+        else {
             continue;
         };
         if let Some(game) = lookup(games, name, miss.effective_store()) {
@@ -204,7 +217,10 @@ pub fn fill_codenames(report: &mut UmuReport, games: &[LutrisGame]) -> Vec<Strin
     let mut lines = Vec::new();
     for (key, name, codename, store) in hits {
         let code = codename.clone();
-        report.update(&key, move |m| m.codename_override = Some(code));
+        report.update(&key, move |m| {
+            m.codename_override = Some(code);
+            m.codename_override_source = Some("lutris-library".into());
+        });
         lines.push(format!("{name}: codename {codename} from Lutris ({store})"));
     }
     lines
@@ -429,6 +445,32 @@ mod tests {
         assert_eq!(codenames, vec!["Calluna", "2049187585"]);
         assert!(candidates(&games, "Half-Life").is_empty());
         assert!(candidates(&games, "  ").is_empty());
+    }
+
+    #[test]
+    fn a_pre_widening_entry_with_a_lutris_key_still_gets_filled() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let path = scratch("prewiden.db");
+        fixture_db(&path);
+        let games = load_via_env(&path).unwrap();
+
+        // The shape the daemon wrote before the widening: umu miss, no
+        // launcher facts at all, per-launch uuid key; the title came from
+        // the resolver and the user corrected the store to gog.
+        let mut report = UmuReport::default();
+        report.note_launch("none", None, "umu-default", "lutris:7181c27b-uuid");
+        report.update("lutris:7181c27b-uuid", |m| {
+            m.title = Some("Control".into());
+            m.store_override = Some("gog".into());
+        });
+        let lines = fill_codenames(&mut report, &games);
+        assert_eq!(lines, ["Control: codename 2049187585 from Lutris (gog)"]);
+        let m = &report.entries()["lutris:7181c27b-uuid"];
+        assert_eq!(m.codename_override.as_deref(), Some("2049187585"));
+        assert_eq!(
+            m.codename_override_source.as_deref(),
+            Some("lutris-library")
+        );
     }
 
     #[test]

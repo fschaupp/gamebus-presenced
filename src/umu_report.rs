@@ -90,9 +90,13 @@ pub struct Miss {
     /// `GAME_DIRECTORY`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher_dir: Option<String>,
-    /// How `codename` was learned: `lutris-config` (a `.lutrisgame.json`),
-    /// `heroic-env` (`HEROIC_APP_NAME`), or `lutris-library` (pga.db, filled
-    /// in by the setup tool). Absent when nothing established it.
+    /// How the daemon learned `codename`: `lutris-config` (a
+    /// `.lutrisgame.json`) or `heroic-env` (`HEROIC_APP_NAME`). Absent when
+    /// nothing established it. A codename the SETUP TOOL fills lands on the
+    /// annotation half instead (`codename_override` +
+    /// `codename_override_source`): the annotator re-adopts this whole
+    /// resolution half from disk before every persist, so its own write
+    /// here would be flattened by its own save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codename_source: Option<String>,
     /// Which runtime the launcher ran the game under: `native` or `proton`.
@@ -127,6 +131,13 @@ pub struct Miss {
     /// [`Miss::effective_codename`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codename_override: Option<String>,
+    /// Who supplied `codename_override` when it was a tool rather than the
+    /// user: `lutris-library` (pga.db, matched on the launcher's own name
+    /// and store). Cleared whenever the user types a codename themselves,
+    /// so a hand correction never wears a tool's provenance. Annotation-half
+    /// like the override it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename_override_source: Option<String>,
     /// The user's title correction from the setup TUI (typed via `t`, or a
     /// GOG product lookup). `title` stays the daemon's resolution; this
     /// override is annotation-half like the other overrides, so a daemon
@@ -409,6 +420,7 @@ impl UmuReport {
             fix: None,
             store_override: None,
             codename_override: None,
+            codename_override_source: None,
             title_override: None,
             dismissed: None,
             umu_promoted: None,
@@ -563,6 +575,7 @@ impl UmuReport {
                     ours.fix = theirs.fix;
                     ours.store_override = theirs.store_override;
                     ours.codename_override = theirs.codename_override;
+                    ours.codename_override_source = theirs.codename_override_source;
                     ours.title_override = theirs.title_override;
                     ours.dismissed = theirs.dismissed;
                     ours.umu_promoted = theirs.umu_promoted;
