@@ -478,7 +478,7 @@ fn plan_install(layout: &Layout, source: &Source) -> Plan {
 
     // The shared-helper list ships the same way: a reference copy in the data
     // dir, rewritten on every install. User additions go in the config dir
-    // and are unioned in — rewriting this copy cannot lose them.
+    // and are unioned in - rewriting this copy cannot lose them.
     privileged.push(Step::WriteFile {
         to: layout.shared_helpers_file(),
         contents: include_str!("../../shared-helpers.txt").to_string(),

@@ -825,7 +825,7 @@ fn umu_misses_verify_without_any_database_fails_and_touches_nothing() {
 
 /// The owner policy (2026-08-24): umu candidacy is opt-in. A stash mixing a
 /// promoted umu miss, an unpromoted one with no fix, and a launcher launch
-/// (empty umu id) exports exactly the promoted one — and the review list
+/// (empty umu id) exports exactly the promoted one - and the review list
 /// still shows all three, each with its tag.
 #[test]
 fn umu_exports_take_candidates_and_the_list_shows_everything() {

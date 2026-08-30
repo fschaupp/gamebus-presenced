@@ -36,7 +36,7 @@ pub enum View {
     /// The identity-miss stash: what the daemon collected - umu misses
     /// and launcher launches without a store identity - and what
     /// verification made of it. The pane drives the flows on explicit
-    /// keypresses — `v` fetches+verifies (network, and the footer says so),
+    /// keypresses - `v` fetches+verifies (network, and the footer says so),
     /// `o` looks the title up at its store (network, labelled likewise),
     /// `a` assigns an id (collision-checked before it saves), `p` picks the
     /// matching entry from the local database or the Heroic libraries,
@@ -121,17 +121,17 @@ impl Confirm {
 }
 
 /// The misses pane's pick mode: candidates for one miss, waiting for the
-/// user to choose (or Esc out). The candidates are kind-tagged — database
-/// rows, Heroic library identities, online hits — and Enter dispatches per
+/// user to choose (or Esc out). The candidates are kind-tagged - database
+/// rows, Heroic library identities, online hits - and Enter dispatches per
 /// kind; the list renders them in labelled sections.
 pub struct Pick {
-    /// The stash key the candidates were fetched for — the pick lands on
+    /// The stash key the candidates were fetched for - the pick lands on
     /// this entry, never on whatever the selection moved to since.
     pub key: String,
     /// Never empty: the binary logs "no matches" instead of opening the mode.
     pub candidates: Vec<PickCandidate>,
     pub selected: usize,
-    /// A warning when the candidates came from an aging fetch cache — the
+    /// A warning when the candidates came from an aging fetch cache - the
     /// footer then advertises `v` as the way out.
     pub stale: Option<String>,
 }
@@ -159,7 +159,7 @@ pub struct App {
     /// land here instead of the keymap. Committed with Enter (which checks
     /// the id before anything is saved), cancelled with Esc.
     pub id_input: Option<String>,
-    /// While `Some`, the misses pane is in title-entry mode (`t`) — same
+    /// While `Some`, the misses pane is in title-entry mode (`t`) - same
     /// keyboard ownership as `id_input`. Starts empty; the input line shows
     /// the current effective title beside it.
     pub title_input: Option<String>,
@@ -314,8 +314,8 @@ impl App {
     }
 
     /// The stash entry a correction typed right now would land on: the
-    /// selected entry on the misses pane, and on the gamedb pane — whose
-    /// rows are games, not entries — that game's representative entry.
+    /// selected entry on the misses pane, and on the gamedb pane - whose
+    /// rows are games, not entries - that game's representative entry.
     pub fn edit_key(&self) -> Option<String> {
         match self.view {
             View::Gamedb => self
@@ -326,7 +326,7 @@ impl App {
         }
     }
 
-    /// Move the selection off the current entry onto its list neighbor —
+    /// Move the selection off the current entry onto its list neighbor  -
     /// the one below, or the one above when the cursor sits on the last
     /// row. Used before an action that resorts the current entry away
     /// (dismiss), so the key-stable refresh follows the neighbor instead
@@ -452,12 +452,12 @@ pub enum Intent {
     },
     /// Misses pane `p`: search the local database and the Heroic libraries
     /// for candidates matching the selected entry's title. Local files
-    /// only — never the network.
+    /// only - never the network.
     UmuPick {
         key: String,
     },
     /// Misses pane `o`: one online lookup at the entry's effective store.
-    /// Network — the footer labels the key as such.
+    /// Network - the footer labels the key as such.
     UmuOnline {
         key: String,
     },
@@ -504,7 +504,7 @@ pub enum Intent {
         key: String,
     },
     /// Misses pane `u`: promote the selected umu miss into the umu-database
-    /// pipeline, or take the promotion back — a toggle, like dismiss.
+    /// pipeline, or take the promotion back - a toggle, like dismiss.
     /// Emitted only for umu misses: on a launcher launch the key answers in
     /// the status line instead (nothing to promote).
     UmuPromote {
@@ -845,7 +845,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                 // Dismissing resorts the entry to the bottom of the list; the
                 // key-stable selection would follow it there, stranding a
                 // triage run (d, navigate all the way back, d, …). Hop to the
-                // neighbor first — the refresh then keeps THAT entry selected
+                // neighbor first - the refresh then keeps THAT entry selected
                 // wherever the resort puts everything.
                 app.select_neighbor_miss();
                 Intent::UmuDismiss { key }
@@ -1780,7 +1780,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Down)); // first ↓ lands on index 1
         handle_key(&mut app, key(KeyCode::Up)); // index 0: Control
 
-        // d dismisses Control, but the cursor must hop to Brotato — a triage
+        // d dismisses Control, but the cursor must hop to Brotato - a triage
         // run (d, d, d) works top-down without re-navigating.
         let intent = handle_key(&mut app, key(KeyCode::Char('d')));
         assert_eq!(
@@ -1932,7 +1932,7 @@ mod tests {
     }
 
     /// Follows the a-verb precedent exactly: the mode owns the keyboard,
-    /// Enter commits, Esc cancels — but the buffer starts EMPTY (the point
+    /// Enter commits, Esc cancels - but the buffer starts EMPTY (the point
     /// of the verb is that the resolver's title is wrong).
     #[test]
     fn title_entry_mode_owns_the_keyboard_and_commits_on_enter() {
@@ -1943,7 +1943,7 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Char('t')));
         assert_eq!(app.title_input.as_deref(), Some(""));
-        // Printable keys type — including q, v and t itself.
+        // Printable keys type - including q, v and t itself.
         for c in ['P', 'q', 'v', 't'] {
             assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
         }
@@ -1990,7 +1990,7 @@ mod tests {
             key: "egs:Control".into(),
             candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
             selected: 0,
-            stale: Some("Database cache is 9 days old — v refreshes it (net).".into()),
+            stale: Some("Database cache is 9 days old - v refreshes it (net).".into()),
         });
         // The one network key means the same thing inside the mode: leave
         // the stale candidate list and fetch fresh.
@@ -2035,7 +2035,7 @@ mod tests {
         );
     }
 
-    /// Enter must dispatch on the candidate's kind — a database row records
+    /// Enter must dispatch on the candidate's kind - a database row records
     /// a verdict, everything else an identity, and an egs offer without a
     /// Windows build fires the builds request instead of committing its
     /// (lowercase, wrong) namespace.
@@ -2085,7 +2085,7 @@ mod tests {
                 },
             ),
             (
-                // The by-id record corrects the TITLE — the codename it was
+                // The by-id record corrects the TITLE - the codename it was
                 // fetched by was already right.
                 PickCandidate::GogById {
                     id: "1660194629".into(),
@@ -2167,7 +2167,7 @@ mod tests {
             stale: None,
         });
         // q must NOT quit while the list is up (v is the deliberate
-        // exception — it abandons the pick to refresh, tested separately).
+        // exception - it abandons the pick to refresh, tested separately).
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::None);
         // ↓/j and ↑/k move, wrapping at both ends.
         handle_key(&mut app, key(KeyCode::Down));
@@ -2214,7 +2214,7 @@ mod tests {
         // A refresh that keeps the miss keeps the mode.
         app.set_misses(vec![sample_miss("Brotato"), sample_miss("Control")]);
         assert!(app.pick.is_some());
-        // One that drops it cancels — the pick has nothing to land on.
+        // One that drops it cancels - the pick has nothing to land on.
         app.set_misses(vec![sample_miss("Brotato")]);
         assert!(app.pick.is_none(), "pick mode outlived its miss");
     }

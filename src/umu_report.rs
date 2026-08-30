@@ -114,7 +114,7 @@ pub struct Miss {
     /// entry (`--check-prs`, best-effort).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub possible_pr: Option<String>,
-    /// Whether this game has a protonfix upstream — the database's own scope
+    /// Whether this game has a protonfix upstream - the database's own scope
     /// rule. Absent until a `--verify` run could read the fix list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<FixCheck>,
@@ -246,7 +246,7 @@ pub enum VerificationState {
 /// maintainers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixCheck {
-    /// The umu id the check ran against — a later id change invalidates it.
+    /// The umu id the check ran against - a later id change invalidates it.
     pub umu_id: String,
     /// The fix files found upstream, repository-relative
     /// (`gamefixes-steam/870780.py`). Empty means: no fix, out of scope.
@@ -855,7 +855,7 @@ impl UmuDb {
     }
 
     /// Candidates for a human pick: case-insensitive substring match in both
-    /// directions — a database title containing the query ("Control" finds
+    /// directions - a database title containing the query ("Control" finds
     /// "Control Ultimate Edition") or the query containing a database title
     /// (a decorated launcher title finds the plain row). Ranked exact match,
     /// then database-title-starts-with-query, then the rest; capped at 20.
@@ -1552,7 +1552,7 @@ mod tests {
             .search_title("ultimate")
             .iter()
             .any(|e| e.title == "Control Ultimate Edition"));
-        // Database title inside the query — a decorated launcher title still
+        // Database title inside the query - a decorated launcher title still
         // finds the plain row.
         assert!(db
             .search_title("Control Ultimate Edition GOTY")

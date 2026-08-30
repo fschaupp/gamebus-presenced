@@ -1,9 +1,9 @@
-//! Lutris's pga.db — the launcher's own library as a codename source for
+//! Lutris's pga.db - the launcher's own library as a codename source for
 //! the setup tool.
 //!
 //! Lutris records every game it manages in a sqlite file, `pga.db`, whose
 //! `games` table carries the service (`gog`, `egs`, `itchio`, …) and the
-//! service-internal id (`service_id`) the game was installed from — exactly
+//! service-internal id (`service_id`) the game was installed from - exactly
 //! the codename an identity record wants. A native Lutris launch exposes
 //! neither over the environment, so the daemon stashes those misses without
 //! a codename; this module lets the setup tool fill them from the library
@@ -12,7 +12,7 @@
 //! Read-only, local, setup-tool only: the daemon never links rusqlite and
 //! never opens this file. A missing pga.db is an empty library (a machine
 //! without Lutris behaves identically); a present-but-unreadable one is an
-//! error naming the path — silently showing "no codenames" over a corrupt
+//! error naming the path - silently showing "no codenames" over a corrupt
 //! library would hide real data.
 
 // No call sites yet: the wiring into the misses pane and the umu-misses CLI
@@ -28,13 +28,13 @@ use crate::umu_report::{normalize_store, UmuReport};
 /// identity it was installed from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LutrisGame {
-    /// Lutris's display name for the game — what `GAME_NAME` carries at
+    /// Lutris's display name for the game - what `GAME_NAME` carries at
     /// launch, so it matches a stashed `launcher_name` exactly.
     pub name: String,
     /// Lutris's install slug (`danger-scavenger`).
     pub slug: String,
     /// umu-database store id, normalised via
-    /// [`normalize_store`](crate::umu_report::normalize_store) — never a raw
+    /// [`normalize_store`](crate::umu_report::normalize_store) - never a raw
     /// Lutris service spelling.
     pub store: String,
     /// The store-internal id (`service_id`): the GOG product id, the EGS App
@@ -48,7 +48,7 @@ pub struct LutrisGame {
 
 /// The pga.db files worth reading: `$XDG_DATA_HOME/lutris/pga.db` and the
 /// flatpak's copy, existing ones only. `GAMEBUS_LUTRIS_DB` overrides both
-/// with one named file — exclusively, so a test (or a user pointing at a
+/// with one named file - exclusively, so a test (or a user pointing at a
 /// backup) reads exactly that library and never the machine's own.
 pub fn library_paths() -> Vec<PathBuf> {
     if let Some(over) = std::env::var_os("GAMEBUS_LUTRIS_DB") {
@@ -73,7 +73,7 @@ pub fn library_paths() -> Vec<PathBuf> {
 /// empty library, not an error; a file that exists but cannot be read as a
 /// Lutris database is an `Err` naming its path. Rows without a store
 /// identity are filtered in the query; rows whose service normalises to
-/// `none` (`flathub` and friends — distribution channels, not stores) are
+/// `none` (`flathub` and friends - distribution channels, not stores) are
 /// skipped here.
 pub fn load() -> Result<Vec<LutrisGame>, String> {
     let mut games = Vec::new();
@@ -136,15 +136,15 @@ fn read_db(path: &Path) -> Result<Vec<LutrisGame>, String> {
 }
 
 /// The one library row for a (name, store) pair: exact, case-sensitive name
-/// match — a stashed `launcher_name` IS the pga.db name, so anything fuzzier
-/// only invites the wrong codename — with the store normalised on the way
+/// match - a stashed `launcher_name` IS the pga.db name, so anything fuzzier
+/// only invites the wrong codename - with the store normalised on the way
 /// in.
 pub fn lookup<'a>(games: &'a [LutrisGame], name: &str, store: &str) -> Option<&'a LutrisGame> {
     let store = normalize_store(store);
     games.iter().find(|g| g.name == name && g.store == store)
 }
 
-/// Every library row matching a title case-insensitively, all stores — the
+/// Every library row matching a title case-insensitively, all stores - the
 /// pick list for a human choosing among a game's editions.
 // Not wired yet: the misses pane's `p` pick is the intended caller.
 #[allow(dead_code)]
@@ -161,7 +161,7 @@ pub fn candidates<'a>(games: &'a [LutrisGame], title: &str) -> Vec<&'a LutrisGam
 
 /// Fill missing codenames from the library: every Lutris-launched entry
 /// with a `launcher_name` but no codename from any side gets the library's
-/// `service_id` for (launcher_name, effective store) — written as the
+/// `service_id` for (launcher_name, effective store) - written as the
 /// annotation-half `codename_override`, because that is the half this tool
 /// owns. Writing `codename`/`codename_source` here would not survive: both
 /// are resolution-half, and every persist (ADR-009) adopts the resolution
@@ -170,11 +170,11 @@ pub fn candidates<'a>(games: &'a [LutrisGame], title: &str) -> Vec<&'a LutrisGam
 /// vocabulary; the returned report lines are what names the source to the
 /// user.
 ///
-/// Marks the stash dirty via [`UmuReport::update`] but does not write —
+/// Marks the stash dirty via [`UmuReport::update`] but does not write  -
 /// callers batch and [`UmuReport::save`] once. Returns one line per fill,
 /// sorted, e.g. `Control: codename 2049187585 from Lutris (gog)`.
 pub fn fill_codenames(report: &mut UmuReport, games: &[LutrisGame]) -> Vec<String> {
-    // key, launcher name, codename, store — collected first because the
+    // key, launcher name, codename, store - collected first because the
     // stash cannot be iterated and updated at once.
     let mut hits: Vec<(String, String, String, String)> = Vec::new();
     for (key, miss) in report.entries() {

@@ -18,7 +18,7 @@ pub struct EgsOffer {
     pub namespace: String,
     pub offer_type: String,
     /// The App Name of the hit's last Windows build, when the search
-    /// response already carries one — Enter then commits it directly and
+    /// response already carries one - Enter then commits it directly and
     /// the second request never fires.
     pub windows_app_name: Option<String>,
 }
@@ -32,7 +32,7 @@ pub struct EgsBuild {
 
 /// The `o` verb's dispatch: one lookup against the miss's effective store.
 /// Exactly one HTTP request per call; failures are one honest line and
-/// nothing written. Blocking — run it off the render path.
+/// nothing written. Blocking - run it off the render path.
 pub(crate) fn tui_online_candidates(
     store: &str,
     title: Option<&str>,
@@ -40,7 +40,7 @@ pub(crate) fn tui_online_candidates(
 ) -> Result<Vec<PickCandidate>, String> {
     match store {
         "gog" => {
-            // A numeric codename IS the gogdb product id — the identity is
+            // A numeric codename IS the gogdb product id - the identity is
             // settled, only the title is in question. One exact GET on the
             // product record instead of a catalog search by a title that
             // may be the very thing that is wrong (the Spellcraft
@@ -70,14 +70,14 @@ pub(crate) fn tui_online_candidates(
             parse_egs_offers(&http_get(&url)?).map_err(|e| format!("{url}: {e}"))
         }
         // The database's standalone rule pairs store none with codename
-        // none — there is no store catalog to ask.
+        // none - there is no store catalog to ask.
         "none" => Err(
-            "Store is none — standalone entries pair codename none by the database's own rule; \
+            "Store is none - standalone entries pair codename none by the database's own rule; \
              cycle s first if this is a store game."
                 .to_string(),
         ),
         other => Err(format!(
-            "No online lookup for the {other} store — only gog and egs have one."
+            "No online lookup for the {other} store - only gog and egs have one."
         )),
     }
 }
@@ -112,7 +112,7 @@ fn http_get(url: &str) -> Result<String, String> {
         .map_err(|e| format!("{url}: reading the response body: {e}"))
 }
 
-/// catalog.gog.com answers `{"products":[{id, title, productType, …}]}` —
+/// catalog.gog.com answers `{"products":[{id, title, productType, …}]}`  -
 /// the id is the numeric product id the database wants as the codename.
 /// Rows missing an id or title are dropped, not errors.
 fn parse_gog_catalog(raw: &str) -> Result<Vec<PickCandidate>, String> {
@@ -149,7 +149,7 @@ fn parse_gog_catalog(raw: &str) -> Result<Vec<PickCandidate>, String> {
 }
 
 /// api.gog.com/products/<id> answers `{"id":1660194629,"title":"Project
-/// Hospital","game_type":"game","slug":"…"}` (captured live) — one record,
+/// Hospital","game_type":"game","slug":"…"}` (captured live) - one record,
 /// one candidate. A record without a title has nothing to offer: an error,
 /// not an empty list that would read as "no such product".
 fn parse_gog_product(raw: &str) -> Result<Vec<PickCandidate>, String> {
@@ -229,7 +229,7 @@ fn parse_egs_offers(raw: &str) -> Result<Vec<PickCandidate>, String> {
     Ok(offers.into_iter().map(PickCandidate::EgsOffer).collect())
 }
 
-/// The sandboxes builds list — parsed by value, since only the rows'
+/// The sandboxes builds list - parsed by value, since only the rows'
 /// `appName`/`labelName`/`platform` matter: a bare array and an array under
 /// any top-level key both work. Live Windows builds rank first.
 fn parse_egs_builds(raw: &str) -> Result<Vec<PickCandidate>, String> {
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn title_searches_refuse_without_a_title_before_any_request() {
         // A name-shaped gog codename falls to the catalog search, which has
-        // nothing to search — refused before a request could fire. Same for
+        // nothing to search - refused before a request could fire. Same for
         // egs. (The numeric-codename by-id path needs no title at all.)
         let err = tui_online_candidates("gog", None, Some("witchery")).unwrap_err();
         assert!(err.contains("No resolved title"), "{err}");
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn the_gog_product_record_yields_one_title_candidate() {
-        // Captured live from api.gog.com/products/1660194629 — the
+        // Captured live from api.gog.com/products/1660194629 - the
         // Spellcraft incident's real fix.
         let raw = r#"{"id":1660194629,"title":"Project Hospital","game_type":"game","slug":"project_hospital"}"#;
         let hits = parse_gog_product(raw).unwrap();
@@ -309,7 +309,7 @@ mod tests {
     }
 
     // ---- Online response parsing (shapes from the live APIs; the requests
-    // themselves stay untested — no network in the suite).
+    // themselves stay untested - no network in the suite).
 
     #[test]
     fn the_gog_catalog_response_yields_product_candidates() {
@@ -351,7 +351,7 @@ mod tests {
         let PickCandidate::EgsOffer(first) = &hits[0] else {
             panic!("{hits:?}");
         };
-        // BASE_GAME first, and the Windows build's App Name remembered —
+        // BASE_GAME first, and the Windows build's App Name remembered  -
         // the capitalized Builds App Name, never the lowercase namespace.
         assert_eq!(first.title, "Control");
         assert_eq!(first.windows_app_name.as_deref(), Some("Calluna"));

@@ -1,6 +1,6 @@
-//! S9b — review, verify, draft, and export the umu-database miss stash.
+//! S9b - review, verify, draft, and export the umu-database miss stash.
 //!
-//! The stash holds every identity miss the daemon recorded — umu launches
+//! The stash holds every identity miss the daemon recorded - umu launches
 //! that reported `GAMEID=umu-0`, and launcher launches (Lutris, Heroic)
 //! that carried no umu id at all. All of them feed gamebus-gamedb; this
 //! module runs the umu-database half of the pipeline, which takes only
@@ -10,21 +10,21 @@
 //!
 //! The daemon (network-free, always) writes the stash's resolution half;
 //! this module writes the annotation half (verification, drafted ids, PR
-//! marks — merged, never clobbered: see `UmuReport`) and talks to the world
+//! marks - merged, never clobbered: see `UmuReport`) and talks to the world
 //! on the user's explicit command:
 //!
 //! - default: the review list.
-//! - `--verify`: check every miss against the database — local copy first
+//! - `--verify`: check every miss against the database - local copy first
 //!   (`--db`, `GAMEBUS_UMU_DB`, or the cached full dump), then the public
 //!   API for whatever the local copy did not settle. Entries confirmed
 //!   missing get a umu id drafted per the database's own rules, and every
-//!   draft is collision-checked — no exceptions. Each entry is also checked
+//!   draft is collision-checked - no exceptions. Each entry is also checked
 //!   against the protonfix list: the database collects games that need a fix
 //!   in Proton, so a game that runs out of the box is not a gap to submit.
 //! - `--fetch`: refresh the cached full dump and the protonfix list. One
 //!   request each, only when asked.
-//! - `--export`: submission-shaped CSV on stdout — the games that need umu.
-//! - `--export-md [file]`: a slim, ready-to-paste merge-request text —
+//! - `--export`: submission-shaped CSV on stdout - the games that need umu.
+//! - `--export-md [file]`: a slim, ready-to-paste merge-request text  -
 //!   written to the file, or to stdout when none is given.
 //! - `--check-prs`: best-effort scan of open upstream merge requests for
 //!   entries someone already submitted. Opt-in, non-fatal, clearly labelled.
@@ -55,14 +55,14 @@ use self::verify::{check_open_prs, fetch_full_dump, verify};
 
 /// Whether an entry participates in the umu-database pipeline at all.
 ///
-/// Owner policy (2026-08-24): gamedb is ALWAYS active — every identity
-/// record shows there by default — but umu-database participation is
+/// Owner policy (2026-08-24): gamedb is ALWAYS active - every identity
+/// record shows there by default - but umu-database participation is
 /// OPT-IN per entry. An entry is a umu candidate only when it actually
 /// went through umu ([`Miss::is_umu_miss`]) AND at least one of:
 ///
 /// - the user promoted it in the TUI (`u`; `umu_promoted` carries the date),
 /// - verification found the game already active in the umu database under
-///   another store ([`VerificationState::CrossStoreId`] — the id exists,
+///   another store ([`VerificationState::CrossStoreId`] - the id exists,
 ///   this store's copy is the gap), or
 /// - the fix check found a protonfix, i.e. the game needs umu's help.
 ///
@@ -111,7 +111,7 @@ pub(crate) fn candidacy_line(m: &Miss) -> String {
 }
 
 /// The endpoints, from endpoints.toml (user config over installed copy over
-/// bundled defaults) — loaded once per process.
+/// bundled defaults) - loaded once per process.
 fn endpoints() -> &'static Endpoints {
     static CACHE: std::sync::OnceLock<Endpoints> = std::sync::OnceLock::new();
     CACHE.get_or_init(Endpoints::load)
@@ -141,7 +141,7 @@ pub fn run(args: &[String]) -> ExitCode {
             }
         }
         // The second half of "what does upstream know": which games need a
-        // fix at all. Non-fatal — verification degrades to an unchecked
+        // fix at all. Non-fatal - verification degrades to an unchecked
         // scope, and the database copy is still worth having.
         match fixes::fetch(&endpoints().umu_protonfixes_tree) {
             Ok((_, n)) => println!("Fetched the protonfix list: {n} games need umu."),
@@ -151,7 +151,7 @@ pub fn run(args: &[String]) -> ExitCode {
 
     let mut report = UmuReport::load_for_annotations();
     if let Some(e) = report.load_error() {
-        // Never show "no misses" over a file that failed to parse — that
+        // Never show "no misses" over a file that failed to parse - that
         // reads as data loss. Nothing writes to it either (the report
         // refuses), so the user can repair or move it.
         eprintln!("{e}");
@@ -229,7 +229,7 @@ struct Opts {
 }
 
 impl Opts {
-    /// No flags at all — the TUI flows use the same database resolution as
+    /// No flags at all - the TUI flows use the same database resolution as
     /// a bare CLI invocation (env override, then the fetch cache).
     fn none() -> Self {
         Self {
@@ -294,7 +294,7 @@ fn load_db(opts: &Opts) -> Result<Option<UmuDb>, String> {
     match UmuDb::load_from(&cache) {
         Ok(db) => Ok(Some(db)),
         Err(e) => {
-            eprintln!("Ignoring the cached database ({e}) — re-run with --fetch to refresh it.");
+            eprintln!("Ignoring the cached database ({e}) - re-run with --fetch to refresh it.");
             Ok(None)
         }
     }
@@ -312,7 +312,7 @@ fn list(report: &UmuReport) {
     let mut rows: Vec<&Miss> = report.entries().values().collect();
     rows.sort_by(|a, b| a.last_seen.cmp(&b.last_seen).reverse());
     for m in rows {
-        // An overridden title is the user's word, not the resolver's — the
+        // An overridden title is the user's word, not the resolver's - the
         // bracket must not claim a source/confidence for it.
         let provenance = if m.title_override.is_some() {
             "set by you".to_string()
@@ -341,7 +341,7 @@ fn list(report: &UmuReport) {
         );
         let status = match (&m.verification, &m.drafted_id) {
             (Some(v), Some(d)) if v.state == VerificationState::ConfirmedMissing => Some(format!(
-                "confirmed missing {} — drafted {} ({})",
+                "confirmed missing {} - drafted {} ({})",
                 v.checked,
                 d.id,
                 basis_label(d.basis)
@@ -358,7 +358,7 @@ fn list(report: &UmuReport) {
                     v.checked
                 ),
                 VerificationState::ConfirmedMissing => {
-                    format!("confirmed missing {} — no id drafted yet", v.checked)
+                    format!("confirmed missing {} - no id drafted yet", v.checked)
                 }
             }),
             (None, _) => None,
@@ -375,7 +375,7 @@ fn list(report: &UmuReport) {
         }
         if let Some(when) = &m.dismissed {
             println!(
-                "  {:<28} dismissed {when} — excluded from exports (d in the TUI restores)",
+                "  {:<28} dismissed {when} - excluded from exports (d in the TUI restores)",
                 ""
             );
         }
@@ -414,14 +414,14 @@ pub(crate) fn scope_line(m: &Miss) -> Option<String> {
             } else {
                 format!(" +{}", rest.len())
             };
-            format!("needs umu: protonfix {first}{more} — worth submitting")
+            format!("needs umu: protonfix {first}{more} - worth submitting")
         }
         None if id_is_firm(m) => format!(
-            "no protonfix for {} — runs out of the box, and the database only wants games that need a fix",
+            "no protonfix for {} - runs out of the box, and the database only wants games that need a fix",
             scope.umu_id
         ),
         None => format!(
-            "no protonfix for {} — but that id is our own guess, so nothing here shows the game needs umu either",
+            "no protonfix for {} - but that id is our own guess, so nothing here shows the game needs umu either",
             scope.umu_id
         ),
     })
@@ -429,7 +429,7 @@ pub(crate) fn scope_line(m: &Miss) -> Option<String> {
 
 /// Whether the id the scope check ran against is the game's real one: the
 /// database's own, or a Steam appid from detectable.json. A codename or slug
-/// draft is a guess — a fix could exist under the Steam appid we never
+/// draft is a guess - a fix could exist under the Steam appid we never
 /// learned, so "no fix found" must not be read as "runs out of the box".
 pub(super) fn id_is_firm(m: &Miss) -> bool {
     if m.verification
@@ -476,7 +476,7 @@ fn urlencode(s: &str) -> String {
 }
 
 #[cfg(test)]
-/// Fixture database for the pick flow — the shapes the search hands the
+/// Fixture database for the pick flow - the shapes the search hands the
 /// TUI as candidates.
 fn pick_db() -> UmuDb {
     UmuDb::parse(concat!(
@@ -535,7 +535,7 @@ mod tests {
     }
 
     /// The owner policy's truth table: opt-in via promotion, or one of the
-    /// two suggestions — never membership by default, and never for a
+    /// two suggestions - never membership by default, and never for a
     /// launch that did not go through umu.
     #[test]
     fn umu_candidacy_is_opt_in() {

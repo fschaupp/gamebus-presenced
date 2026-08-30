@@ -14,7 +14,7 @@ use crate::umu_report::{Miss, VerificationState};
 
 /// The identity-miss review pane: what the daemon collected, one entry per
 /// game, with the verification verdict and drafted id once verification ran.
-/// Its verbs act only on explicit keypresses the footer labels — `v` is the
+/// Its verbs act only on explicit keypresses the footer labels - `v` is the
 /// one that reaches the network, and says so. Exporting stays a CLI
 /// invocation: a submission wants a shell, not a raw-mode terminal.
 pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
@@ -23,14 +23,14 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             The daemon writes one entry per game that umu launched without a\n\
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
             Launches Lutris or Heroic handed over without a store identity\n\
-            land here too — they feed gamebus-gamedb, never the umu database.\n\
-            Review them here — v fetches the database and verifies, s corrects\n\
+            land here too - they feed gamebus-gamedb, never the umu database.\n\
+            Review them here - v fetches the database and verifies, s corrects\n\
             a store guess, t corrects a title, a assigns an id by hand\n\
             (collision-checked), p picks a match from the local database or\n\
             your Heroic library, and o looks the title up at its store\n\
             (network).\n\
             Correcting an entry here is what the daemon reads; submitting is\n\
-            a separate, rarer thing: umu candidacy is opt-in — an entry is\n\
+            a separate, rarer thing: umu candidacy is opt-in - an entry is\n\
             exported when a protonfix or a cross-store match suggests it, or\n\
             when you promote it yourself (u).\n\
             Export a submission from the shell (to stdout, or to a file if\n\
@@ -116,7 +116,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(when) = &m.dismissed {
         detail.push(Line::from(Span::styled(
             format!(
-                "{:<11} {when} — out of the exports (d restores)",
+                "{:<11} {when} - out of the exports (d restores)",
                 "Dismissed"
             ),
             Style::default().fg(Color::DarkGray),
@@ -133,7 +133,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let store_line = match &m.store_override {
         Some(over) => format!("{over} (corrected by you; daemon guessed {})", m.store),
-        None => format!("{} (guessed — s cycles)", m.store),
+        None => format!("{} (guessed - s cycles)", m.store),
     };
     let codename_line = match &m.codename_override {
         Some(over) => format!(
@@ -154,7 +154,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
             },
         ),
     ]);
-    // Where the entry stands with the umu pipeline — the opt-in policy's
+    // Where the entry stands with the umu pipeline - the opt-in policy's
     // verdict, mirrored from the CLI list.
     {
         let candidacy = candidacy_line(m);
@@ -185,7 +185,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         Some(v) => {
             let verdict = match v.state {
                 VerificationState::AlreadyInDatabase => format!(
-                    "already in the database as {} — the launcher missed, not the database",
+                    "already in the database as {} - the launcher missed, not the database",
                     v.umu_id.as_deref().unwrap_or("?")
                 ),
                 VerificationState::CrossStoreId => format!(
@@ -202,7 +202,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
                 detail.push(field("Note", note));
             }
         }
-        None => detail.push(field("Verified", "not yet — press v to fetch + verify")),
+        None => detail.push(field("Verified", "not yet - press v to fetch + verify")),
     }
     if let Some(scope) = scope_line(m) {
         // Whether upstream wants the entry at all outranks the id details:
@@ -222,7 +222,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         detail.push(field(
             "Drafted id",
             &format!(
-                "{} — from {}, collision-checked {}",
+                "{} - from {}, collision-checked {}",
                 d.id,
                 basis_label(d.basis),
                 d.collision_checked
@@ -286,10 +286,10 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
 /// the keyboard until Enter or Esc. Returns whether anything was drawn.
 ///
 /// Shared with the gamedb tab, which opens the same mode through the same
-/// keys — it belongs to the stash entry being corrected, not to the pane the
+/// keys - it belongs to the stash entry being corrected, not to the pane the
 /// correction was started from. The mode is bound to the stash key it was
 /// opened for, not to the (frozen) selection. Candidates arrive grouped by
-/// kind; section headers are rows of their own and can never be selected —
+/// kind; section headers are rows of their own and can never be selected  -
 /// `selected` indexes candidates, and [`pick_display_index`] maps it onto
 /// the row list at render time.
 pub(super) fn render_pick(f: &mut Frame, area: Rect, app: &App) -> bool {
@@ -299,7 +299,7 @@ pub(super) fn render_pick(f: &mut Frame, area: Rect, app: &App) -> bool {
 
     // A library identity from a different store than the one already on
     // the miss still works (picking it changes the store), but it is
-    // probably not the row the user is after — greyed, not hidden.
+    // probably not the row the user is after - greyed, not hidden.
     let miss_store = app
         .misses
         .iter()
@@ -311,7 +311,7 @@ pub(super) fn render_pick(f: &mut Frame, area: Rect, app: &App) -> bool {
         let section = c.section_label();
         if last_section.as_deref() != Some(section.as_str()) {
             items.push(ListItem::new(Line::from(Span::styled(
-                format!("— {section} —"),
+                format!(" -  {section}  - "),
                 Style::default().fg(Color::Cyan),
             ))));
             last_section = Some(section);
@@ -398,7 +398,7 @@ fn candidate_row(c: &PickCandidate) -> (String, String) {
 }
 
 /// One glyph summarizing where an entry stands, for the list column.
-/// Mirrors the candidacy policy: non-candidates render dim — the list must
+/// Mirrors the candidacy policy: non-candidates render dim - the list must
 /// not promise a submission the export will hold back.
 fn miss_state(m: &Miss) -> (&'static str, Style) {
     let dim = Style::default().fg(Color::DarkGray);
@@ -426,7 +426,7 @@ fn miss_state(m: &Miss) -> (&'static str, Style) {
         }
     }
     // The protonfix suggestion: the game needs umu, so the entry is a
-    // candidate — with or without a drafted id yet.
+    // candidate - with or without a drafted id yet.
     if m.fix.as_ref().is_some_and(|f| f.has_fix()) {
         return if m.drafted_id.is_some() {
             ("+", Style::default().fg(Color::Yellow))
@@ -434,7 +434,7 @@ fn miss_state(m: &Miss) -> (&'static str, Style) {
             ("∅", Style::default().fg(Color::Yellow))
         };
     }
-    // No suggestion and no promotion: not a umu candidate — dim, whether
+    // No suggestion and no promotion: not a umu candidate - dim, whether
     // the fix check ran and found nothing (○) or never ran (·).
     if m.fix.is_some() {
         ("○", dim)
@@ -494,9 +494,9 @@ mod tests {
 
         // A launcher launch: its own glyph, dim.
         assert_eq!(miss_state(&glyph_miss("")), ("g", dim));
-        // A plain umu miss: recorded, unverified, not a candidate — dim.
+        // A plain umu miss: recorded, unverified, not a candidate - dim.
         assert_eq!(miss_state(&glyph_miss("umu-0")), ("·", dim));
-        // Fix-checked and nothing found: still not a candidate — dim.
+        // Fix-checked and nothing found: still not a candidate - dim.
         let mut m = glyph_miss("umu-0");
         m.fix = Some(FixCheck {
             umu_id: "umu-870780".into(),
@@ -505,7 +505,7 @@ mod tests {
         });
         assert_eq!(miss_state(&m).0, "○");
         assert_eq!(miss_state(&m).1, dim);
-        // A protonfix: suggested — colored.
+        // A protonfix: suggested - colored.
         m.fix.as_mut().unwrap().fixes = vec!["gamefixes-steam/870780.py".into()];
         assert_eq!(miss_state(&m).0, "∅");
         assert_ne!(miss_state(&m).1, dim);
@@ -541,7 +541,7 @@ mod tests {
             codename: "2049187585".into(),
         });
         // The miss already says egs: a gog library row is probably not the
-        // one — greyed. Same store, store none, or a db row: full color.
+        // one - greyed. Same store, store none, or a db row: full color.
         assert!(cross_store_library(&gog_lib, Some("egs")));
         assert!(!cross_store_library(&gog_lib, Some("gog")));
         assert!(!cross_store_library(&gog_lib, Some("none")));

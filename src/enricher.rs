@@ -55,10 +55,10 @@ enum IdentitySource {
     /// The walk resolved the actual game process (cmdline, descendant tree,
     /// sandbox family).
     Walk,
-    /// The `lutris-wrapper` ancestor's argv named it (layer 4) — Lutris
+    /// The `lutris-wrapper` ancestor's argv named it (layer 4) - Lutris
     /// telling us what it launched, one rung below a walk hit.
     LutrisArgv,
-    /// Steam's own appmanifest named it — the official title of the
+    /// Steam's own appmanifest named it - the official title of the
     /// installed appid, curated-grade but distinct so downstream labels
     /// never claim detectable.json knew a game it did not.
     SteamManifest,
@@ -113,7 +113,7 @@ pub struct Enricher {
     /// lockstep with [`GameGroup::set_identity`]'s monotone rule: recorded
     /// only when the offered identity was actually adopted, so the tag
     /// always describes the identity the group holds. Never consulted for
-    /// election — only for the stash's `title_source` label.
+    /// election - only for the stash's `title_source` label.
     identity_sources: HashMap<String, IdentitySource>,
     /// Ungrouped GameMode records withheld from the bus because nothing has
     /// named them yet. The monitor would show "(unknown)" - instead the
@@ -506,7 +506,7 @@ impl Enricher {
 
         // Stable stash key when no codename exists: the GAME_NAME slug for
         // Lutris (the merge key's uuid is per-launch and would fragment the
-        // stash), the merge key itself otherwise. Never an exe basename —
+        // stash), the merge key itself otherwise. Never an exe basename  -
         // every Wine launch would collapse onto wine64-preloader.
         let fallback = if is_lutris {
             match game_name.as_deref().map(slug).filter(|s| !s.is_empty()) {
@@ -625,7 +625,7 @@ impl Enricher {
         } else {
             // Steam names its own installs: for a steam-keyed member whose
             // exe runs out of a steamapps library, the appmanifest beside it
-            // carries the official title — authoritative even when
+            // carries the official title - authoritative even when
             // detectable.json has never heard of the game (observed live
             // 2026-08-30: Danger Scavenger, a real Steam app absent from
             // detectable, published nothing at all). The member stays Plain;
@@ -647,8 +647,8 @@ impl Enricher {
                     )),
                 );
             }
-            // A game binary Lutris launched directly — a native Linux game,
-            // `gamemoderun ./Game.x86_64` — registers with GameMode itself,
+            // A game binary Lutris launched directly - a native Linux game,
+            // `gamemoderun ./Game.x86_64` - registers with GameMode itself,
             // so no wrapper pid ever runs the ancestor layer on its behalf
             // (`apply_descendant_walk` is wrappers-only) and the record kept
             // the executable stem. Ask the lutris-wrapper ancestor here. The
@@ -755,7 +755,7 @@ impl Enricher {
         let effect = group.upsert(pid, member, rep_pinned);
         // S9: the stash mirrors the group's ELECTED identity, never a
         // member's raw claim. A claim that loses the election must not reach
-        // the stash — the Unity crash handler resolved to another game and
+        // the stash - the Unity crash handler resolved to another game and
         // overwrote a correct same-confidence title, while the published
         // record stayed right because set_identity is monotone. Noting the
         // group identity after routing hands that monotonicity to the stash.
@@ -1016,7 +1016,7 @@ impl Enricher {
 
     /// S9: write the group's elected identity through to the umu-miss stash.
     /// GameProcess identities are curated-database hits; wrapper layers are
-    /// launcher/human titles — a Lutris-argv title is labelled with its own
+    /// launcher/human titles - a Lutris-argv title is labelled with its own
     /// source (`lutris-wrapper`, S9c) so downstream knows the name came off
     /// the launcher's command line. note_title never downgrades, so the
     /// heroic-config High note (recorded at its creation site) survives the
@@ -1299,7 +1299,7 @@ impl Enricher {
         }
         // Steam's own appmanifest is the third authority, and the only one
         // that needs no database: a game absent from detectable.json is
-        // still a real install with an official name (R5 holds — nothing
+        // still a real install with an official name (R5 holds - nothing
         // outside a steamapps library, and no appid without a manifest,
         // gets a record).
         exe.contains("/steamapps/") && steam_manifest_name(exe, appid).is_some()
@@ -1763,7 +1763,7 @@ fn umu_miss_id(environ: &str) -> Option<&'static str> {
 /// The name Steam's own appmanifest records for an appid: the exe runs out
 /// of `<library>/steamapps/common/<game>/`, and the manifest sits at
 /// `<library>/steamapps/appmanifest_<appid>.acf`. A shallow line parse is
-/// enough — the `"name"` key is one quoted pair — and any miss (no
+/// enough - the `"name"` key is one quoted pair - and any miss (no
 /// steamapps segment, no file, no name line) is a silent None.
 fn steam_manifest_name(exe: &str, appid: &str) -> Option<String> {
     let end = exe.find("/steamapps/")? + "/steamapps/".len();
@@ -1793,7 +1793,7 @@ fn env_value(environ: &str, var: &str) -> Option<String> {
 /// The store codename Lutris wrote beside the game (S9c): read
 /// `<dir>/.lutrisgame.json` and take its `appid`. Only itch.io installs
 /// carry the file on a measured machine; a missing or malformed file is a
-/// silent `None` — same precedent as [`heroic_title`].
+/// silent `None` - same precedent as [`heroic_title`].
 fn lutris_marker_appid(dir: &str) -> Option<String> {
     let raw = std::fs::read_to_string(std::path::Path::new(dir).join(".lutrisgame.json")).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -1837,7 +1837,7 @@ fn runner_of(umu_marker: bool, raw_exe: &str) -> &'static str {
     }
 }
 
-/// Is this exe a Wine/Proton process — the runtime, or a Windows binary?
+/// Is this exe a Wine/Proton process - the runtime, or a Windows binary?
 fn is_wine_binary(raw_exe: &str) -> bool {
     let lower = raw_exe.to_ascii_lowercase();
     let base = std::path::Path::new(&lower)
@@ -2975,7 +2975,7 @@ mod tests {
     fn the_stash_mirrors_the_elected_identity_not_the_last_claim() {
         // The Project Hospital incident: the real game's identity is elected
         // first; the crash handler's same-confidence claim for another game
-        // arrives later. The group refuses the sideways overwrite — and the
+        // arrives later. The group refuses the sideways overwrite - and the
         // stash must agree with the group, not with whichever claim came
         // last. (Before the fix the stash flipped to "Spellcraft".)
         use crate::group::MemberClass;
@@ -3635,7 +3635,7 @@ mod tests {
     fn a_native_lutris_launch_records_launcher_facts_and_marker_codename() {
         // The live Danger Scavenger shape (itch.io via Lutris, 2026-08-23):
         // no umu marker, but Lutris hands us the store, the name, the
-        // directory — and wrote the codename beside the game.
+        // directory - and wrote the codename beside the game.
         let mut e = with_scratch_stash("ds-facts");
         let dir = std::env::temp_dir().join(format!("gamebus-ds-marker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3692,7 +3692,7 @@ mod tests {
     #[test]
     fn a_heroic_umu_miss_records_the_same_entry_plus_launcher_facts() {
         // The pre-S9c Heroic umu-0 shape must produce the entry it always
-        // did — same key, same store guess, same codename, same umu id —
+        // did - same key, same store guess, same codename, same umu id  -
         // with the launcher facts added beside it.
         let mut e = with_scratch_stash("heroic-facts");
         let environ =
@@ -3730,7 +3730,7 @@ mod tests {
     fn repeated_lutris_umu_launches_collapse_onto_the_game_name_slug() {
         // A Lutris Wine launch (Control through umu-default): the merge key
         // carries a fresh uuid every launch, but the stash must keep ONE
-        // entry — keyed by the GAME_NAME slug when no codename exists.
+        // entry - keyed by the GAME_NAME slug when no codename exists.
         let mut e = with_scratch_stash("control-collapse");
         let exe = "/usr/bin/wine64-preloader";
         for uuid in ["uuid-1", "uuid-2"] {

@@ -88,7 +88,7 @@ fn usage() {
     eprintln!("Every remote endpoint the tools talk to is configured in endpoints.toml,");
     eprintln!("and shared-helpers.txt lists helper executables that never name a game");
     eprintln!("(~/.config/gamebus-presenced/ overrides the installed copies in the data");
-    eprintln!("directory — endpoint keys replace, helper entries add on top; see each");
+    eprintln!("directory - endpoint keys replace, helper entries add on top; see each");
     eprintln!("file for the full order and the defaults).");
 }
 
@@ -188,7 +188,7 @@ enum Msg {
     /// A umu flow (verify / assign / pick / store cycle) finished: its log
     /// lines and whether it completed. Clears `busy` and refreshes the pane.
     UmuOutcome(Vec<String>, bool),
-    /// A candidate search answered — the local pick (`p`) or an online
+    /// A candidate search answered - the local pick (`p`) or an online
     /// lookup (`o`), kind-tagged either way. Clears `busy` and opens pick
     /// mode (or logs that nothing matched). `stale` warns when candidates
     /// came from an aging fetch cache (or an absent one).
@@ -568,11 +568,11 @@ async fn handle(
             }
             if candidates.is_empty() {
                 app.log(
-                    "  No database or library title matches — v verifies against the live API too.",
+                    "  No database or library title matches - v verifies against the live API too.",
                 );
             } else if app.misses.iter().any(|(k, _)| k == &key) {
                 app.log(format!(
-                    "  {} candidate(s) — ↑↓ choose, Enter picks, Esc cancels.",
+                    "  {} candidate(s) - ↑↓ choose, Enter picks, Esc cancels.",
                     candidates.len()
                 ));
                 app.pick = Some(ui::Pick {
@@ -640,7 +640,7 @@ async fn handle(
                     if app.busy.is_some() {
                         return;
                     }
-                    // The query is the effective title — the user's
+                    // The query is the effective title - the user's
                     // correction when present; without any there is nothing
                     // to search for.
                     let title = app
@@ -656,7 +656,7 @@ async fn handle(
                         return;
                     };
                     app.busy = Some("searching the local database and libraries".into());
-                    // Local files only — `v` and `o` are the network keys.
+                    // Local files only - `v` and `o` are the network keys.
                     let tx = tx.clone();
                     tokio::task::spawn_blocking(move || {
                         let msg = match setup::umu_misses::tui_pick_candidates(&title) {
@@ -675,7 +675,7 @@ async fn handle(
                         return;
                     }
                     // The effective title and codename: the user's
-                    // corrections when present. The title may be absent —
+                    // corrections when present. The title may be absent  -
                     // a gog entry with a numeric codename looks up by id
                     // and needs none; the flow refuses the rest honestly.
                     let entry = app.misses.iter().find(|(k, _)| *k == key).map(|(_, m)| {

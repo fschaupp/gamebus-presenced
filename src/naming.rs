@@ -41,14 +41,14 @@ struct DetectableSku {
 }
 
 /// The shipped shared-helper list (helper executables that can never name a
-/// game — see `shared-helpers.txt` at the repo root, incident history
+/// game - see `shared-helpers.txt` at the repo root, incident history
 /// included), compiled in so the protections exist even with no file on disk.
 const BUNDLED_SHARED_HELPERS: &str = include_str!("../shared-helpers.txt");
 
 pub const SHARED_HELPERS_NAME: &str = "shared-helpers.txt";
 
 /// The effective shared-helper set: the bundled list unioned with every
-/// `shared-helpers.txt` found on disk. Union, not override — each file only
+/// `shared-helpers.txt` found on disk. Union, not override - each file only
 /// adds entries, so a local file can extend the shipped protections but never
 /// remove them. Parsed once per process; the daemon is long-running and the
 /// files do not change under it.
@@ -101,7 +101,7 @@ fn shared_helpers_candidates() -> Vec<PathBuf> {
 }
 
 /// Lines → lowercase basenames. Blank lines and `#` comments are skipped; a
-/// junk line is an entry that matches nothing, not an error — a typo in a
+/// junk line is an entry that matches nothing, not an error - a typo in a
 /// user file must not cost the shipped protections.
 fn parse_shared_helpers(raw: &str) -> HashSet<String> {
     raw.lines()
@@ -295,20 +295,20 @@ fn find_detectable_json() -> Option<PathBuf> {
 ///
 /// Three rules over a backslash-aware lowercase basename (Wine paths like
 /// `C:\windows\system32\services.exe` contain no `/`):
-/// 1. literal basenames — shells, launchers, Wine service processes;
-/// 2. prefix families — the pressure-vessel / steam-runtime-tools crowd,
+/// 1. literal basenames - shells, launchers, Wine service processes;
+/// 2. prefix families - the pressure-vessel / steam-runtime-tools crowd,
 ///    which ships dozens of helpers (`pv-verify`, `srt-logger`,
 ///    `x86_64-linux-gnu-check-vulkan`, …) that appear and vanish around a
 ///    launch, all preloaded into GameMode by libgamemodeauto;
-/// 3. version-suffixed interpreters — `/usr/bin/python3.13` must match like
+/// 3. version-suffixed interpreters - `/usr/bin/python3.13` must match like
 ///    `python3` did (observed live: a python3.13 wrapper identified as a
 ///    game exe because the bare-literal list missed it).
 ///
 /// Deliberately OFF the list, both load-bearing:
-/// - `wine64-preloader` / `wine-preloader` / `wine64` — Wine games are only
+/// - `wine64-preloader` / `wine-preloader` / `wine64` - Wine games are only
 ///   identifiable through the cmdline layer, which `classify_member`
 ///   restricts for listed wrappers;
-/// - `sleep` — the integration fixtures register real `sleep` processes and
+/// - `sleep` - the integration fixtures register real `sleep` processes and
 ///   assert their stem publishes.
 fn wrapper_basename(executable: &str) -> Option<String> {
     let base = executable.rsplit(['/', '\\']).next()?;
@@ -339,7 +339,7 @@ pub(crate) fn is_wrapper_executable(executable: &str) -> bool {
         "umu-shim",
         "gamemoderun",
         "lutris-wrapper",
-        // Wine service processes — prefix-shaped like games, never the game.
+        // Wine service processes - prefix-shaped like games, never the game.
         "wineserver",
         "services.exe",
         "winedevice.exe",
@@ -543,7 +543,7 @@ mod tests {
             None
         );
         // Even the listing game's own install must not resolve through the
-        // helper — the real game exe is the one that identifies it.
+        // helper - the real game exe is the one that identifies it.
         assert_eq!(
             db.lookup_by_executable("some game/unitycrashhandler64.exe"),
             None
