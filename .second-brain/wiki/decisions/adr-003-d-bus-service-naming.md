@@ -57,5 +57,5 @@ The gamebus-presenced service needs a well-defined D-Bus identity that:
 
 The activity path element is implemented with a capital: `/org/gamebus/
 Presence/v1/Activity/<id>` (src/dbus/types.rs, `ACTIVITY_PATH_PREFIX`), not
-the lowercase `activity/<id>` written above. Everything else here — bus name,
-dot-`.v1` spelling, versioning strategy — matches the implementation.
+the lowercase `activity/<id>` written above. Everything else here - bus name,
+dot-`.v1` spelling, versioning strategy - matches the implementation.

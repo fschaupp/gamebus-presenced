@@ -11,7 +11,7 @@ This index is a complete catalog of all pages in the vault, organized by categor
 ---
 
 **Not catalogued:** `Bases/` (4 Obsidian Bases views), `Templates/`, and the
-empty `raw/` — infrastructure, not notes (noted 2026-08-06; the "every note"
+empty `raw/` - infrastructure, not notes (noted 2026-08-06; the "every note"
 claim above covers notes only).
 
 ## Root Files
