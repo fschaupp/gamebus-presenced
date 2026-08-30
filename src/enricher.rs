@@ -44,6 +44,22 @@ const MAX_DESCENDANT_DEPTH: usize = 12;
 /// number of processes visited.
 const MAX_DESCENDANT_BREADTH: usize = 64;
 
+/// Where a group identity's name came from (S9c title provenance). A tag
+/// BESIDE [`IdentityClass`], never part of it: provenance must not change
+/// the election order, only the stash's `title_source` label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentitySource {
+    /// A curated record named it: detectable.json, or a launcher's own
+    /// install records (the Heroic library title).
+    Curated,
+    /// The walk resolved the actual game process (cmdline, descendant tree,
+    /// sandbox family).
+    Walk,
+    /// The `lutris-wrapper` ancestor's argv named it (layer 4) — Lutris
+    /// telling us what it launched, one rung below a walk hit.
+    LutrisArgv,
+}
+
 /// Enrichment middleware: sits between sources and the correlator.
 ///
 /// Processes raw source events, potentially emitting additional enriched
@@ -83,9 +99,18 @@ pub struct Enricher {
     /// user-reviewed submission upstream. In-memory no-op until
     /// [`load_umu_report`] attaches the on-disk stash.
     umu_report: UmuReport,
-    /// merge key → (store guess, codename) for keys born from a umu-miss
-    /// launch, so later title resolutions can find their stash entry.
-    umu_miss_keys: HashMap<String, (String, Option<String>)>,
+    /// merge key → (store guess, codename, stable entry fallback) for keys
+    /// whose launch went into the identity-miss stash, so later title
+    /// resolutions can find their stash entry. The fallback may be a
+    /// GAME_NAME slug rather than the per-launch merge key (S9c), which is
+    /// what collapses repeated per-uuid Lutris launches onto one entry.
+    stash_keys: HashMap<String, (String, Option<String>, String)>,
+    /// merge key → provenance of the group's CURRENT identity (S9c). Kept in
+    /// lockstep with [`GameGroup::set_identity`]'s monotone rule: recorded
+    /// only when the offered identity was actually adopted, so the tag
+    /// always describes the identity the group holds. Never consulted for
+    /// election — only for the stash's `title_source` label.
+    identity_sources: HashMap<String, IdentitySource>,
     /// Ungrouped GameMode records withheld from the bus because nothing has
     /// named them yet (S7). The monitor would show "(unknown)" — instead the
     /// bus sees nothing until any evidence names the record, which also makes
@@ -115,7 +140,8 @@ impl Enricher {
             name_hints: HashMap::new(),
             withheld: HashMap::new(),
             umu_report: UmuReport::default(),
-            umu_miss_keys: HashMap::new(),
+            stash_keys: HashMap::new(),
+            identity_sources: HashMap::new(),
         }
     }
 
@@ -306,17 +332,12 @@ impl Enricher {
             let environ =
                 std::fs::read_to_string(format!("/proc/{pid}/environ")).unwrap_or_default();
             if let Some(key) = merge_key_from_environ(&environ) {
-                // S9: a launch that went through umu without a database entry
-                // is a gap worth recording — together with whatever this
-                // daemon later works out about it.
-                if let Some(missed_id) = umu_miss_id(&environ) {
-                    let heroic_source = env_value(&environ, "HEROIC_APP_SOURCE");
-                    let codename = env_value(&environ, "HEROIC_APP_NAME");
-                    let store = umu_report::guess_store(None, heroic_source.as_deref(), &raw_exe);
-                    self.umu_report
-                        .note_launch(&store, codename.as_deref(), missed_id, &key);
-                    self.umu_miss_keys.insert(key.clone(), (store, codename));
-                }
+                // S9/S9c: a launch that went through umu without a database
+                // entry, or that a launcher handed us without an
+                // authoritative store identity, is a gap worth recording —
+                // together with whatever this daemon later works out about
+                // it.
+                self.maybe_stash_launch(&key, &environ, &raw_exe);
                 let (class, mut identity) =
                     self.classify_member(pid, &raw_exe, &key, identified.as_ref());
                 // S8: a Heroic group whose members prove nothing themselves
@@ -328,22 +349,27 @@ impl Enricher {
                 {
                     if let Some(app) = key.strip_prefix("heroic:") {
                         if let Some(title) = heroic_title(app) {
-                            if let Some((store, code)) = self.umu_miss_keys.get(&key).cloned() {
+                            if let Some((store, code, fallback)) =
+                                self.stash_keys.get(&key).cloned()
+                            {
                                 self.umu_report.note_title(
                                     &store,
                                     code.as_deref(),
-                                    &key,
+                                    &fallback,
                                     &title,
                                     "heroic-config",
                                     Confidence::High,
                                     None,
                                 );
                             }
-                            identity = Some(Identity {
-                                name: title,
-                                exe: raw_exe.clone(),
-                                class: IdentityClass::Wrapper,
-                            });
+                            identity = Some((
+                                Identity {
+                                    name: title,
+                                    exe: raw_exe.clone(),
+                                    class: IdentityClass::Wrapper,
+                                },
+                                IdentitySource::Curated,
+                            ));
                         }
                     }
                 }
@@ -404,19 +430,101 @@ impl Enricher {
         events
     }
 
+    /// S9c: decide whether this launch belongs in the identity-miss stash
+    /// and record it with everything the launcher said about it. Recorded:
+    /// launches umu ran without a database entry (the `umu-0`/`umu-default`
+    /// marker), and launcher-keyed launches (`lutris:`/`heroic:`) — a
+    /// launcher handing us a process without an authoritative store
+    /// identity. Never `steam:` keys and never curated `umu:<id>` launches
+    /// without the marker: their identity is authoritative.
+    fn maybe_stash_launch(&mut self, key: &str, environ: &str, raw_exe: &str) {
+        let missed_id = umu_miss_id(environ);
+        let is_lutris = key.starts_with("lutris:");
+        let is_heroic = key.starts_with("heroic:");
+        if missed_id.is_none() && !is_lutris && !is_heroic {
+            return;
+        }
+
+        let store_env = env_value(environ, "STORE");
+        let game_name = env_value(environ, "GAME_NAME");
+        let game_dir = env_value(environ, "GAME_DIRECTORY");
+        let heroic_source = env_value(environ, "HEROIC_APP_SOURCE");
+        let heroic_app = env_value(environ, "HEROIC_APP_NAME");
+        let store =
+            umu_report::guess_store(store_env.as_deref(), heroic_source.as_deref(), raw_exe);
+
+        // Codename: Lutris writes one beside the game (itch.io installs);
+        // Heroic carries one in the environment of every launch.
+        let (codename, codename_source) = if is_lutris {
+            match game_dir.as_deref().and_then(lutris_marker_appid) {
+                Some(appid) => (Some(appid), Some("lutris-config")),
+                None => (None, None),
+            }
+        } else {
+            match &heroic_app {
+                Some(app) => (Some(app.clone()), Some("heroic-env")),
+                None => (None, None),
+            }
+        };
+
+        // Stable stash key when no codename exists: the GAME_NAME slug for
+        // Lutris (the merge key's uuid is per-launch and would fragment the
+        // stash), the merge key itself otherwise. Never an exe basename —
+        // every Wine launch would collapse onto wine64-preloader.
+        let fallback = if is_lutris {
+            match game_name.as_deref().map(slug).filter(|s| !s.is_empty()) {
+                Some(s) => format!("lutris:{s}"),
+                None => key.to_string(),
+            }
+        } else {
+            key.to_string()
+        };
+
+        let launcher = if is_lutris {
+            Some("lutris")
+        } else if is_heroic {
+            Some("heroic")
+        } else {
+            None
+        };
+        let launcher_name = if is_lutris {
+            game_name
+        } else {
+            // The Heroic library resolves the codename to a display title.
+            heroic_app.as_deref().and_then(heroic_title)
+        };
+
+        self.umu_report.note_launch_with(
+            &store,
+            codename.as_deref(),
+            missed_id.unwrap_or(""),
+            &fallback,
+            umu_report::LaunchFacts {
+                launcher: launcher.map(str::to_string),
+                launcher_name,
+                launcher_dir: game_dir,
+                codename_source: codename_source.map(str::to_string),
+                runner: Some(runner_of(missed_id.is_some(), raw_exe).to_string()),
+            },
+        );
+        self.stash_keys
+            .insert(key.to_string(), (store, codename, fallback));
+    }
+
     /// Classify a group member (spec §1.1) and derive any identity it proves.
     ///
     /// `GameProcess`: `identify_process` hit, or exe under `/steamapps/`
     /// with a resolvable Steam appid. `IdentifiedWrapper`: the descendant
     /// walk resolved the game through this pid. `Helper`: known wrapper
     /// executable, judged on the RAW exe. `Plain`: everything else.
+    /// Every identity comes tagged with its [`IdentitySource`] (S9c).
     fn classify_member(
         &self,
         pid: u32,
         raw_exe: &str,
         key: &str,
-        identified: Option<&(String, String)>,
-    ) -> (MemberClass, Option<Identity>) {
+        identified: Option<&(String, String, IdentitySource)>,
+    ) -> (MemberClass, Option<(Identity, IdentitySource)>) {
         if let Some(ref db) = self.naming {
             // A known wrapper's cmdline carries the full launch command,
             // game binary included (`reaper SteamLaunch ... /path/Game`),
@@ -433,11 +541,14 @@ impl Enricher {
             if let Some((name, exe)) = hit {
                 return (
                     MemberClass::GameProcess,
-                    Some(Identity {
-                        name,
-                        exe,
-                        class: IdentityClass::GameProcess,
-                    }),
+                    Some((
+                        Identity {
+                            name,
+                            exe,
+                            class: IdentityClass::GameProcess,
+                        },
+                        IdentitySource::Curated,
+                    )),
                 );
             }
             if raw_exe.contains("/steamapps/") {
@@ -447,23 +558,29 @@ impl Enricher {
                 {
                     return (
                         MemberClass::GameProcess,
-                        Some(Identity {
-                            name: name.to_string(),
-                            exe: raw_exe.to_string(),
-                            class: IdentityClass::GameProcess,
-                        }),
+                        Some((
+                            Identity {
+                                name: name.to_string(),
+                                exe: raw_exe.to_string(),
+                                class: IdentityClass::GameProcess,
+                            },
+                            IdentitySource::Curated,
+                        )),
                     );
                 }
             }
         }
-        if let Some((name, exe)) = identified {
+        if let Some((name, exe, source)) = identified {
             return (
                 MemberClass::IdentifiedWrapper,
-                Some(Identity {
-                    name: name.clone(),
-                    exe: exe.clone(),
-                    class: IdentityClass::Wrapper,
-                }),
+                Some((
+                    Identity {
+                        name: name.clone(),
+                        exe: exe.clone(),
+                        class: IdentityClass::Wrapper,
+                    },
+                    *source,
+                )),
             );
         }
         if is_wrapper_executable(raw_exe) {
@@ -477,10 +594,15 @@ impl Enricher {
             // member stays Plain (this changes no election) and the identity
             // is launcher-class, so a curated hit still replaces it:
             // set_identity is monotone by class.
-            let identity = identify_via_lutris_ancestor(pid).map(|(name, exe)| Identity {
-                name,
-                exe,
-                class: IdentityClass::Wrapper,
+            let identity = identify_via_lutris_ancestor(pid).map(|(name, exe)| {
+                (
+                    Identity {
+                        name,
+                        exe,
+                        class: IdentityClass::Wrapper,
+                    },
+                    IdentitySource::LutrisArgv,
+                )
             });
             (MemberClass::Plain, identity)
         }
@@ -494,7 +616,7 @@ impl Enricher {
         key: &str,
         pid: u32,
         mut member: Member,
-        identity: Option<Identity>,
+        identity: Option<(Identity, IdentitySource)>,
         mut activity: Activity,
         steam_activity: Option<Activity>,
     ) -> Vec<SourceEvent> {
@@ -513,8 +635,17 @@ impl Enricher {
             .entry(key.to_string())
             .or_insert_with(|| GameGroup::new(key, activity.since));
         self.pid_to_group.insert(pid, key.to_string());
-        if let Some(id) = identity {
+        if let Some((id, source)) = identity {
+            // Mirror set_identity's monotone rule (spec §1.3) so the
+            // provenance tag always describes the identity the group holds.
+            let adopted = match &group.identity {
+                None => true,
+                Some(current) => id.class > current.class,
+            };
             group.set_identity(id);
+            if adopted {
+                self.identity_sources.insert(key.to_string(), source);
+            }
         }
         // The rep carries the group's one Steam partial; remember the appid
         // so it can move with the record on migration.
@@ -702,7 +833,10 @@ impl Enricher {
     /// Returns the `(name, exe)` identification when the walk resolved the
     /// game through this pid — the group model records it as the member's
     /// [`IdentifiedWrapper`](MemberClass::IdentifiedWrapper) proof.
-    fn apply_descendant_walk(&mut self, activity: &mut Activity) -> Option<(String, String)> {
+    fn apply_descendant_walk(
+        &mut self,
+        activity: &mut Activity,
+    ) -> Option<(String, String, IdentitySource)> {
         // Only for GameMode activities with wrapper executables.
         if !activity.sources.contains(&Source::GameMode) {
             return None;
@@ -723,12 +857,12 @@ impl Enricher {
         }
 
         match self.identify_wrapper(pid) {
-            Some((name, exe)) => {
+            Some((name, exe, source)) => {
                 tracing::info!(wrapper_pid = pid, game_name = %name, game_exe = %exe, "identified game for wrapper");
                 activity.name = name.clone();
                 activity.executable = exe.clone();
                 self.unresolved_wrappers.remove(&pid);
-                Some((name, exe))
+                Some((name, exe, source))
             }
             None => {
                 // Game may not have launched yet (Battle.net launcher → game
@@ -766,7 +900,7 @@ impl Enricher {
         let pids: Vec<u32> = self.unresolved_wrappers.iter().copied().collect();
         let mut out = Vec::new();
         for pid in pids {
-            let Some((name, exe)) = self.identify_wrapper(pid) else {
+            let Some((name, exe, source)) = self.identify_wrapper(pid) else {
                 continue;
             };
             tracing::info!(wrapper_pid = pid, game_name = %name, game_exe = %exe, "identified game for wrapper (retry)");
@@ -776,11 +910,21 @@ impl Enricher {
                     let Some(group) = self.groups.get_mut(&key) else {
                         continue;
                     };
-                    group.set_identity(Identity {
+                    let id = Identity {
                         name,
                         exe,
                         class: IdentityClass::Wrapper,
-                    });
+                    };
+                    // Mirror set_identity's monotone rule (spec §1.3) so
+                    // the provenance tag tracks the held identity.
+                    let adopted = match &group.identity {
+                        None => true,
+                        Some(current) => id.class > current.class,
+                    };
+                    group.set_identity(id);
+                    if adopted {
+                        self.identity_sources.insert(key.clone(), source);
+                    }
                     // The pid proved the group identity: upgrade its class.
                     if let Some(member) = group.members.get_mut(&pid) {
                         if member.class < MemberClass::IdentifiedWrapper {
@@ -811,11 +955,13 @@ impl Enricher {
 
     /// S9: write the group's elected identity through to the umu-miss stash.
     /// GameProcess identities are curated-database hits; wrapper layers are
-    /// launcher/human titles. note_title never downgrades, so the
+    /// launcher/human titles — a Lutris-argv title is labelled with its own
+    /// source (`lutris-wrapper`, S9c) so downstream knows the name came off
+    /// the launcher's command line. note_title never downgrades, so the
     /// heroic-config High note (recorded at its creation site) survives the
-    /// generic Wrapper-class mapping here. No-op for keys that never missed.
+    /// Medium wrapper-class mapping here. No-op for keys that never missed.
     fn note_group_identity(&mut self, key: &str) {
-        let Some((store, code)) = self.umu_miss_keys.get(key).cloned() else {
+        let Some((store, code, fallback)) = self.stash_keys.get(key).cloned() else {
             return;
         };
         let Some(id) = self.groups.get(key).and_then(|g| g.identity.clone()) else {
@@ -823,12 +969,17 @@ impl Enricher {
         };
         let (source_label, confidence) = match id.class {
             IdentityClass::GameProcess => ("detectable", Confidence::High),
+            IdentityClass::Wrapper
+                if self.identity_sources.get(key) == Some(&IdentitySource::LutrisArgv) =>
+            {
+                ("lutris-wrapper", Confidence::Medium)
+            }
             IdentityClass::Wrapper => ("wrapper-layer", Confidence::Medium),
         };
         self.umu_report.note_title(
             &store,
             code.as_deref(),
-            key,
+            &fallback,
             &id.name,
             source_label,
             confidence,
@@ -1009,8 +1160,10 @@ impl Enricher {
             let (class, identity) = self.classify_member(pid, &raw_exe, &key, None);
             let mut group = GameGroup::new(key.clone(), 0);
             group.steam_appid = Some(appid.clone());
-            if let Some(id) = identity {
+            if let Some((id, source)) = identity {
+                // A fresh group adopts its first identity unconditionally.
                 group.set_identity(id);
+                self.identity_sources.insert(key.clone(), source);
             }
             group.upsert(
                 pid,
@@ -1158,25 +1311,29 @@ impl Enricher {
                 exe,
                 class: IdentityClass::GameProcess,
             });
+        // Only entered while the group is unidentified, so the GameProcess
+        // identity is always adopted.
+        self.identity_sources
+            .insert(key.to_string(), IdentitySource::Curated);
         self.note_group_identity(key);
         self.emit_rep_refresh(key, rep)
     }
 
     /// Run the three identification layers for a wrapper pid.
     /// Returns `(game_name, game_executable)` on success.
-    fn identify_wrapper(&self, pid: u32) -> Option<(String, String)> {
+    fn identify_wrapper(&self, pid: u32) -> Option<(String, String, IdentitySource)> {
         if let Some(db) = self.naming.as_ref() {
             // Layer 1: the wrapper's own cmdline usually names the game.
-            if let Some(found) = identify_via_cmdline(pid, db) {
-                return Some(found);
+            if let Some((name, exe)) = identify_via_cmdline(pid, db) {
+                return Some((name, exe, IdentitySource::Walk));
             }
             // Layer 2: connected descendant walk.
-            if let Some(found) = find_game_descendant(pid, db) {
-                return Some(found);
+            if let Some((name, exe)) = find_game_descendant(pid, db) {
+                return Some((name, exe, IdentitySource::Walk));
             }
             // Layer 3: Flatpak-portal sandbox family (umu tmpdir bridge).
-            if let Some(found) = find_game_in_sandbox_family(pid, db) {
-                return Some(found);
+            if let Some((name, exe)) = find_game_in_sandbox_family(pid, db) {
+                return Some((name, exe, IdentitySource::Walk));
             }
         }
         // Layer 4 (S6b): a `lutris-wrapper` ancestor announces the human
@@ -1184,7 +1341,7 @@ impl Enricher {
         // authoritative fallback for games detectable.json does not know
         // (UbisoftConnect.exe was the live case), and the only layer that
         // works without a naming database.
-        identify_via_lutris_ancestor(pid)
+        identify_via_lutris_ancestor(pid).map(|(name, exe)| (name, exe, IdentitySource::LutrisArgv))
     }
 
     /// Apply naming enrichment to an activity.
@@ -1389,6 +1546,7 @@ impl Enricher {
             return Vec::new();
         };
         let steam_only = self.steam_only_groups.remove(key);
+        self.identity_sources.remove(key);
         let mut events = Vec::with_capacity(2);
         if let Some(sid) = self.steam_ids.remove(&group.rep) {
             events.push(SourceEvent::Removed {
@@ -1438,6 +1596,7 @@ impl Enricher {
                 tracing::debug!(merge_key = %key, "group: dropped on GameMode source loss");
                 self.groups.remove(&key);
                 self.steam_only_groups.remove(&key);
+                self.identity_sources.remove(&key);
             }
             for key in self.groups.keys() {
                 self.steam_only_groups.insert(key.clone());
@@ -1530,6 +1689,66 @@ fn env_value(environ: &str, var: &str) -> Option<String> {
         .find_map(|e| e.strip_prefix(prefix.as_str()))
         .filter(|v| !v.is_empty())
         .map(str::to_string)
+}
+
+/// The store codename Lutris wrote beside the game (S9c): read
+/// `<dir>/.lutrisgame.json` and take its `appid`. Only itch.io installs
+/// carry the file on a measured machine; a missing or malformed file is a
+/// silent `None` — same precedent as [`heroic_title`].
+fn lutris_marker_appid(dir: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(std::path::Path::new(dir).join(".lutrisgame.json")).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let appid = match parsed.get("appid")? {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    (!appid.is_empty()).then_some(appid)
+}
+
+/// A stable slug of a launcher's game name (S9c stash fallback key):
+/// lowercase, runs of `[a-z0-9]` joined by single hyphens, everything else
+/// dropped. "Danger Scavenger" becomes "danger-scavenger".
+fn slug(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut gap = false;
+    for c in name.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            if gap && !out.is_empty() {
+                out.push('-');
+            }
+            gap = false;
+            out.push(c);
+        } else {
+            gap = true;
+        }
+    }
+    out
+}
+
+/// Which runtime a launch ran under (S9c): `proton` when umu's marker was
+/// present or the raw exe is a Wine/Proton binary (the preloaders, plain
+/// wine, or a Windows `.exe` under a prefix), `native` otherwise.
+fn runner_of(umu_marker: bool, raw_exe: &str) -> &'static str {
+    if umu_marker || is_wine_binary(raw_exe) {
+        "proton"
+    } else {
+        "native"
+    }
+}
+
+/// Is this exe a Wine/Proton process — the runtime, or a Windows binary?
+fn is_wine_binary(raw_exe: &str) -> bool {
+    let lower = raw_exe.to_ascii_lowercase();
+    let base = std::path::Path::new(&lower)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+    matches!(
+        base,
+        "wine" | "wine64" | "wine-preloader" | "wine64-preloader"
+    ) || lower.ends_with(".exe")
 }
 
 fn merge_key_from_environ(environ: &str) -> Option<String> {
@@ -2666,19 +2885,26 @@ mod tests {
         e.umu_report = crate::umu_report::UmuReport::from_path(
             std::env::temp_dir().join("gamebus-test-elected-identity.json"),
         );
-        e.umu_miss_keys.insert(
+        e.stash_keys.insert(
             key.to_string(),
-            ("gog".to_string(), Some("1660194629".to_string())),
+            (
+                "gog".to_string(),
+                Some("1660194629".to_string()),
+                key.to_string(),
+            ),
         );
         e.umu_report
             .note_launch("gog", Some("1660194629"), "umu-0", key);
 
         let identity = |name: &str, exe: &str| {
-            Some(Identity {
-                name: name.to_string(),
-                exe: exe.to_string(),
-                class: IdentityClass::GameProcess,
-            })
+            Some((
+                Identity {
+                    name: name.to_string(),
+                    exe: exe.to_string(),
+                    class: IdentityClass::GameProcess,
+                },
+                IdentitySource::Curated,
+            ))
         };
         e.grouped_update(
             key,
@@ -2970,10 +3196,11 @@ mod tests {
         let walked = (
             "Brotato".to_string(),
             "/steamapps/common/Brotato/Brotato.x86_64".to_string(),
+            IdentitySource::Walk,
         );
         let (class, identity) = e.classify_member(pid, &raw_exe, "steam:1942280", Some(&walked));
         assert_eq!(class, MemberClass::IdentifiedWrapper);
-        assert_eq!(identity.unwrap().class, IdentityClass::Wrapper);
+        assert_eq!(identity.unwrap().0.class, IdentityClass::Wrapper);
 
         child.kill().ok();
         child.wait().ok();
@@ -3049,12 +3276,18 @@ mod tests {
             MemberClass::Plain,
             "the launcher title must not inflate the member's class"
         );
-        let identity = identity.expect("the lutris-wrapper ancestor names a native game binary");
+        let (identity, source) =
+            identity.expect("the lutris-wrapper ancestor names a native game binary");
         assert_eq!(identity.name, "Danger Scavenger");
         assert_eq!(
             identity.class,
             IdentityClass::Wrapper,
             "a launcher title is launcher-class, so a curated hit can still win"
+        );
+        assert_eq!(
+            source,
+            IdentitySource::LutrisArgv,
+            "the provenance tag says the argv named it"
         );
     }
 
@@ -3213,5 +3446,249 @@ mod tests {
             !member_alive(pid, "steam:90001", Some(start)),
             "a vanished process is dead"
         );
+    }
+
+    /// An enricher with a stash on a unique scratch path, removed first so a
+    /// previous run can never leak entries into the asserts.
+    fn with_scratch_stash(name: &str) -> Enricher {
+        let mut e = Enricher::with_naming(None);
+        let path =
+            std::env::temp_dir().join(format!("gamebus-test-{name}-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        e.umu_report = UmuReport::from_path(path);
+        e
+    }
+
+    #[test]
+    fn a_native_lutris_launch_records_launcher_facts_and_marker_codename() {
+        // The live Danger Scavenger shape (itch.io via Lutris, 2026-08-23):
+        // no umu marker, but Lutris hands us the store, the name, the
+        // directory — and wrote the codename beside the game.
+        let mut e = with_scratch_stash("ds-facts");
+        let dir = std::env::temp_dir().join(format!("gamebus-ds-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".lutrisgame.json"),
+            r#"{"slug":"danger-scavenger","runner":"linux","appid":"926077","upload":"4665094","service":"itchio","date":1787522302}"#,
+        )
+        .unwrap();
+        let exe = "/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64";
+        let environ = format!(
+            "LUTRIS_GAME_UUID=uuid-1\0STORE=itchio\0GAME_NAME=Danger Scavenger\0GAME_DIRECTORY={}\0",
+            dir.display()
+        );
+        e.maybe_stash_launch("lutris:uuid-1", &environ, exe);
+
+        let entry = e.umu_report.entries()["itchio:926077"].clone();
+        assert_eq!(entry.umu_id, "", "never went through umu");
+        assert!(!entry.is_umu_miss());
+        assert_eq!(entry.store, "itchio");
+        assert_eq!(entry.codename.as_deref(), Some("926077"));
+        assert_eq!(entry.codename_source.as_deref(), Some("lutris-config"));
+        assert_eq!(entry.launcher.as_deref(), Some("lutris"));
+        assert_eq!(entry.launcher_name.as_deref(), Some("Danger Scavenger"));
+        assert_eq!(entry.launcher_dir.as_deref(), dir.to_str());
+        assert_eq!(entry.runner.as_deref(), Some("native"));
+        assert!(entry.title.is_none(), "no identity elected yet");
+
+        // The group identity arrives off the lutris-wrapper argv: the stash
+        // entry gains the title under its own provenance label.
+        e.grouped_update(
+            "lutris:uuid-1",
+            11,
+            group_member(MemberClass::Plain),
+            Some((
+                Identity {
+                    name: "Danger Scavenger".to_string(),
+                    exe: exe.to_string(),
+                    class: IdentityClass::Wrapper,
+                },
+                IdentitySource::LutrisArgv,
+            )),
+            Activity::from_gamemode(11, exe, 1_700_000_000),
+            None,
+        );
+        let entry = &e.umu_report.entries()["itchio:926077"];
+        assert_eq!(entry.title.as_deref(), Some("Danger Scavenger"));
+        assert_eq!(entry.title_source.as_deref(), Some("lutris-wrapper"));
+        assert_eq!(entry.confidence, Some(Confidence::Medium));
+        assert_eq!(entry.executable.as_deref(), Some(exe));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_heroic_umu_miss_records_the_same_entry_plus_launcher_facts() {
+        // The pre-S9c Heroic umu-0 shape must produce the entry it always
+        // did — same key, same store guess, same codename, same umu id —
+        // with the launcher facts added beside it.
+        let mut e = with_scratch_stash("heroic-facts");
+        let environ =
+            "SteamAppId=0\0GAMEID=umu-0\0HEROIC_APP_SOURCE=epic\0HEROIC_APP_NAME=Calluna\0";
+        let key = merge_key_from_environ(environ).expect("heroic key");
+        assert_eq!(key, "heroic:Calluna");
+        e.maybe_stash_launch(&key, environ, "/usr/bin/wine64-preloader");
+
+        let entry = &e.umu_report.entries()["egs:Calluna"];
+        // The entry as the pre-widening daemon wrote it.
+        assert_eq!(entry.store, "egs");
+        assert_eq!(entry.codename.as_deref(), Some("Calluna"));
+        assert_eq!(entry.umu_id, "umu-0");
+        assert!(entry.is_umu_miss());
+        assert!(entry.title.is_none());
+        assert!(entry.title_source.is_none());
+        assert!(entry.confidence.is_none());
+        assert!(entry.executable.is_none());
+        // The new facts beside it. launcher_name is a live lookup into the
+        // machine's Heroic library and is deliberately not asserted.
+        assert_eq!(entry.launcher.as_deref(), Some("heroic"));
+        assert_eq!(entry.codename_source.as_deref(), Some("heroic-env"));
+        assert_eq!(entry.runner.as_deref(), Some("proton"));
+        assert_eq!(
+            e.stash_keys["heroic:Calluna"],
+            (
+                "egs".to_string(),
+                Some("Calluna".to_string()),
+                "heroic:Calluna".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn repeated_lutris_umu_launches_collapse_onto_the_game_name_slug() {
+        // A Lutris Wine launch (Control through umu-default): the merge key
+        // carries a fresh uuid every launch, but the stash must keep ONE
+        // entry — keyed by the GAME_NAME slug when no codename exists.
+        let mut e = with_scratch_stash("control-collapse");
+        let exe = "/usr/bin/wine64-preloader";
+        for uuid in ["uuid-1", "uuid-2"] {
+            let environ = format!(
+                "LUTRIS_GAME_UUID={uuid}\0UMU_ID=umu-default\0STORE=egs\0GAME_NAME=Control\0"
+            );
+            e.maybe_stash_launch(&format!("lutris:{uuid}"), &environ, exe);
+        }
+
+        assert_eq!(e.umu_report.entries().len(), 1, "one game, one entry");
+        let entry = &e.umu_report.entries()["lutris:control"];
+        assert_eq!(entry.umu_id, "umu-default");
+        assert!(entry.is_umu_miss());
+        assert_eq!(entry.store, "egs");
+        assert_eq!(entry.codename, None, "no marker file, no codename");
+        assert_eq!(entry.codename_source, None);
+        assert_eq!(entry.launcher.as_deref(), Some("lutris"));
+        assert_eq!(entry.launcher_name.as_deref(), Some("Control"));
+        assert_eq!(entry.runner.as_deref(), Some("proton"));
+        // Both per-launch merge keys resolve to the same stash entry, so a
+        // later title lands on it whichever launch the group came from.
+        assert_eq!(e.stash_keys["lutris:uuid-1"].2, "lutris:control");
+        assert_eq!(e.stash_keys["lutris:uuid-2"].2, "lutris:control");
+    }
+
+    #[test]
+    fn steam_and_curated_umu_launches_never_enter_the_stash() {
+        // Authoritative identities: a Steam appid, or a real umu id without
+        // the miss marker. Neither is a gap; neither is recorded.
+        let mut e = with_scratch_stash("no-stash");
+        e.maybe_stash_launch(
+            "steam:480",
+            "SteamAppId=480\0",
+            "/steamapps/common/Game/game.exe",
+        );
+        e.maybe_stash_launch(
+            "umu:testgame",
+            "UMU_ID=umu-testgame\0STORE=egs\0",
+            "/usr/bin/wine64-preloader",
+        );
+        assert!(e.umu_report.entries().is_empty());
+        assert!(e.stash_keys.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_lutris_marker_yields_no_codename_and_no_panic() {
+        let mut e = with_scratch_stash("bad-marker");
+        let dir = std::env::temp_dir().join(format!("gamebus-bad-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".lutrisgame.json"), "not json {").unwrap();
+        let environ = format!(
+            "LUTRIS_GAME_UUID=uuid-3\0STORE=itchio\0GAME_NAME=Danger Scavenger\0GAME_DIRECTORY={}\0",
+            dir.display()
+        );
+        e.maybe_stash_launch(
+            "lutris:uuid-3",
+            &environ,
+            "/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64",
+        );
+
+        // No codename means the slug fallback keys the entry.
+        let entry = &e.umu_report.entries()["lutris:danger-scavenger"];
+        assert_eq!(entry.codename, None);
+        assert_eq!(entry.codename_source, None);
+        assert_eq!(entry.store, "itchio");
+        assert_eq!(entry.runner.as_deref(), Some("native"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lutris_marker_reads_appid_and_swallows_malformed_files() {
+        let dir = std::env::temp_dir().join(format!("gamebus-marker-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap();
+
+        // The live Danger Scavenger marker.
+        std::fs::write(
+            dir.join(".lutrisgame.json"),
+            r#"{"slug":"danger-scavenger","runner":"linux","appid":"926077","upload":"4665094","service":"itchio","date":1787522302}"#,
+        )
+        .unwrap();
+        assert_eq!(lutris_marker_appid(dir_str).as_deref(), Some("926077"));
+
+        // A numeric appid is accepted too.
+        std::fs::write(dir.join(".lutrisgame.json"), r#"{"appid":926077}"#).unwrap();
+        assert_eq!(lutris_marker_appid(dir_str).as_deref(), Some("926077"));
+
+        // Malformed JSON, a missing appid, and a missing file are silent.
+        std::fs::write(dir.join(".lutrisgame.json"), "not json {").unwrap();
+        assert_eq!(lutris_marker_appid(dir_str), None);
+        std::fs::write(dir.join(".lutrisgame.json"), r#"{"slug":"x"}"#).unwrap();
+        assert_eq!(lutris_marker_appid(dir_str), None);
+        std::fs::write(dir.join(".lutrisgame.json"), r#"{"appid":""}"#).unwrap();
+        assert_eq!(lutris_marker_appid(dir_str), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(lutris_marker_appid(dir_str), None);
+    }
+
+    #[test]
+    fn runner_classification_table() {
+        // The umu marker settles it regardless of the exe.
+        assert_eq!(runner_of(true, "/games/Game.x86_64"), "proton");
+        // Wine runtime binaries.
+        assert_eq!(runner_of(false, "/usr/bin/wine64-preloader"), "proton");
+        assert_eq!(runner_of(false, "/opt/wine/bin/wine-preloader"), "proton");
+        assert_eq!(runner_of(false, "/runners/wine/bin/wine64"), "proton");
+        assert_eq!(runner_of(false, "/runners/wine/bin/wine"), "proton");
+        // A Windows binary under a prefix.
+        assert_eq!(
+            runner_of(false, "/prefix/drive_c/Games/Game/Game.exe"),
+            "proton"
+        );
+        // Native Linux binaries.
+        assert_eq!(
+            runner_of(
+                false,
+                "/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64"
+            ),
+            "native"
+        );
+        assert_eq!(runner_of(false, "/usr/bin/python3"), "native");
+        assert_eq!(runner_of(false, ""), "native");
+    }
+
+    #[test]
+    fn slug_lowercases_and_joins_alnum_runs() {
+        assert_eq!(slug("Danger Scavenger"), "danger-scavenger");
+        assert_eq!(slug("Control"), "control");
+        assert_eq!(slug("Left 4 Dead 2"), "left-4-dead-2");
+        assert_eq!(slug("Amnesia: The Bunker"), "amnesia-the-bunker");
+        assert_eq!(slug("  !! "), "");
     }
 }
