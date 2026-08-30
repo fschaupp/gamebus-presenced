@@ -153,6 +153,13 @@ impl Candidate {
         if let Some(appid) = self.steam {
             return Some(format!("steam-{appid}"));
         }
+        // A steam store entry carries the appid as its codename - the same
+        // authority as a drafted sku, learned from Steam's own manifest
+        // rather than detectable.json (ID_STORES deliberately lacks steam,
+        // written when a Steam appid could only arrive as a sku).
+        if let Some(entry) = self.stores.iter().find(|e| e.store == "steam") {
+            return Some(format!("steam-{}", entry.codename));
+        }
         for store in ID_STORES {
             if let Some(entry) = self.stores.iter().find(|e| e.store == store) {
                 return Some(format!("{}-{}", entry.store, entry.codename));
@@ -215,8 +222,31 @@ pub(super) fn candidates(report: &UmuReport, index: Option<&GamedbIndex>) -> Vec
         group.absorb(key, miss);
     }
 
-    groups
-        .into_values()
+    // Cross-store fold: two groups naming the same executable are the same
+    // game seen through two stores (the itch.io install and the Steam copy
+    // of one game both run Game.x86_64). Folding them is exactly the claim
+    // a gamedb page exists to make, and it is what turns the second store
+    // into an enhancement instead of a colliding page.
+    let mut merged: Vec<Group> = Vec::new();
+    let mut exe_owner: BTreeMap<String, usize> = BTreeMap::new();
+    for group in groups.into_values() {
+        let exes: Vec<String> = group.all_exes().map(|e| e.to_lowercase()).collect();
+        if let Some(&i) = exes.iter().find_map(|e| exe_owner.get(e)) {
+            merged[i].merge(group);
+            for e in exes {
+                exe_owner.insert(e, i);
+            }
+            continue;
+        }
+        let i = merged.len();
+        for e in exes {
+            exe_owner.insert(e, i);
+        }
+        merged.push(group);
+    }
+
+    merged
+        .into_iter()
         .map(|group| {
             let mut candidate = group.finish();
             candidate.status = status(&candidate, index);
@@ -320,6 +350,58 @@ struct Group {
 }
 
 impl Group {
+    /// Every executable this group names, store entries included - the
+    /// cross-store fold joins on these.
+    fn all_exes(&self) -> impl Iterator<Item = &str> {
+        self.exes
+            .iter()
+            .map(String::as_str)
+            .chain(self.stores.values().filter_map(|e| e.exe.as_deref()))
+    }
+
+    /// Fold another group's knowledge in: the same game seen through
+    /// another store. Field by field, first-seen-wins where absorb would
+    /// say the same, union where both halves are facts.
+    fn merge(&mut self, other: Group) {
+        self.entries += other.entries;
+        self.entry_keys.extend(other.entry_keys);
+        if self.title.is_none() || (other.title_is_yours && !self.title_is_yours) {
+            if let Some(title) = other.title {
+                self.title = Some(title);
+                self.title_is_yours = other.title_is_yours;
+                self.title_source = other.title_source;
+            }
+        }
+        if self.steam.is_none() {
+            self.steam = other.steam;
+        }
+        for (k, v) in other.stores {
+            self.stores.entry(k).or_insert(v);
+        }
+        for exe in other.exes {
+            if !self.exes.iter().any(|e| e.eq_ignore_ascii_case(&exe)) {
+                self.exes.push(exe);
+            }
+        }
+        self.umu |= other.umu;
+        self.strong |= other.strong;
+        if other.seen > self.seen {
+            self.seen = other.seen;
+        }
+        if self.launcher.is_none() {
+            self.launcher = other.launcher;
+        }
+        if self.lutris_note.is_none() {
+            self.lutris_note = other.lutris_note;
+        }
+        if other.no_fix_checked > self.no_fix_checked {
+            self.no_fix_checked = other.no_fix_checked;
+        }
+        if self.rep.is_none() {
+            self.rep = other.rep;
+        }
+    }
+
     fn absorb(&mut self, key: &str, miss: &Miss) {
         self.entries += 1;
         self.entry_keys.push(key.to_string());
@@ -482,6 +564,9 @@ fn lutris_note(miss: &Miss) -> Option<String> {
         Some("lutris-library") => Some(format!(
             "Identified from the Lutris library: service={store}, appid={codename}."
         )),
+        Some("steam-manifest") => Some(format!(
+            "Identified from Steam's app manifest: appid={codename}."
+        )),
         _ => None,
     }
 }
@@ -504,9 +589,11 @@ fn source_of(miss: &Miss) -> &'static str {
     match miss.codename_source.as_deref() {
         Some("lutris-config") | Some("lutris-library") => return "lutris",
         Some("heroic-env") => return "heroic-config",
+        Some("steam-manifest") => return "steam",
         _ => {}
     }
     match miss.title_source.as_deref() {
+        Some("steam-manifest") => "steam",
         Some("lutris-wrapper") => "lutris",
         Some("heroic-config") => "heroic-config",
         Some("heroic-library") => "heroic-library",
@@ -531,7 +618,7 @@ fn confidence_of(miss: &Miss) -> &'static str {
     }
     if matches!(
         miss.codename_source.as_deref(),
-        Some("lutris-config") | Some("heroic-env")
+        Some("lutris-config") | Some("heroic-env") | Some("steam-manifest")
     ) {
         return "high";
     }
@@ -1600,6 +1687,97 @@ mod tests {
     /// The launcher's own name for the game groups launches that never
     /// resolved a codename with the ones that did not even resolve a title,
     /// and with title-only launches of the same game.
+    #[test]
+    fn a_steam_copy_folds_into_the_same_game_it_shares_an_exe_with() {
+        // The live case (2026-08-30): the itch.io install and the Steam copy
+        // of Danger Scavenger both run Danger_Scavenger.x86_64. Two store
+        // identities, one game, one page - the steam entry must not become
+        // a second unidentified candidate.
+        let mut report = UmuReport::default();
+        report.note_launch_with(
+            "itchio",
+            Some("926077"),
+            "",
+            "lutris:danger-scavenger",
+            LaunchFacts {
+                launcher: Some("lutris".into()),
+                launcher_name: Some("Danger Scavenger".into()),
+                codename_source: Some("lutris-config".into()),
+                runner: Some("native".into()),
+                ..LaunchFacts::default()
+            },
+        );
+        report.update("itchio:926077", |m| {
+            m.title = Some("Danger Scavenger".into());
+            m.title_source = Some("lutris-wrapper".into());
+            m.confidence = Some(Confidence::Medium);
+            m.executable = Some("/g/danger-scavenger/Danger_Scavenger.x86_64".into());
+        });
+        report.note_launch_with(
+            "steam",
+            Some("1169740"),
+            "",
+            "steam:1169740",
+            LaunchFacts {
+                launcher: Some("steam".into()),
+                launcher_name: Some("Danger Scavenger".into()),
+                codename_source: Some("steam-manifest".into()),
+                runner: Some("native".into()),
+                ..LaunchFacts::default()
+            },
+        );
+        report.update("steam:1169740", |m| {
+            m.title = Some("Danger Scavenger".into());
+            m.title_source = Some("steam-manifest".into());
+            m.confidence = Some(Confidence::High);
+            m.executable =
+                Some("/s/steamapps/common/Danger Scavenger/Danger_Scavenger.x86_64".into());
+        });
+
+        let list = candidates(&report, None);
+        assert_eq!(list.len(), 1, "one game, one candidate: {list:?}");
+        let c = &list[0];
+        assert_eq!(c.canonical_id().as_deref(), Some("steam-1169740"));
+        assert_eq!(c.stores.len(), 2, "both store identities on the page");
+        assert!(matches!(c.status, Status::Ready), "{:?}", c.status);
+        let steam = c.stores.iter().find(|e| e.store == "steam").unwrap();
+        assert_eq!(steam.source, "steam");
+        assert_eq!(steam.confidence, "high");
+    }
+
+    #[test]
+    fn a_steam_store_entry_identifies_a_page_on_its_own() {
+        // Regression: ID_STORES lacks steam, so a lone steam store entry
+        // read as "nothing identifies it" and the candidate was Incomplete.
+        let mut report = UmuReport::default();
+        report.note_launch_with(
+            "steam",
+            Some("1169740"),
+            "",
+            "steam:1169740",
+            LaunchFacts {
+                launcher: Some("steam".into()),
+                launcher_name: Some("Danger Scavenger".into()),
+                codename_source: Some("steam-manifest".into()),
+                runner: Some("native".into()),
+                ..LaunchFacts::default()
+            },
+        );
+        report.update("steam:1169740", |m| {
+            m.title = Some("Danger Scavenger".into());
+            m.title_source = Some("steam-manifest".into());
+            m.confidence = Some(Confidence::High);
+        });
+        let list = candidates(&report, None);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].canonical_id().as_deref(), Some("steam-1169740"));
+        assert!(
+            matches!(list[0].status, Status::Ready),
+            "{:?}",
+            list[0].status
+        );
+    }
+
     #[test]
     fn launches_group_on_the_launcher_name_before_the_title() {
         let mut report = UmuReport::default();

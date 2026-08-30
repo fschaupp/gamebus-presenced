@@ -58,6 +58,10 @@ enum IdentitySource {
     /// The `lutris-wrapper` ancestor's argv named it (layer 4) — Lutris
     /// telling us what it launched, one rung below a walk hit.
     LutrisArgv,
+    /// Steam's own appmanifest named it — the official title of the
+    /// installed appid, curated-grade but distinct so downstream labels
+    /// never claim detectable.json knew a game it did not.
+    SteamManifest,
 }
 
 /// Enrichment middleware: sits between sources and the correlator.
@@ -441,7 +445,41 @@ impl Enricher {
         let missed_id = umu_miss_id(environ);
         let is_lutris = key.starts_with("lutris:");
         let is_heroic = key.starts_with("heroic:");
-        if missed_id.is_none() && !is_lutris && !is_heroic {
+        // A steam-keyed launch is recorded only when it is NOT obvious: the
+        // appid is absent from detectable.json (so the mapping is knowledge
+        // gamebus-gamedb lacks) yet Steam's own manifest names the install
+        // (so nothing here is guessed). Shortcut appids have no manifest and
+        // never qualify; a game detectable knows never qualifies either, so
+        // ordinary Steam launches leave no trace.
+        let steam_gap = key.strip_prefix("steam:").and_then(|appid| {
+            let db = self.naming.as_ref()?;
+            if db.lookup_by_steam_appid(appid).is_some() {
+                return None;
+            }
+            let name = steam_manifest_name(raw_exe, appid)?;
+            Some((appid.to_string(), name))
+        });
+        if missed_id.is_none() && !is_lutris && !is_heroic && steam_gap.is_none() {
+            return;
+        }
+        if let Some((appid, name)) = steam_gap {
+            self.umu_report.note_launch_with(
+                "steam",
+                Some(&appid),
+                "",
+                key,
+                umu_report::LaunchFacts {
+                    launcher: Some("steam".to_string()),
+                    launcher_name: Some(name),
+                    launcher_dir: None,
+                    codename_source: Some("steam-manifest".to_string()),
+                    runner: Some(runner_of(false, raw_exe).to_string()),
+                },
+            );
+            self.stash_keys.insert(
+                key.to_string(),
+                ("steam".to_string(), Some(appid), key.to_string()),
+            );
             return;
         }
 
@@ -606,7 +644,7 @@ impl Enricher {
                             exe: raw_exe.to_string(),
                             class: IdentityClass::GameProcess,
                         },
-                        IdentitySource::Curated,
+                        IdentitySource::SteamManifest,
                     )),
                 );
             }
@@ -992,6 +1030,11 @@ impl Enricher {
             return;
         };
         let (source_label, confidence) = match id.class {
+            IdentityClass::GameProcess
+                if self.identity_sources.get(key) == Some(&IdentitySource::SteamManifest) =>
+            {
+                ("steam-manifest", Confidence::High)
+            }
             IdentityClass::GameProcess => ("detectable", Confidence::High),
             IdentityClass::Wrapper
                 if self.identity_sources.get(key) == Some(&IdentitySource::LutrisArgv) =>
@@ -1210,6 +1253,12 @@ impl Enricher {
             self.steam_appids.insert(pid, appid);
             self.steam_ids.insert(pid, sa.id.clone());
             tracing::debug!(pid, merge_key = %key, "scan: new Steam-only group");
+            // The scan is the only discovery path for a Steam game launched
+            // without GameMode; the launch hook never ran for it, so the
+            // stash record (a steam gap only - see maybe_stash_launch) and
+            // the elected-identity note flow from here.
+            self.maybe_stash_launch(&key, &environ, &raw_exe);
+            self.note_group_identity(&key);
             events.push(SourceEvent::Updated(Box::new(sa)));
         }
 
@@ -3289,7 +3338,37 @@ mod tests {
         let (id, source) = identity.expect("the manifest names the install");
         assert_eq!(id.name, "Danger Scavenger");
         assert_eq!(id.class, IdentityClass::GameProcess);
-        assert_eq!(source, IdentitySource::Curated);
+        assert_eq!(source, IdentitySource::SteamManifest);
+
+        // The stash arm records the gap - but only the gap. A db that
+        // knows the appid means an ordinary Steam launch: no trace. No db
+        // at all means "not obvious" cannot be judged: no trace either.
+        let db = NamingDb::parse(r#"[{"name":"Known Game","executables":[],"id":"1","third_party_skus":[{"id":"555","distributor":"steam"}]}]"#).unwrap();
+        let mut e2 = Enricher::with_naming(Some(db));
+        e2.maybe_stash_launch("steam:1169740", "", exe);
+        assert_eq!(
+            e2.umu_report.entries()["steam:1169740"]
+                .launcher_name
+                .as_deref(),
+            Some("Danger Scavenger"),
+            "an appid detectable does not know, named by its manifest, is a recorded gap"
+        );
+        let m = &e2.umu_report.entries()["steam:1169740"];
+        assert_eq!(m.store, "steam");
+        assert_eq!(m.codename.as_deref(), Some("1169740"));
+        assert_eq!(m.codename_source.as_deref(), Some("steam-manifest"));
+        assert!(!m.is_umu_miss());
+        e2.maybe_stash_launch("steam:555", "", exe);
+        assert!(
+            !e2.umu_report.entries().contains_key("steam:555"),
+            "a game detectable knows leaves no trace"
+        );
+        let mut e3 = Enricher::with_naming(None);
+        e3.maybe_stash_launch("steam:1169740", "", exe);
+        assert!(
+            e3.umu_report.entries().is_empty(),
+            "without a database, obviousness cannot be judged - no trace"
+        );
 
         // The scan gate accepts it with no naming database at all, and
         // still refuses anything outside a steamapps library (R5).
