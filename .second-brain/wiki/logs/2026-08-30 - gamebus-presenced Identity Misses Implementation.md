@@ -195,7 +195,7 @@ from the original id design, occurring for real for the first time.
 
 ## 8. State at end of session
 
-Branch `feat/identity-misses`, 10 commits on top of master, not merged:
+Branch `feat/identity-misses`, 15 commits on top of master, not merged:
 
 ```
 c2c1bf9  fix(naming): Name a native game from its Lutris wrapper, not its binary
@@ -208,11 +208,46 @@ fa364de  (Task C: gamedb fold)
 a8d3358  (Lutris library integration wiring)
 8ad5fb8  fix(naming): A Steam install names itself from its own appmanifest
 2ee3289  feat(gamedb): Carry a Steam launch's knowledge onto the game's page
+7e2a3fb  docs(vault): this session's records
+bf7e7de  chore: replace all typographic dashes with ASCII hyphens
+c55ad62  fix(setup): state-honest footer keybinding hints, v works on gamedb
+46640be  feat(setup): the pick offers Lutris library identities next to Heroic's
+e0e8e28  docs(vault): record the completion pass
 ```
 
 The owner reinstalled and restarted the daemon multiple times mid-session to
-verify live behavior at each stage. gamebus-gamedb (the data repo) also
-gained `b34e4f4` (steam source vocabulary).
+verify live behavior at each stage, and confirmed the footer fix live.
+gamebus-gamedb (the data repo) also gained `b34e4f4` (steam source
+vocabulary).
+
+## 9. Same-evening completion pass
+
+Four follow-ups closed the feature out, all with `Assisted-by` trailers
+(the repo's AI-disclosure convention, EU AI Act):
+
+1. **ASCII hygiene.** Every em- and en-dash in the repo replaced with plain
+   hyphens (76 files, zero hidden characters found) - a standing rule now:
+   only ASCII hyphens, ever. Committed separately from the vault records so
+   the dash strip stays reviewable on its own.
+2. **State-honest footer.** The gamedb tab's keybinding hints could
+   advertise keys that do nothing: `v` was named by several flows reachable
+   from that tab ("press v to fetch it first") but bound on the misses tab
+   only. `v` now verifies from both stash tabs, and the footer drops the
+   entry verbs whenever no row is selected (empty stash, or a filter hiding
+   every row - `f` stays, it is the way back). Footer selection extracted
+   into a pure `footer_keys()` so the per-state lines are unit-tested.
+3. **The parked pick wiring.** `lutris_library::candidates` had shipped
+   behind `#[allow(dead_code)]`, "not wired yet". The `p` pick now joins
+   the Lutris library on equal footing with Heroic's: a Lutris row is an
+   identity candidate (Enter writes the store+codename overrides, source
+   "your Lutris library", cross-store rows greyed like Heroic's), and a
+   pga.db that exists but cannot be read is a warning naming the path
+   rather than a failure. Covered by an env-locked integration test
+   (scratch umu CSV + scratch pga.db; the shared ENV_LOCK serializes
+   against the lutris_library tests).
+4. **Trailers.** The session's commits got `Assisted-by: GLM 5.3
+   <noreply@z.ai>` - filter-branch twice taught the lesson that a msg-filter
+   must never let `grep -q` eat stdin before `$(cat)` reads it.
 
 ## Related
 
