@@ -1,0 +1,9 @@
+title = "Steam Store Only"
+gamedb = "steam-1169740"
+note = "A steam store entry alone justifies a steam- id; no [ids] block needed."
+
+[[stores.steam]]
+codename = "1169740"
+seen = "2026-08-30"
+source = "steam"
+confidence = "high"

@@ -1,0 +1,8 @@
+title = "Steam Collision B"
+note = "The other half of the steam-collision-a pair."
+
+[[stores.steam]]
+codename = "7654321"
+seen = "2026-08-30"
+source = "steam"
+confidence = "high"

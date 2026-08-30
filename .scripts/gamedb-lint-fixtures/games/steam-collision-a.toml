@@ -1,0 +1,8 @@
+title = "Steam Collision A"
+note = "Claims the same steam appid as steam-collision-b via a store entry alone, with no [ids] block on either page - proving the store-only justification also feeds the one-game-one-page check."
+
+[[stores.steam]]
+codename = "7654321"
+seen = "2026-08-30"
+source = "steam"
+confidence = "high"

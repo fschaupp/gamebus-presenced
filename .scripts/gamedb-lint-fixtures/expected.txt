@@ -5,5 +5,6 @@ bogus.toml: gamedb is 'steam-999999', which none of this page's identifiers just
 empty.toml: names neither a store entry nor an executable, so it identifies nothing
 'steam-868360' is claimed by both project-hospital-deluxe.toml and project-hospital.toml - the same game cannot live on two pages, so consolidate them into one
 'exe:projecthospital.exe' is claimed by both ghost.toml and project-hospital.toml - the same game cannot live on two pages, so consolidate them into one
+'steam-7654321' is claimed by both steam-collision-a.toml and steam-collision-b.toml - the same game cannot live on two pages, so consolidate them into one
 'steam-870780' is claimed by both control.toml and thief.toml - the same game cannot live on two pages, so consolidate them into one
 thief.toml: merged_from 'steam-870780' is the live id of control.toml
