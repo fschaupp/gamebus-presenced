@@ -37,7 +37,7 @@ mod pages;
 mod tui;
 
 pub(crate) use self::tui::{
-    tui_export, tui_fetch, tui_set_dir, tui_view, GamedbRow, GamedbView, RowState,
+    tui_export, tui_fetch, tui_set_dir, tui_view, GamedbFilter, GamedbRow, GamedbView, RowState,
 };
 
 use self::pages::{additions_label, candidates, Status};

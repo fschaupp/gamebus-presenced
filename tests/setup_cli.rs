@@ -1405,3 +1405,125 @@ fn copy_tree(from: &Path, to: &Path) {
         }
     }
 }
+
+// ---- gamedb: a launcher launch that never went through umu.
+
+/// Danger Scavenger exactly as the daemon records the live launch: a native
+/// itch.io game handed over by Lutris (`umu_id` empty), the codename out of
+/// Lutris's own `.lutrisgame.json`, the title from the wrapper argv.
+const FIXTURE_LAUNCHER_STASH: &str = r#"{
+    "itchio:926077":{"title":"Danger Scavenger","store":"itchio","codename":"926077",
+        "umu_id":"","title_source":"lutris-wrapper","confidence":"medium",
+        "executable":"/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64",
+        "first_seen":"2026-08-23","last_seen":"2026-08-23",
+        "launcher":"lutris","launcher_name":"Danger Scavenger",
+        "launcher_dir":"/media/Data/Spiele/itchio/danger-scavenger",
+        "codename_source":"lutris-config","runner":"native"}}"#;
+
+/// The page that stash entry must fold into, byte for byte: the Lutris
+/// record is the source, the codename makes the confidence, and the native
+/// runner lets the `.x86_64` binary onto the page.
+const DANGER_SCAVENGER_PAGE: &str = "title = \"Danger Scavenger\"\n\
+     gamedb = \"itchio-926077\"\n\
+     note = \"Identified from Lutris: service=itchio, appid=926077.\"\n\
+     \n\
+     [[stores.itchio]]\n\
+     codename = \"926077\"\n\
+     exe = \"Danger_Scavenger.x86_64\"\n\
+     seen = \"2026-08-23\"\n\
+     source = \"lutris\"\n\
+     confidence = \"high\"\n";
+
+#[test]
+fn a_native_lutris_launch_exports_the_danger_scavenger_page_byte_exact() {
+    let home = TempHome::new("gamedb-launcher");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(stash_dir.join("umu-misses.json"), FIXTURE_LAUNCHER_STASH).unwrap();
+    let index = home.path().join("identities.json");
+    std::fs::write(&index, FIXTURE_GAMEDB_INDEX).unwrap();
+    let out_dir = home.path().join("checkout");
+
+    let out = run_env(
+        &home,
+        &["gamedb", "--export", "--out", out_dir.to_str().unwrap()],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "export exited {:?}", out.status);
+    assert!(
+        stdout(&out).contains("1 page(s) written"),
+        "{}",
+        stdout(&out)
+    );
+    let page = std::fs::read_to_string(out_dir.join("games/danger-scavenger.toml"))
+        .expect("no page written");
+    assert_eq!(page, DANGER_SCAVENGER_PAGE, "the page is not byte-exact");
+
+    // The same entry in the listing: still there by default - gamedb is
+    // always active, umu miss or not.
+    let out = run_env(
+        &home,
+        &["gamedb"],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(
+        text.contains("Danger Scavenger") && text.contains("itchio/926077"),
+        "a non-umu launch fell out of the listing:\n{text}"
+    );
+}
+
+/// The exported page has to pass the data set's own lint, run over a
+/// scratch copy of the whole set it would be committed into. Skips cleanly
+/// when python3 or the gamedb submodule is absent, exactly like the
+/// enhancement lint test above - neither is a build dependency.
+#[test]
+fn the_danger_scavenger_page_passes_the_data_sets_own_lint() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let data = repo.join("gamedb");
+    let lint = repo.join(".scripts/gamedb-lint.py");
+    if !data.join("games/control.toml").exists() || !lint.exists() {
+        eprintln!("skipping: the gamedb submodule is not checked out");
+        return;
+    }
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipping: no python3, and the lint is a Python script");
+        return;
+    }
+
+    let home = TempHome::new("gamedb-launcher-lint");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(stash_dir.join("umu-misses.json"), FIXTURE_LAUNCHER_STASH).unwrap();
+    let index = home.path().join("identities.json");
+    std::fs::write(&index, FIXTURE_GAMEDB_INDEX).unwrap();
+    // The destination is a scratch copy of the data set, which is what a
+    // contributor points --out at: their checkout of gamebus-gamedb.
+    let out_dir = home.path().join("gamebus-gamedb");
+    copy_tree(&data, &out_dir);
+
+    let out = run_env(
+        &home,
+        &["gamedb", "--export", "--out", out_dir.to_str().unwrap()],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "export exited {:?}", out.status);
+    assert!(
+        out_dir.join("games/danger-scavenger.toml").exists(),
+        "{}",
+        stdout(&out)
+    );
+
+    let lint = Command::new("python3")
+        .arg(&lint)
+        .arg(&out_dir)
+        .output()
+        .expect("python3 runs");
+    let report = String::from_utf8_lossy(&lint.stdout);
+    assert!(
+        lint.status.success() && report.contains("OK:"),
+        "the data set with the page does not lint:\n{report}{}",
+        String::from_utf8_lossy(&lint.stderr)
+    );
+}

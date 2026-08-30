@@ -39,6 +39,65 @@ pub struct GamedbRow {
     /// The stash entry the matchup keys act on: the one carrying a store
     /// identity, else the most recently seen.
     pub rep_key: String,
+    /// The gamedb gap predicate: the index does not fully know this page's
+    /// identifiers, or its title never came from a curated source.
+    pub gap: bool,
+    /// Any folded entry is a umu-database miss.
+    pub umu: bool,
+    /// Weak identity: nothing identified this game strongly.
+    pub weak: bool,
+    /// `lutris Danger Scavenger (itchio/926077)` - the launcher's own view
+    /// of the game, when a launcher handed it to us.
+    pub launcher: Option<String>,
+}
+
+/// What the pane's `f` cycles through. gamedb is always active - every
+/// identity record shows by default - and the other three narrow the list
+/// to what still needs work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GamedbFilter {
+    /// Every candidate page.
+    #[default]
+    All,
+    /// Pages with a gamedb gap: an identifier the published index does not
+    /// know, or a title no curated source vouches for.
+    Gaps,
+    /// Pages folding in at least one umu-database miss.
+    Umu,
+    /// Pages with a weak identity.
+    Weak,
+}
+
+impl GamedbFilter {
+    /// The cycle `f` walks: all → gaps → umu → weak → all.
+    pub fn next(self) -> Self {
+        match self {
+            GamedbFilter::All => GamedbFilter::Gaps,
+            GamedbFilter::Gaps => GamedbFilter::Umu,
+            GamedbFilter::Umu => GamedbFilter::Weak,
+            GamedbFilter::Weak => GamedbFilter::All,
+        }
+    }
+
+    /// The word the pane shows for the mode.
+    pub fn label(self) -> &'static str {
+        match self {
+            GamedbFilter::All => "all",
+            GamedbFilter::Gaps => "gaps",
+            GamedbFilter::Umu => "umu",
+            GamedbFilter::Weak => "weak",
+        }
+    }
+
+    /// Whether a row passes this filter.
+    pub fn matches(self, row: &GamedbRow) -> bool {
+        match self {
+            GamedbFilter::All => true,
+            GamedbFilter::Gaps => row.gap,
+            GamedbFilter::Umu => row.umu,
+            GamedbFilter::Weak => row.weak,
+        }
+    }
 }
 
 /// Where a row stands - the four glyphs the pane draws.
@@ -118,6 +177,10 @@ pub(crate) fn tui_view() -> GamedbView {
             steam: c.steam,
             note: c.note.clone(),
             entries: c.entries,
+            gap: c.gap,
+            umu: c.umu,
+            weak: c.weak,
+            launcher: c.launcher.clone(),
             entry_keys: c.entry_keys,
             rep_key: c.rep_key,
             key: c.key,
