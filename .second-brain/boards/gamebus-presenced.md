@@ -33,13 +33,12 @@ Kanban board for the gamebus-presenced project. Tracks all tasks across slices S
 - [ ] 🟢 **Owed vault records: S5 dev log + setup-tool ADR, S4f dev log + ADR**
 ### 🔨 In Progress
 
-- [ ] 🔴 **feat/identity-misses: widen the stash from umu-only to any identity gap, gamedb always-active** · @2026-08-30
-	15 commits (c2c1bf9 through e0e8e28), NOT merged to master, gate green at 424 tests. The daemon records what a launcher (Lutris, Heroic, and Steam via its own appmanifest - read only when the appid is absent from detectable.json, never for an ordinary launch) taught it about a launch with no authoritative identity; gamedb-database participation for a umu miss becomes opt-in per entry (promoted by hand, or suggested by a cross-store match / a protonfix hit) instead of automatic; the setup tool fills codenames from Lutris's own `pga.db`, and the `p` pick offers Lutris library identities next to Heroic's. Live-verified against the owner's real stash and a real Steam launch (Danger Scavenger, appid 1169740, absent from detectable.json, named from its own appmanifest). Same-evening completion work: repo-wide ASCII-hyphen strip (76 files), footer keybinding hints made state-honest (`v` now verifies from the gamedb tab too, inert keys stay out of the line), Assisted-by trailers on all of the session's commits. [[wiki/logs/2026-08-30 - gamebus-presenced Identity Misses Implementation]] [[wiki/decisions/adr-009-umu-miss-stash-two-writer-owned-halves]]
+(none - the identity-misses arc merged 2026-08-30, see Done)
 
 ### ⏳ Waiting On
 
-- [ ] 🟡 **Merge feat/identity-misses (which continues feat/gamedb-export) to master** · @2026-08-30
-	Owner's call, standing rule (only the owner merges/pushes). gamebus-setup and the daemon are already reinstalled from the branch tip for live testing; the merge to master itself is still pending.
+- [ ] 🟡 **Push master (owner's gate)** · @2026-08-30
+	Master carries the feat/identity-misses merge (513fc16, --no-ff, branch kept) plus everything before it; the push to gitea is the owner's call. NOT pushed yet.
 - [ ] 🟢 **Cut a gamebus-gamedb data release containing the danger-scavenger page** · @2026-08-30
 	The page exists in the owner's local gamebus-gamedb checkout, keyed `itchio-926077` (frozen on assignment), but no published data release contains it yet. Until one does, the gamedb tab derives a provisional id from precedence alone and shows `steam-1169740` for the same game instead - confirmed working as designed (ids are never re-pointed once published; the tab's precedence choice for an unpublished page is expected to differ from a page's own frozen id). `.scripts/release.sh` in the checkout, then push the tag, then `r` on the gamedb tab to refresh.
 - [ ] 🟡 **Withdraw or keep PR #151 (owner decision)** · @2026-08-22
@@ -50,6 +49,8 @@ Kanban board for the gamebus-presenced project. Tracks all tasks across slices S
 	The 2026-08-08 swap test left a patched runtime file with `umu-games.json.bak-gamebus` beside it. Restoring it was previously gated on PR #151 merging; with the PR likely withdrawn (see above), restore it outright.
 
 ### ✅ Done
+- [x] ~~🔴 **feat/identity-misses: widen the stash from umu-only to any identity gap, gamedb always-active**~~ ✅ 2026-08-30 (merge 513fc16, --no-ff, 16 commits, branch `feat/identity-misses` kept; gate green on merged master at 424 tests)
+	The daemon records what a launcher (Lutris, Heroic, and Steam via its own appmanifest - read only when the appid is absent from detectable.json, never for an ordinary curated launch, the ICARUS case confirmed the gate live) taught it about a launch with no authoritative identity; gamedb-database participation for a umu miss becomes opt-in per entry (promoted by hand, or suggested by a cross-store match / a protonfix hit); the setup tool fills codenames from Lutris's own `pga.db`, and the `p` pick offers Lutris library identities next to Heroic's. Live-verified against the owner's real stash and a real Steam launch (Danger Scavenger, appid 1169740). Same-evening completion work: repo-wide ASCII-hyphen strip, state-honest footer keybinding hints, Assisted-by trailers. [[wiki/logs/2026-08-30 - gamebus-presenced Identity Misses Implementation]] [[wiki/decisions/adr-009-umu-miss-stash-two-writer-owned-halves]]
 - [x] ~~🟡 **gamebus-gamedb published: repo live, tools release v0.1.0 pinned by digest, first data release v2026.08.23**~~ ✅ 2026-08-23
 	https://github.com/fschaupp/gamebus-gamedb - Lint green on main, artifacts as release assets, date tags, `.scripts/release.sh` + `.scripts/update-tools.sh` in the data repo. CI-built binaries byte-identical to local builds. [[wiki/logs/2026-08-23 - gamebus-gamedb Published and the Export Loop]]
 - [x] ~~🟡 **gamebus-gamedb: data set, lint, artifact builder, CI and docs**~~ ✅ 2026-08-23 (branch `feat/corrections-data`, through `52a070a`)
