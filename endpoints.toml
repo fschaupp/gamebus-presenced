@@ -1,4 +1,4 @@
-# Every remote endpoint the gamebus tooling talks to, in one place — so an
+# Every remote endpoint the gamebus tooling talks to, in one place - so an
 # upstream API change is a config edit, not an archaeology dig through the
 # sources. The daemon itself never reads this file: it is network-free by
 # design; only the CLI tools (gamebus-setup, gamebus-presence) fetch.
@@ -15,7 +15,7 @@
 [discord]
 # Discord's own public endpoint for the game-detection database. Fetched by
 # `gamebus-presence fetch-detectable`; the setup tool runs that as the last
-# install step. Never fetched at build time — builds are network-free.
+# install step. Never fetched at build time - builds are network-free.
 detectable = "https://discord.com/api/v9/applications/detectable"
 
 [umu]
@@ -23,7 +23,7 @@ detectable = "https://discord.com/api/v9/applications/detectable"
 # entries; the bare endpoint returns the full database as JSON.
 api = "https://umu.openwinecomponents.org/umu_api.php"
 
-# Where umu-database submissions go — printed in exports and hints.
+# Where umu-database submissions go - printed in exports and hints.
 repository = "https://github.com/Open-Wine-Components/umu-database"
 
 # Open merge requests of that repository (unauthenticated GitHub API), for
@@ -31,7 +31,7 @@ repository = "https://github.com/Open-Wine-Components/umu-database"
 open_prs = "https://api.github.com/repos/Open-Wine-Components/umu-database/pulls?state=open"
 
 # The protonfixes repository's file list, in one request. Its gamefixes-*
-# directories hold one file per fix, named by the umu id it serves — which
+# directories hold one file per fix, named by the umu id it serves - which
 # is how --verify tells a game that needs umu from one that runs fine. The
 # database only wants the former.
 protonfixes_tree = "https://api.github.com/repos/Open-Wine-Components/umu-protonfixes/git/trees/master?recursive=1"
@@ -41,28 +41,28 @@ protonfixes_tree = "https://api.github.com/repos/Open-Wine-Components/umu-proton
 protonfixes_file = "https://github.com/Open-Wine-Components/umu-protonfixes/blob/master"
 
 [gog]
-# GOG's public catalog search — the misses pane's one-shot online lookup
+# GOG's public catalog search - the misses pane's one-shot online lookup
 # (`o`) for gog entries. Queried as ?limit=10&query=like:<title>&…; the
 # numeric product id in the results IS the codename the database wants.
 catalog = "https://catalog.gog.com/v1/catalog"
 
-# GOG's products API — the reverse lookup, one record per numeric product
+# GOG's products API - the reverse lookup, one record per numeric product
 # id: <product>/<id> answers with the store's own title. The misses pane's
 # `o` uses it when the codename already is that id, instead of a fuzzy
 # catalog search by a possibly mis-resolved title.
 product = "https://api.gog.com/products"
 
-# gogdb.org product pages, the database's GOG codename authority — linked in
+# gogdb.org product pages, the database's GOG codename authority - linked in
 # the exported merge-request evidence, one page per product id.
 gogdb_product = "https://www.gogdb.org/product"
 
 [egs]
-# egdata.app's offer search — the misses pane's `o` lookup for egs entries.
+# egdata.app's offer search - the misses pane's `o` lookup for egs entries.
 # Queried as ?query=<title>&limit=10.
 search = "https://api.egdata.app/multisearch/offers"
 
 # egdata.app's per-namespace build lists: <sandboxes>/<namespace>/builds.
-# The Builds App Name in there is the codename the database wants — the
+# The Builds App Name in there is the codename the database wants - the
 # namespace itself never is.
 sandboxes = "https://api.egdata.app/sandboxes"
 

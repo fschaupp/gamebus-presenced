@@ -39,6 +39,65 @@ pub struct GamedbRow {
     /// The stash entry the matchup keys act on: the one carrying a store
     /// identity, else the most recently seen.
     pub rep_key: String,
+    /// The gamedb gap predicate: the index does not fully know this page's
+    /// identifiers, or its title never came from a curated source.
+    pub gap: bool,
+    /// Any folded entry is a umu-database miss.
+    pub umu: bool,
+    /// Weak identity: nothing identified this game strongly.
+    pub weak: bool,
+    /// `lutris Danger Scavenger (itchio/926077)` - the launcher's own view
+    /// of the game, when a launcher handed it to us.
+    pub launcher: Option<String>,
+}
+
+/// What the pane's `f` cycles through. gamedb is always active - every
+/// identity record shows by default - and the other three narrow the list
+/// to what still needs work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GamedbFilter {
+    /// Every candidate page.
+    #[default]
+    All,
+    /// Pages with a gamedb gap: an identifier the published index does not
+    /// know, or a title no curated source vouches for.
+    Gaps,
+    /// Pages folding in at least one umu-database miss.
+    Umu,
+    /// Pages with a weak identity.
+    Weak,
+}
+
+impl GamedbFilter {
+    /// The cycle `f` walks: all → gaps → umu → weak → all.
+    pub fn next(self) -> Self {
+        match self {
+            GamedbFilter::All => GamedbFilter::Gaps,
+            GamedbFilter::Gaps => GamedbFilter::Umu,
+            GamedbFilter::Umu => GamedbFilter::Weak,
+            GamedbFilter::Weak => GamedbFilter::All,
+        }
+    }
+
+    /// The word the pane shows for the mode.
+    pub fn label(self) -> &'static str {
+        match self {
+            GamedbFilter::All => "all",
+            GamedbFilter::Gaps => "gaps",
+            GamedbFilter::Umu => "umu",
+            GamedbFilter::Weak => "weak",
+        }
+    }
+
+    /// Whether a row passes this filter.
+    pub fn matches(self, row: &GamedbRow) -> bool {
+        match self {
+            GamedbFilter::All => true,
+            GamedbFilter::Gaps => row.gap,
+            GamedbFilter::Umu => row.umu,
+            GamedbFilter::Weak => row.weak,
+        }
+    }
 }
 
 /// Where a row stands - the four glyphs the pane draws.
@@ -72,7 +131,8 @@ pub struct GamedbView {
 }
 
 /// Load the pane's state: the stash, the cached index, the configured
-/// directory. Local files only - `r` is the pane's one network key.
+/// directory. Local files only - the pane's network keys are `r` (this
+/// index) and `v` (the umu database, shared with the misses pane).
 pub(crate) fn tui_view() -> GamedbView {
     let report = UmuReport::load();
     let loaded = index::load();
@@ -118,6 +178,10 @@ pub(crate) fn tui_view() -> GamedbView {
             steam: c.steam,
             note: c.note.clone(),
             entries: c.entries,
+            gap: c.gap,
+            umu: c.umu,
+            weak: c.weak,
+            launcher: c.launcher.clone(),
             entry_keys: c.entry_keys,
             rep_key: c.rep_key,
             key: c.key,
@@ -136,13 +200,30 @@ pub(crate) fn tui_view() -> GamedbView {
 
 /// The pane's `r`: one request for the published identity index. Blocking.
 pub(crate) fn tui_fetch() -> (Vec<String>, bool) {
+    // Refresh what the launchers know alongside what the data set knows: a
+    // codename the Lutris library carries fills in before candidates fold.
+    let mut extra = Vec::new();
+    match crate::setup::lutris_library::load() {
+        Ok(games) if !games.is_empty() => {
+            let mut report = crate::umu_report::UmuReport::load_for_annotations();
+            for line in crate::setup::lutris_library::fill_codenames(&mut report, &games) {
+                extra.push(format!("Lutris library: {line}"));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => extra.push(format!("Lutris library unreadable ({e}).")),
+    }
     match index::fetch(index::identities_url()) {
         Ok((idx, release)) => (
-            vec![format!(
-                "Fetched the gamebus-gamedb index: {} games, release {}.",
-                idx.len(),
-                release.as_deref().unwrap_or("unknown")
-            )],
+            {
+                let mut lines = extra;
+                lines.push(format!(
+                    "Fetched the gamebus-gamedb index: {} games, release {}.",
+                    idx.len(),
+                    release.as_deref().unwrap_or("unknown")
+                ));
+                lines
+            },
             true,
         ),
         // An unpublished data set is a state of the world, not a failure of
@@ -196,9 +277,9 @@ pub(crate) fn tui_export(force: bool) -> (Vec<String>, bool) {
         Err(e) => return (vec![e], false),
     };
 
-    // Never `--fetch-pages` from here: `r` is this pane's one network key,
-    // and the directory it writes to should be a checkout that has the page
-    // already.
+    // Never `--fetch-pages` from here: neither of the pane's network keys
+    // (`r`, `v`) fetches pages, and the directory it writes to should be a
+    // checkout that has the page already.
     match export::export(&report, &loaded, &out_dir, false) {
         Ok(summary) => {
             lines.extend(summary.lines);

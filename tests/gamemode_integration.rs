@@ -149,7 +149,7 @@ async fn gamemode_registration_appears_on_bus() {
 
     let list = manager.list_activities().await.unwrap();
     assert!(!list.iter().any(|p| p == &added_path));
-    // Note: HasActivity is not asserted false here — other processes may
+    // Note: HasActivity is not asserted false here - other processes may
     // legitimately hold GameMode registrations (e.g. libgamemodeauto preload
     // or a running game). The test verifies the specific game is added and
     // removed; the global HasActivity state depends on the environment.

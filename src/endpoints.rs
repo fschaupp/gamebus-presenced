@@ -1,11 +1,11 @@
 //! The configurable network endpoints (see `endpoints.toml` at the repo
-//! root — the bundled copy of that file is the last-resort default).
+//! root - the bundled copy of that file is the last-resort default).
 //!
 //! Compiled into the CLI tools only. The daemon is network-free and has no
 //! business knowing a URL; nothing here is reachable from `src/main.rs`.
 //!
-//! The parser handles exactly the subset the shipped file uses — `[section]`
-//! headers, `key = "value"` lines, `#` comments — by hand, like the CSV and
+//! The parser handles exactly the subset the shipped file uses - `[section]`
+//! headers, `key = "value"` lines, `#` comments - by hand, like the CSV and
 //! date code elsewhere: a TOML crate would be a dependency for a handful of
 //! keys.
 
@@ -36,9 +36,9 @@ pub struct Endpoints {
     /// GOG's public catalog search (the misses pane's `o` lookup).
     pub gog_catalog: String,
     /// GOG's products API root: `<product>/<id>` answers with the store's
-    /// own title — the `o` reverse lookup for numeric gog codenames.
+    /// own title - the `o` reverse lookup for numeric gog codenames.
     pub gog_product: String,
-    /// gogdb.org product pages — the GOG codename authority, linked per
+    /// gogdb.org product pages - the GOG codename authority, linked per
     /// product id in the exported evidence.
     pub gog_gogdb_product: String,
     /// egdata.app's offer search (the `o` lookup for egs entries).
@@ -60,7 +60,7 @@ pub struct Endpoints {
 
 impl Endpoints {
     /// The effective endpoints: the first config file found (user config
-    /// dir, then the data dirs) layered over the bundled defaults — a
+    /// dir, then the data dirs) layered over the bundled defaults - a
     /// partial file overrides only what it names. No file, or an unreadable
     /// one, means the defaults; endpoints must never be a reason the tools
     /// cannot start.

@@ -12,7 +12,7 @@ Third learnings review, run 2026-08-06 after the S5 setup-tool session and the
 S4f enricher-reliability fix. All 26 vault notes were scanned (8 ADRs, 5 dev
 logs, 6 concept notes, project/daily/board/ops-log/entity/research), plus the
 repo record for 2026-08-05/06 (PLAN.md S5 + S4f sections, git log 62dfd21 →
-18cb92b) — because **the vault has no notes for S5 or S4f yet**; those events
+18cb92b) - because **the vault has no notes for S5 or S4f yet**; those events
 are repo-recorded only (as of 2026-08-06). One prior classification is
 overturned: ADR-008's deepest-pid rule died against two live failures. One new
 promotion candidate reached the 4-occurrence bar.
@@ -20,7 +20,7 @@ promotion candidate reached the 4-occurrence bar.
 ## Corrections to the gather pass
 
 Both gather agents claimed promoted rules were missing from `[[_CLAUDE.md]]`.
-False — §0.5 (verify live state) and §0.6 (real-client testing) both exist,
+False - §0.5 (verify live state) and §0.6 (real-client testing) both exist,
 verified by reading the file this session. Recorded here so a future review
 does not "re-promote" them.
 
@@ -32,7 +32,7 @@ learnings; none went stale. Reinforcements observed 2026-08-06:
 
 ### 1. Verify live state before trusting docs or assumptions (`_CLAUDE.md` §0.5)
 Three new reinforcements (as of 2026-08-06, session + repo):
-- A *fix* for umask-dependent directory modes used `DirBuilder::mode(0o755)` —
+- A *fix* for umask-dependent directory modes used `DirBuilder::mode(0o755)` -
   which `mkdir(2)` masks with the umask exactly like the code it replaced.
   Caught only because a reviewer's claim was **measured** (0700 under
   `umask 077`) instead of argued. The wrong fix had passed review by reading.
@@ -47,41 +47,41 @@ Reinforced (as of 2026-08-06): S4f was accepted against a **real Brotato
 relaunch** observed live on the bus (wrapper → launch process → game binary,
 publish-first at every step; PLAN.md S4f). Inverse case in the same session:
 the umask bug shipped precisely because no test ran under a non-default umask
-— the environment variance you claim to handle must appear in a test.
+- the environment variance you claim to handle must appear in a test.
 
-### 3. One record per key — pattern holds, tiebreaker overturned
+### 3. One record per key - pattern holds, tiebreaker overturned
 [[wiki/concepts/2026-08-04 - one-record-per-key]]'s abstract pattern
 (`HashMap<key, representative>` over pairwise merge) survived its third
 occurrence: S4f keeps exactly one `GameGroup` per merge key. Its stated
-tiebreaker ("deepest pid, `tree_depth` decides") is **superseded** — see
+tiebreaker ("deepest pid, `tree_depth` decides") is **superseded** - see
 below. Promotion still deferred: all three occurrences are in
 [[wiki/projects/gamebus-presenced]]; Review 2's bar of a cross-domain
 recurrence stands.
 
-### 4. Let the test environment's reality shape assertions — sharpened
+### 4. Let the test environment's reality shape assertions - sharpened
 Strongest reinforcement of the period. A gamebus-presenced *installed and
 enabled by the owner* took `org.gamebus.Presence.v1` on the live session bus,
 so every integration test's daemon died with `NameTaken` while assertions ran
 against somebody else's process. Two-step correction (repo, 2026-08-06):
 first verify the bus-name *owner pid* is your own daemon; then remove the
-shared resource entirely — `tests/common/mod.rs` gives every test a **private
+shared resource entirely - `tests/common/mod.rs` gives every test a **private
 `dbus-daemon --session`**, which also activates its own empty-state
 `gamemoded`. Sharpened form: *isolate the identity (bus name), not just the
-filesystem (`XDG_RUNTIME_DIR`)* — the S4 test-isolation fixes (Issues 4/5/12)
+filesystem (`XDG_RUNTIME_DIR`)* - the S4 test-isolation fixes (Issues 4/5/12)
 had isolated only paths.
 
 ### 5-9. No new evidence, still recent
 Index-at-arrival, unified event channel, reuse + licence hygiene,
 detectable.json path-suffix matching, and flag-test-deletions
-([[wiki/concepts/test-deletion-visibility]]) — unchanged. Note the S4f
+([[wiki/concepts/test-deletion-visibility]]) - unchanged. Note the S4f
 implementation spec *pre-authorized* exactly one test edit and demanded a stop
 if any other existing test needed touching; the implementer complied. That is
 OP1 working as a standing constraint rather than a correction (5th
 occurrence, counting style).
 
-## New Learnings of the period (not yet in any vault note — repo/session only)
+## New Learnings of the period (not yet in any vault note - repo/session only)
 
-### N1. Depth is not identity — elect representatives by evidence class
+### N1. Depth is not identity - elect representatives by evidence class
 "Deepest pid wins" assumed deeper = closer to the game. On Steam/Proton/umu
 launches the deepest pids are short-lived runtime helpers
 (`i386-linux-gnu-inspect-library`, `pv-adverb`, `srt-bwrap`), and
@@ -97,9 +97,9 @@ Confidence: high (live-verified same day).
 ### N2. Records die with the last evidence for the game, not with a chosen pid
 Deferred migration: a dead representative holds the published record while any
 group member still carries evidence; the tick re-elects. Removal order emits
-the Steam partial first so the record degrades in place — exactly one
+the Steam partial first so the record degrades in place - exactly one
 `ActivityRemoved` per session. This restated design-doc rule 3 ("dies with the
-last **evidence**", was "last source") — the invariant behind the owner's
+last **evidence**", was "last source") - the invariant behind the owner's
 "gamebus simply cannot break" requirement.
 
 ### N3. Adversarial verification catches the author's own wrong fixes → see Promotion
@@ -118,7 +118,7 @@ Stated 2026-08-06 after the S5 landing was redone: a plain `git merge
 `feat/s5-setup-tui`; the owner required the second parent. Rule: prefer
 `--no-ff` (branch as real second parent); if a true squash is unavoidable,
 the message names the branch + head SHA and the branch is kept. Recorded as
-[[wiki/concepts/squash-merge-branch-pointer]] — same traceability-over-
+[[wiki/concepts/squash-merge-branch-pointer]] - same traceability-over-
 tidiness shape as [[wiki/concepts/test-deletion-visibility]].
 
 ### N6. Hand-run installers write `/usr/local`, never `/usr`
@@ -128,12 +128,12 @@ review; forced one daemon change (naming search walks `XDG_DATA_DIRS`).
 
 ## Stale Learnings
 
-None possible — the vault is two days old; the 6-month criterion first bites
+None possible - the vault is two days old; the 6-month criterion first bites
 2027-02.
 
 ## Superseded Learnings (already replaced)
 
-- **ADR-008 rule 2** ("the record stores one pid — the deepest; `tree_depth`
+- **ADR-008 rule 2** ("the record stores one pid - the deepest; `tree_depth`
   decides") → **S4f class-based sticky election + deferred migration**
   (PLAN.md S4f, 2026-08-06; commit 18cb92b). Also superseded from the same
   ADR: "map rebuilt each scan, no iterative state" → group state is now
@@ -148,7 +148,7 @@ None possible — the vault is two days old; the 6-month criterion first bites
 
 ## Promotion Candidates (3+ occurrences)
 
-### P1. Adversarial verification before handover — 4 occurrences, ELIGIBLE
+### P1. Adversarial verification before handover - 4 occurrences, ELIGIBLE
 Every review event of 2026-08-05/06 produced confirmed, consequential findings
 the author and the test suite had both missed:
 1. Fresh-context reviewer of the S5 branch → 4 blocking privilege-path bugs
@@ -169,15 +169,15 @@ Same 4-occurrence, same-project bar that promoted §0.6. Suggested wording for
 > **Adversarially verify before handing over.** Nontrivial changes get a
 > fresh-context review whose job is to refute, not confirm: reviewers trace
 > failure scenarios through the actual code, and skeptics try to kill each
-> finding before it reaches the owner. A fix's *mechanism* must be verified —
-> measured, traced, or reproduced — never just its intention; the reviewer
+> finding before it reaches the owner. A fix's *mechanism* must be verified -
+> measured, traced, or reproduced - never just its intention; the reviewer
 > panel caught a wrong fix for a confirmed bug (umask-masked `mkdir` modes)
 > that reading alone had passed. Findings without a concrete failure scenario
 > are noise.
 
 ## Top 5 Lessons of the Period
 
-1. **Depth is not identity — elect by evidence class** (N1; fixed two live
+1. **Depth is not identity - elect by evidence class** (N1; fixed two live
    failures the same day they were reported).
 2. **Adversarial verification catches your own wrong fixes** (P1; 4/4 review
    events found real bugs, incl. a wrong fix for a confirmed bug).
@@ -185,7 +185,7 @@ Same 4-occurrence, same-project bar that promoted §0.6. Suggested wording for
    invariant behind "cannot break").
 4. **Isolate the identity in tests, not just the filesystem** (Active #4
    sharpened; the suite survived a real daemon owning the real bus).
-5. **Verify live state — measure, don't argue** (§0.5, 3 new reinforcements;
+5. **Verify live state - measure, don't argue** (§0.5, 3 new reinforcements;
    the umask measurement is the period's cleanest example).
 
 ## Delta vs Review 2

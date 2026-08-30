@@ -78,7 +78,7 @@ async fn assert_group_silence(
 }
 
 /// Drain the Added stream for `window`, panicking on any `steam_<pid>`
-/// record for our pids — the transient re-publish flash at teardown that the
+/// record for our pids - the transient re-publish flash at teardown that the
 /// Steam-first removal order eliminates (§3: exactly one ActivityRemoved).
 /// `pid_<pid>` traffic is tolerated here: a tick-sweep migration pair is
 /// legitimate when the daemon's 15s tick lands inside the lifecycle.

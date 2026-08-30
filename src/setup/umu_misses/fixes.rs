@@ -1,6 +1,6 @@
 //! The protonfix list: which games actually need umu.
 //!
-//! The umu-database opens with its own scope rule — "We focus on games that
+//! The umu-database opens with its own scope rule - "We focus on games that
 //! requires fixes in Proton. Games that run out of the box have no need be
 //! added to the database." A store copy earns a row when a protonfix exists
 //! for its umu id and nothing maps that copy to it yet; without a fix, a
@@ -8,7 +8,7 @@
 //!
 //! Upstream keeps one file per fix, named by the id it serves:
 //! `gamefixes-steam/870780.py` for Steam appids, `gamefixes-<store>/umu-<id>.py`
-//! for everyone else (most of those are symlinks to the Steam fix — exactly
+//! for everyone else (most of those are symlinks to the Steam fix - exactly
 //! the "link the other store's copy to the same fix" mechanism a database
 //! row unlocks). One request for the repository's file list is the whole
 //! check; the list is cached like the database dump and refreshed on the
@@ -29,7 +29,7 @@ pub(super) struct ProtonFixes {
 }
 
 impl ProtonFixes {
-    /// Parse GitHub's recursive tree listing — the shape one request to
+    /// Parse GitHub's recursive tree listing - the shape one request to
     /// `.../git/trees/<branch>?recursive=1` answers with.
     pub(super) fn parse_tree(raw: &str) -> Result<Self, String> {
         #[derive(Deserialize)]
@@ -141,7 +141,7 @@ pub(super) fn fetch(url: &str) -> Result<(ProtonFixes, usize), String> {
             .is_err()
         {
             // A cache that cannot be written costs a request next time,
-            // nothing more — the list in hand is still good.
+            // nothing more - the list in hand is still good.
             let _ = std::fs::remove_file(&tmp);
         }
     }
@@ -149,17 +149,17 @@ pub(super) fn fetch(url: &str) -> Result<(ProtonFixes, usize), String> {
 }
 
 /// A cache this old may not know a fix that landed since, and a missing fix
-/// is what holds an entry out of the export — so it refreshes itself.
+/// is what holds an entry out of the export - so it refreshes itself.
 const STALE_AFTER: Duration = Duration::from_secs(7 * 86_400);
 
 /// A local umu-protonfixes checkout (or an exported list), named by
-/// `GAMEBUS_UMU_PROTONFIXES` — the fix-list twin of `GAMEBUS_UMU_DB`. Points
+/// `GAMEBUS_UMU_PROTONFIXES` - the fix-list twin of `GAMEBUS_UMU_DB`. Points
 /// the scope check at a working copy, and keeps the tests off the network.
 pub(super) const LOCAL_ENV: &str = "GAMEBUS_UMU_PROTONFIXES";
 
 /// The fix list for a verification run: the local checkout when one is
 /// named, else the cache when it is fresh, else one fetch. Returns the
-/// reason instead when none works — the caller says so and leaves every
+/// reason instead when none works - the caller says so and leaves every
 /// earlier verdict alone rather than claiming "no fix".
 pub(super) fn load_for_verify() -> Result<ProtonFixes, String> {
     if let Some(local) = std::env::var_os(LOCAL_ENV) {
@@ -201,7 +201,7 @@ pub(super) fn load_for_verify() -> Result<ProtonFixes, String> {
 /// A umu-protonfixes checkout (its `gamefixes-*` directories are read
 /// straight off the disk) or a file holding the paths, one per line. An
 /// explicitly named source that yields nothing is an error, never a silent
-/// "nothing needs a fix" — that verdict would hold every entry back.
+/// "nothing needs a fix" - that verdict would hold every entry back.
 fn load_local(path: &std::path::Path) -> Result<ProtonFixes, String> {
     if !path.is_dir() {
         let raw = std::fs::read_to_string(path)

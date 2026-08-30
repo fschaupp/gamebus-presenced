@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         reseed.clone(),
     ));
     info!("GameMode source watcher started");
-    // S6: MPRIS naming hints — never a source, only a name supplier.
+    // S6: MPRIS naming hints - never a source, only a name supplier.
     tokio::spawn(mpris::watch(conn.inner().clone(), tx.clone()));
     info!("MPRIS naming-hint watcher started");
     tokio::spawn(discord::listen(tx));

@@ -173,7 +173,7 @@ impl Step {
     }
 
     /// Compact form for the confirm screen, where the question is "what will
-    /// be written" — the source path is noise there, the destination is not.
+    /// be written" - the source path is noise there, the destination is not.
     pub fn summary(&self) -> String {
         match self {
             Step::InstallFile { to, .. } => format!("install  {}", to.display()),
@@ -233,7 +233,7 @@ impl Plan {
 /// `install -m755` twelve times.
 ///
 /// Derived from the same [`Plan`] that [`execute`] runs, so the summary cannot
-/// drift from what actually happens — that is the whole reason the steps are
+/// drift from what actually happens - that is the whole reason the steps are
 /// data rather than a sequence of calls. The exact list stays one keypress
 /// away; this is the layer on top of it, not a replacement for it.
 pub fn explain(plan: &Plan) -> Vec<String> {
@@ -319,7 +319,7 @@ pub fn explain(plan: &Plan) -> Vec<String> {
     }
 
     if lines.is_empty() {
-        lines.push("nothing — there is no work to do".to_string());
+        lines.push("nothing - there is no work to do".to_string());
     }
     lines
 }
@@ -331,7 +331,7 @@ pub fn scope_note(plan: &Plan, home: &Path) -> String {
     // cache via a subprocess, so no Step carries the path. Saying "nothing
     // changes" next to "download 12 MB" would break this module's own rule
     // that the plain layer cannot promise what the steps do not do. Only when
-    // the fetch is the whole plan, though — an install's write scope is the
+    // the fetch is the whole plan, though - an install's write scope is the
     // headline, and its own summary line already names the download.
     let has_fetch = plan.all_steps().any(
         |s| matches!(s, Step::Run { args, .. } if args.iter().any(|a| a == "fetch-detectable")),
@@ -340,8 +340,8 @@ pub fn scope_note(plan: &Plan, home: &Path) -> String {
         return "Rewrites the game-name database in your cache directory.".to_string();
     }
     // A command in the privileged block writes outside the home by
-    // construction — `systemctl --global enable` drops a symlink under
-    // /etc/systemd/user — even though it names no path of its own.
+    // construction - `systemctl --global enable` drops a symlink under
+    // /etc/systemd/user - even though it names no path of its own.
     let privileged_command = plan
         .privileged
         .iter()
@@ -387,7 +387,7 @@ impl Source {
     }
 }
 
-/// Turn an action into the steps that carry it out. Pure — touches nothing.
+/// Turn an action into the steps that carry it out. Pure - touches nothing.
 pub fn plan(action: Action, dirs: &Dirs, source: &Source) -> Plan {
     match action {
         Action::Install(target) => plan_install(&layout(dirs, target), source),
@@ -478,7 +478,7 @@ fn plan_install(layout: &Layout, source: &Source) -> Plan {
 
     // The shared-helper list ships the same way: a reference copy in the data
     // dir, rewritten on every install. User additions go in the config dir
-    // and are unioned in — rewriting this copy cannot lose them.
+    // and are unioned in - rewriting this copy cannot lose them.
     privileged.push(Step::WriteFile {
         to: layout.shared_helpers_file(),
         contents: include_str!("../../shared-helpers.txt").to_string(),
@@ -498,7 +498,7 @@ fn plan_install(layout: &Layout, source: &Source) -> Plan {
     });
 
     // The naming database is never baked into a build: the freshly installed
-    // CLI downloads it into the cache tier as the last step. Best effort — an
+    // CLI downloads it into the cache tier as the last step. Best effort - an
     // offline install still succeeds, the daemon degrades to executable
     // names, and the status screen offers the fetch as a one-key fix.
     let mut after = reload_steps();
@@ -529,7 +529,7 @@ fn plan_uninstall(layout: &Layout) -> Plan {
     Plan {
         // Stop and disable before the files go, or systemd is left holding a
         // unit whose fragment has vanished. Best effort: an install that was
-        // never enabled — or never seen by systemd at all — must still be
+        // never enabled - or never seen by systemd at all - must still be
         // removable, and `disable` fails loudly in exactly that case.
         before: vec![Step::run_best_effort(
             "systemctl",
@@ -543,7 +543,7 @@ fn plan_uninstall(layout: &Layout) -> Plan {
 /// Make systemd and the session bus notice the files that just changed.
 ///
 /// The D-Bus `ReloadConfig` is what makes a newly written activation file take
-/// effect without logging out — omit it and activation silently does nothing.
+/// effect without logging out - omit it and activation silently does nothing.
 fn reload_steps() -> Vec<Step> {
     vec![
         Step::run("systemctl", &["--user", "daemon-reload"]),
@@ -611,23 +611,23 @@ pub enum Escalation {
     Ran { ok: bool, output: String },
     /// The user dismissed the authentication dialog.
     Cancelled,
-    /// `pkexec` itself could not run — no polkit agent on a bare tty, most
+    /// `pkexec` itself could not run - no polkit agent on a bare tty, most
     /// often. The caller shows `sudo_hint` so the user can do it by hand.
     Unavailable { reason: String },
 }
 
 /// Re-run this binary as root for the privileged half of a plan.
 ///
-/// Only ever called for [`Target::System`] — see [`Action::target`].
+/// Only ever called for [`Target::System`] - see [`Action::target`].
 ///
 /// `pkexec` rather than `sudo`: it authenticates through the desktop's polkit
 /// agent and needs no controlling terminal, which matters because the TUI owns
 /// the terminal. The privileged child is the plain `apply --privileged-only`
-/// subcommand — no raw mode and no ratatui ever runs as root.
+/// subcommand - no raw mode and no ratatui ever runs as root.
 ///
 /// The child re-plans from scratch. Nothing but the action name and target
 /// crosses the process boundary, and `layout()` for the system target reads no
-/// environment, so the paths it computes are the ones that were confirmed —
+/// environment, so the paths it computes are the ones that were confirmed -
 /// even though `pkexec` scrubs the environment.
 pub fn escalate(action: Action, target: Target) -> Escalation {
     let Ok(exe) = std::env::current_exe() else {
@@ -770,18 +770,18 @@ fn perform(step: &Step) -> io::Result<String> {
 /// Write through a temporary file and rename into place.
 ///
 /// `fs::write` onto a *running* executable fails with `ETXTBSY`, and
-/// reinstalling after a rebuild — with the daemon running — is the common case.
+/// reinstalling after a rebuild - with the daemon running - is the common case.
 /// `rename` swaps the directory entry instead: the running process keeps the
 /// old inode until it exits.
 /// `mkdir -p`, with a mode the caller's umask cannot take away.
 ///
-/// `DirBuilder::mode()` — and `create_dir_all`'s implicit 0o777 — pass the mode
+/// `DirBuilder::mode()` - and `create_dir_all`'s implicit 0o777 - pass the mode
 /// to `mkdir(2)`, which masks it with the process umask. Under `umask 077` an
 /// explicit 0o755 therefore still lands as 0700 (measured, not assumed). That
 /// matters for a system install: `pkexec` does not reset the umask, so the
 /// invoking user's carries into the root child, and root-owned 0700
 /// directories mean systemd cannot see the unit, dbus cannot read the
-/// activation file, and the daemon cannot read the naming database — while
+/// activation file, and the daemon cannot read the naming database - while
 /// every step reports success.
 ///
 /// So: create each missing component, then `chmod` the ones we created.
@@ -854,7 +854,7 @@ mod tests {
     fn source() -> Source {
         Source {
             // Nothing exists at this path, so no InstallFile steps are planned
-            // for the binaries — that is the point of the second test below.
+            // for the binaries - that is the point of the second test below.
             bin_dir: PathBuf::from("/build/target/release"),
             cli: None,
         }
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn install_ends_with_a_best_effort_fetch_by_the_installed_cli() {
         // The naming database is never fetched at build time, so the install
-        // itself must produce it — via the copy of the CLI it just installed,
+        // itself must produce it - via the copy of the CLI it just installed,
         // never the build-tree one, and without failing an offline install.
         for target in [Target::User, Target::System] {
             let plan = plan(Action::Install(target), &dirs(), &source());
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn install_scope_note_still_leads_with_the_write_scope() {
-        // The fetch inside an install must not hijack the headline — the
+        // The fetch inside an install must not hijack the headline - the
         // cache-rewrite wording is reserved for the fetch-only plan.
         let home = PathBuf::from("/home/tester");
         let install = plan(Action::Install(Target::User), &dirs(), &source());
@@ -1018,7 +1018,7 @@ mod tests {
         let system = plan(Action::Install(Target::System), &dirs(), &source());
 
         // /home/tester does not exist on the test machine, so the writability
-        // walk lands on /home — which an ordinary user cannot write either.
+        // walk lands on /home - which an ordinary user cannot write either.
         // Assert the invariant that does not depend on the filesystem instead:
         // running as root never needs escalation.
         assert!(!needs_root(&user, 0));
@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn a_command_only_root_may_run_counts_as_leaving_the_home() {
         // `systemctl --global enable` names no path, but it writes a symlink
-        // under /etc — the confirm screen must not say "nothing changes".
+        // under /etc - the confirm screen must not say "nothing changes".
         let plan = plan(Action::EnableAutostart(Target::System), &dirs(), &source());
         assert!(plan
             .privileged
@@ -1130,7 +1130,7 @@ mod tests {
     #[test]
     fn an_empty_plan_is_explained_as_doing_nothing() {
         let empty = Plan::default();
-        assert_eq!(explain(&empty), vec!["nothing — there is no work to do"]);
+        assert_eq!(explain(&empty), vec!["nothing - there is no work to do"]);
         assert_eq!(
             scope_note(&empty, Path::new("/home/tester")),
             "Nothing on disk changes."
@@ -1162,7 +1162,7 @@ mod tests {
 
     /// The bug this test exists for: `DirBuilder::mode(0o755)` looks explicit
     /// but `mkdir(2)` masks it with the umask, so under `umask 077` the
-    /// directories came out 0700 — root-owned and unreadable by the daemon,
+    /// directories came out 0700 - root-owned and unreadable by the daemon,
     /// with every step still reporting success. Nothing caught it because no
     /// test ran under a restrictive umask.
     #[test]
@@ -1182,7 +1182,7 @@ mod tests {
             assert_eq!(
                 mode,
                 0o755,
-                "{} came out {mode:04o} — a umask took the mode away",
+                "{} came out {mode:04o} - a umask took the mode away",
                 path.display()
             );
         }

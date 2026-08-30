@@ -5,7 +5,7 @@
 //! `org.gamebus.Presence.v1` name, not `$XDG_RUNTIME_DIR/discord-ipc-0`, not
 //! the `gamemoded` that is managing actual games. Before this, a
 //! gamebus-presenced installed and running on the developer's own session made
-//! every integration test fail — the daemon under test lost the bus name to it.
+//! every integration test fail - the daemon under test lost the bus name to it.
 //!
 //! A private bus also gets its *own* `gamemoded`: `dbus-daemon --session` reads
 //! the standard service directories, so `com.feralinteractive.GameMode` is
@@ -17,7 +17,7 @@
 //! binary. A directory module does not.
 
 // Every item here is used by at least one of the six test binaries, but none
-// of them uses all of it — so each binary alone reports the rest as dead. This
+// of them uses all of it - so each binary alone reports the rest as dead. This
 // was audited item by item (compile each `--test` target separately and
 // intersect the warnings); redo that before assuming anything here is unused.
 // The one item never read anywhere is `TestEnv::bus`, which exists for its
@@ -102,7 +102,7 @@ impl ChildGuard {
         self.0.id()
     }
 
-    /// SIGKILL and reap. Used where a test needs the daemon gone *now* — the
+    /// SIGKILL and reap. Used where a test needs the daemon gone *now* - the
     /// restart-cache test depends on there being no graceful cleanup.
     pub fn kill_now(&mut self) {
         let _ = self.0.kill();

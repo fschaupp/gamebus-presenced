@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::super::gamedb::{GamedbRow, RowState};
+use super::super::gamedb::{GamedbFilter, GamedbRow, RowState};
 use super::misses::render_pick;
 use super::{field, App};
 
@@ -23,6 +23,23 @@ pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
         .constraints([Constraint::Length(2), Constraint::Min(3)])
         .split(area);
     render_header(f, rows[0], app);
+
+    // A filter that shows nothing is not an empty stash: say which mode is
+    // hiding the rows and how to get them back.
+    if app.gamedb.is_empty() && !app.gamedb_all.is_empty() {
+        let text = format!(
+            "No pages match the '{}' filter ({} hidden) - f cycles back to all.",
+            app.gamedb_filter.label(),
+            app.gamedb_all.len()
+        );
+        f.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: true })
+                .block(Block::default().borders(Borders::ALL).title(" gamedb ")),
+            rows[1],
+        );
+        return;
+    }
 
     if app.gamedb.is_empty() {
         let text = "Nothing to contribute yet.\n\n\
@@ -71,8 +88,14 @@ pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
     if app.gamedb_list.selected().is_none() {
         app.gamedb_list.select(Some(0));
     }
+    // The list title carries the active filter, so a narrowed list never
+    // reads as the whole stash.
+    let title = match app.gamedb_filter {
+        GamedbFilter::All => " pages ".to_string(),
+        filter => format!(" pages · {} ", filter.label()),
+    };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" pages "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, panes[0], &mut app.gamedb_list);
 
@@ -134,6 +157,11 @@ pub(super) fn render_gamedb(f: &mut Frame, area: Rect, app: &mut App) {
     }
     if !row.exes.is_empty() {
         detail.push(field("Executables", &row.exes.join(", ")));
+    }
+    // What the launcher itself knew about the game - the record behind a
+    // `lutris`/`heroic-config` source.
+    if let Some(launcher) = &row.launcher {
+        detail.push(field("Launcher", launcher));
     }
     detail.push(field(
         "Folded from",
@@ -285,6 +313,10 @@ mod tests {
             entries: 1,
             entry_keys: vec!["egs:Calluna".into()],
             rep_key: "egs:Calluna".into(),
+            gap: false,
+            umu: false,
+            weak: false,
+            launcher: None,
         }
     }
 

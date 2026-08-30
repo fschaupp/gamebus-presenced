@@ -87,7 +87,7 @@ pub enum EnabledState {
     Masked,
     Static,
     Other(String),
-    /// systemctl could not be run at all — not the same as "disabled".
+    /// systemctl could not be run at all - not the same as "disabled".
     Unavailable(String),
 }
 
@@ -105,8 +105,8 @@ pub enum ActiveState {
 /// Parse `systemctl is-enabled` output.
 ///
 /// **Deliberately ignores the exit code.** systemd's codes are not stable
-/// across versions — this machine returns 4 for `not-found` where the
-/// documentation suggests 2 — but the word on stdout has been stable for years.
+/// across versions - this machine returns 4 for `not-found` where the
+/// documentation suggests 2 - but the word on stdout has been stable for years.
 pub fn parse_is_enabled(stdout: &str, _code: Option<i32>) -> EnabledState {
     match stdout.trim() {
         "" => EnabledState::Unavailable("no output from systemctl".to_string()),
@@ -136,7 +136,7 @@ pub fn parse_is_active(stdout: &str, _code: Option<i32>) -> ActiveState {
 pub enum SocketOwner {
     /// Nothing at that path.
     Absent,
-    /// A socket file whose listener is gone — what a SIGKILLed daemon leaves.
+    /// A socket file whose listener is gone - what a SIGKILLed daemon leaves.
     Stale,
     /// Somebody is listening, and this is who.
     Listening { pid: u32, comm: String },
@@ -200,10 +200,10 @@ pub enum DiscordMode {
     /// We hold `discord-ipc-0` and a real Discord is upstream: we pass through.
     Proxy { pid: u32, comm: String },
     /// Somebody else holds `discord-ipc-0`. The daemon returns silently from
-    /// its listener in this case — no signal, no log after startup, no bus
+    /// its listener in this case - no signal, no log after startup, no bus
     /// state. Nothing else on the system will tell the user.
     Blocked { pid: u32, comm: String },
-    /// Nobody holds it, including us — normal when the daemon is not running.
+    /// Nobody holds it, including us - normal when the daemon is not running.
     Idle,
 }
 
@@ -263,7 +263,7 @@ impl InstallFacts {
 pub struct UnitFacts {
     pub enabled: EnabledState,
     pub active: ActiveState,
-    /// Which unit file systemd actually loaded — the way to see one install
+    /// Which unit file systemd actually loaded - the way to see one install
     /// shadowing another.
     pub fragment_path: Option<PathBuf>,
 }
@@ -469,7 +469,7 @@ async fn probe_bus() -> (BusFacts, GameModeState) {
     );
 
     if facts.owned {
-        // Which binary is on the bus — the only way to catch "I installed to
+        // Which binary is on the bus - the only way to catch "I installed to
         // ~/.local/bin but the daemon running is the one from /usr/bin".
         if let Ok(Ok(pid)) = tokio::time::timeout(
             BUS_TIMEOUT,
@@ -667,7 +667,7 @@ pub fn rows(s: &Status) -> Vec<Row> {
             health: Health::Warn,
             value: "unit file not loaded".to_string(),
             hint: Some(format!(
-                "{} exists but systemd has not picked it up — reinstall runs daemon-reload",
+                "{} exists but systemd has not picked it up - reinstall runs daemon-reload",
                 install.unit.path.display()
             )),
             remedy: Some(Action::Install(target)),
@@ -790,7 +790,7 @@ pub fn rows(s: &Status) -> Vec<Row> {
                     Health::Ok
                 },
                 value: format!("{} ({})", tier.as_str(), human_size(fact.len)),
-                hint: stale.map(|a| format!("{a} — Discord adds titles continuously")),
+                hint: stale.map(|a| format!("{a} - Discord adds titles continuously")),
                 remedy: Some(Action::FetchDetectable),
             }
         }
@@ -879,8 +879,8 @@ pub fn rows(s: &Status) -> Vec<Row> {
 
 fn binaries_row(s: &Status, install: &InstallFacts) -> Row {
     // Checked before "not installed": a daemon on $PATH from somewhere this
-    // tool does not manage — ~/.cargo/bin after `cargo install --path .`, a
-    // Nix profile, a hand `install -D` — is installed, just not here. Saying
+    // tool does not manage - ~/.cargo/bin after `cargo install --path .`, a
+    // Nix profile, a hand `install -D` - is installed, just not here. Saying
     // "nothing at ~/.local/bin" would be true and useless.
     if let Some(resolved) = &s.path_resolution {
         if resolved != &install.layout.daemon_bin() {
@@ -1189,7 +1189,7 @@ mod tests {
             autostart.remedy,
             Some(Action::EnableAutostart(Target::User))
         );
-        // The daemon itself is still fine — only autostart is the problem.
+        // The daemon itself is still fine - only autostart is the problem.
         assert_eq!(row(&rows, "Daemon").health, Health::Ok);
     }
 

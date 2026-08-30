@@ -176,7 +176,7 @@ impl Correlator {
 
     /// Drop one partial and recompute the pid's published record.
     ///
-    /// Cache-adopted records have no partial — they're published directly
+    /// Cache-adopted records have no partial - they're published directly
     /// via `adopt()`. If the pid has no partial entry but IS published,
     /// the removal targets the adopted record itself.
     fn drop_partial(&mut self, pid: u32, source: Source) -> Vec<Effect> {
@@ -227,7 +227,7 @@ impl Correlator {
     /// absorbed source will use when it says goodbye.
     ///
     /// Publish dedup (S4f): when the merged record equals what is already on
-    /// the bus, no effects are emitted — the ListGames reseed and the tick
+    /// the bus, no effects are emitted - the ListGames reseed and the tick
     /// sweep re-derive identical records by design, and re-publishing them
     /// would ripple no-op PropertiesChanged to every consumer.
     fn publish(&mut self, pid: u32, mut merged: Activity) -> Vec<Effect> {

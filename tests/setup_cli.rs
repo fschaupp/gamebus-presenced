@@ -1,7 +1,7 @@
 //! Integration tests for the `gamebus-setup` command line.
 //!
 //! Everything here drives the real binary as a subprocess with an explicit
-//! environment (`Command::env`, never `std::env::set_var` — the test harness is
+//! environment (`Command::env`, never `std::env::set_var` - the test harness is
 //! multi-threaded and in-process environment mutation is racy).
 
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ fn run_env(home: &TempHome, args: &[&str], envs: &[(&str, &str)]) -> Output {
 /// Annotate a stash fixture entry the way `--verify` does for a game that
 /// needs umu: a collision-checked id, plus the protonfix that justifies a
 /// database row at all. Upstream only wants games that require a fix in
-/// Proton, so an export fixture without this is held back — which is what
+/// Proton, so an export fixture without this is held back - which is what
 /// the fixtures that omit it are there to prove.
 fn needs_umu(stash: &str, key: &str, id: &str) -> String {
     let anchor = format!("\"{key}\":{{");
@@ -186,7 +186,7 @@ fn planning_a_system_install_targets_usr_local_and_says_it_needs_root() {
 }
 
 /// Running as root, `needs_root` is correctly false and `apply` would really
-/// install to /usr/local — the system layout ignores the TempHome by design, so
+/// install to /usr/local - the system layout ignores the TempHome by design, so
 /// there is no containment. Skip rather than write.
 fn skip_if_root(what: &str) -> bool {
     // SAFETY: geteuid cannot fail and touches no memory we own.
@@ -263,7 +263,7 @@ fn umu_misses_lists_and_exports_the_stash() {
     std::fs::create_dir_all(&stash_dir).unwrap();
     // Two verified entries: Control runs under Proton without a protonfix,
     // so upstream does not want a row for it; Fixture Quest needs one. Both
-    // stay in the review list — only the export tells them apart.
+    // stay in the review list - only the export tells them apart.
     let stash = r#"{"egs:Calluna":{"title":"Control","store":"egs","codename":"Calluna",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "executable":"Control_DX12.exe","first_seen":"2026-08-06",
@@ -312,7 +312,7 @@ fn umu_misses_lists_and_exports_the_stash() {
 }
 
 /// A stash covering all three S9b verification outcomes, and the fixture
-/// database that produces them — no network anywhere near these tests
+/// database that produces them - no network anywhere near these tests
 /// (`GAMEBUS_UMU_API` points at a closed port; a query would fail loudly).
 const S9B_STASH: &str = r#"{
     "gog:1207600000":{"title":"Already Here","store":"gog","codename":"1207600000",
@@ -344,7 +344,7 @@ fn write_s9b_fixtures(home: &TempHome) -> PathBuf {
 
 /// The protonfix list a verification run reads: both fixture games need a
 /// fix, so both belong in the database. Steam files are named by the bare
-/// appid, every other id by itself — the two shapes upstream uses.
+/// appid, every other id by itself - the two shapes upstream uses.
 const S9B_FIXES: &str = concat!(
     "gamefixes-steam/397540.py\n",
     "gamefixes-umu/umu-zzzfixturequest.py\n",
@@ -377,7 +377,7 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
     // Confirmed missing → a collision-checked title-slug draft.
     assert!(text.contains("drafted umu-zzzfixturequest"), "{text}");
     // And the scope rule: both games have a protonfix, so both are worth
-    // submitting — the summary names the fix that says so.
+    // submitting - the summary names the fix that says so.
     assert!(
         text.contains("needs umu: protonfix gamefixes-steam/397540.py"),
         "{text}"
@@ -442,7 +442,7 @@ fn umu_misses_verify_marks_all_three_states_and_drafts_offline() {
         text.contains("fix: [`gamefixes-steam/397540.py`](https://github.com/"),
         "the evidence does not link the fix:\n{text}"
     );
-    // One row is a title-slug draft — nothing proves that game is absent
+    // One row is a title-slug draft - nothing proves that game is absent
     // from Steam, so the Steam-rule box must stay for the human.
     assert!(
         text.contains("- [ ] Every id follows the database rules"),
@@ -517,7 +517,7 @@ fn a_codename_override_reaches_the_export_and_passes_the_gog_gate() {
     let stash_dir = home.path().join(".local/share/gamebus-presenced");
     std::fs::create_dir_all(&stash_dir).unwrap();
     // Two annotated identities: a gog entry whose launcher-reported codename
-    // is name-shaped (held back on its own — see the gogdb-gate test) but
+    // is name-shaped (held back on its own - see the gogdb-gate test) but
     // whose override is the numeric product id, and an egs entry whose
     // override replaces a wrong App Name. The daemon-owned codename field
     // stays untouched in both; the export must use the overrides.
@@ -562,7 +562,7 @@ fn a_title_override_reaches_the_export_and_counts_as_confident() {
     std::fs::create_dir_all(&stash_dir).unwrap();
     // The Spellcraft incident: a shared helper exe resolved the wrong title
     // at high confidence, and a second entry whose resolver only managed a
-    // low-confidence stem. Both carry the user's correction — the export
+    // low-confidence stem. Both carry the user's correction - the export
     // must use it, and the correction alone must pass the confidence gate.
     let stash = r#"{"gog:1660194629":{"title":"Spellcraft","store":"gog","codename":"1660194629",
             "umu_id":"umu-0","title_source":"detectable","confidence":"high",
@@ -598,7 +598,7 @@ fn a_title_override_reaches_the_export_and_counts_as_confident() {
     let err = String::from_utf8_lossy(&export.stderr);
     assert!(!err.contains("held back"), "{err}");
 
-    // The merge-request evidence says who set the title — honestly.
+    // The merge-request evidence says who set the title - honestly.
     let md = run(&home, &["umu-misses", "--export-md"]);
     assert!(md.status.success());
     let text = stdout(&md);
@@ -620,7 +620,7 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
     // Codename comes verbatim from an untrusted process's environment: a
     // comma in it must not shift the CSV columns (that would forge the
     // UMU_ID cell). The executable is an absolute path with the username in
-    // it — only the basename may reach a public submission.
+    // it - only the basename may reach a public submission.
     let stash = r#"{"egs:evil":{"title":"Bad Game","store":"egs","codename":"Evil,umu-hijack,x",
             "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
             "executable":"/home/private-user/Games/Heroic/Bad Game/Game.exe",
@@ -636,7 +636,7 @@ fn umu_misses_export_escapes_external_data_and_strips_paths() {
     let text = stdout(&export);
     assert!(
         text.contains(r#"Bad Game,egs,"Evil,umu-hijack,x",umu-1000001,,,Game.exe"#),
-        "codename not escaped — columns shifted:\n{text}"
+        "codename not escaped - columns shifted:\n{text}"
     );
     assert!(
         !text.contains("/home/private-user"),
@@ -650,7 +650,7 @@ fn endpoints_come_from_the_config_file_not_only_the_env() {
     let home = TempHome::new("umu-endpoints");
     write_s9b_fixtures(&home);
     // A user override in ~/.config points the umu API at a closed port; NO
-    // env var and no --db. Verify must try that URL — and fail honestly —
+    // env var and no --db. Verify must try that URL - and fail honestly -
     // proving the file was read. With the compiled default it would reach
     // the real API instead.
     let conf_dir = home.path().join(".config/gamebus-presenced");
@@ -703,7 +703,7 @@ fn dismissed_entries_stay_in_the_stash_but_out_of_the_exports() {
     let err = String::from_utf8_lossy(&export.stderr);
     assert!(err.contains("dismissed by you"), "{err}");
 
-    // Still visible (marked) in the review list — parked, not deleted.
+    // Still visible (marked) in the review list - parked, not deleted.
     let list = run(&home, &["umu-misses"]);
     let text = stdout(&list);
     assert!(text.contains("Skip Me"), "{text}");
@@ -719,7 +719,7 @@ fn a_corrupt_stash_errors_loudly_and_stays_untouched() {
     std::fs::write(&stash_path, "{\"oops\": ,}").unwrap();
     let before = std::fs::read(&stash_path).unwrap();
 
-    // Both the list and the flows must refuse — "No misses recorded" over a
+    // Both the list and the flows must refuse - "No misses recorded" over a
     // corrupt file would read as data loss.
     for args in [vec!["umu-misses"], vec!["umu-misses", "--export"]] {
         let out = run(&home, &args);
@@ -734,7 +734,7 @@ fn a_corrupt_stash_errors_loudly_and_stays_untouched() {
 }
 
 /// A one-thread fake umu API: exact-miss on the codename lookup, fuzzy ids
-/// on the title lookup — the live API's observed behavior (`?title=Control`
+/// on the title lookup - the live API's observed behavior (`?title=Control`
 /// returns Ground Control's ids, with no title field to compare against).
 fn spawn_fake_umu_api() -> String {
     use std::io::{Read as _, Write as _};
@@ -819,8 +819,84 @@ fn umu_misses_verify_without_any_database_fails_and_touches_nothing() {
     let errtext = String::from_utf8_lossy(&out.stderr);
     assert!(errtext.contains("Verify failed"), "{errtext}");
 
-    // Honest failure means an untouched stash — byte for byte.
+    // Honest failure means an untouched stash - byte for byte.
     assert_eq!(before, std::fs::read(&stash_path).unwrap());
+}
+
+/// The owner policy (2026-08-24): umu candidacy is opt-in. A stash mixing a
+/// promoted umu miss, an unpromoted one with no fix, and a launcher launch
+/// (empty umu id) exports exactly the promoted one - and the review list
+/// still shows all three, each with its tag.
+#[test]
+fn umu_exports_take_candidates_and_the_list_shows_everything() {
+    let home = TempHome::new("umu-candidates");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    let stash = r#"{"egs:Promoted":{"title":"Promoted Quest","store":"egs","codename":"Promoted",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-24","last_seen":"2026-08-24",
+            "drafted_id":{"id":"umu-promotedquest","basis":"title-slug","collision_checked":"2026-08-24"},
+            "umu_promoted":"2026-08-24"},
+        "egs:Waiting":{"title":"Waiting Game","store":"egs","codename":"Waiting",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-24","last_seen":"2026-08-24",
+            "drafted_id":{"id":"umu-waitinggame","basis":"title-slug","collision_checked":"2026-08-24"},
+            "fix":{"umu_id":"umu-waitinggame","fixes":[],"checked":"2026-08-24"}},
+        "itchio:926077":{"title":"Danger Scavenger","store":"itchio","codename":"926077",
+            "umu_id":"","title_source":"lutris-wrapper","confidence":"medium",
+            "executable":"/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64",
+            "launcher":"lutris","launcher_name":"Danger Scavenger",
+            "launcher_dir":"/media/Data/Spiele/itchio/danger-scavenger",
+            "codename_source":"lutris-config","runner":"native",
+            "first_seen":"2026-08-23","last_seen":"2026-08-23"}}"#;
+    std::fs::write(stash_dir.join("umu-misses.json"), stash).unwrap();
+
+    // The CSV export carries exactly the promoted entry.
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Promoted Quest,egs,Promoted,umu-promotedquest,,,"),
+        "the promoted entry missed the export:\n{text}"
+    );
+    assert!(
+        !text.contains("Waiting Game,") && !text.contains("Danger Scavenger,"),
+        "a non-candidate reached the submission:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(
+        err.contains("Waiting Game") && err.contains("not promoted"),
+        "the hold-back must name the missing promotion:\n{err}"
+    );
+    assert!(
+        err.contains("Danger Scavenger") && err.contains("launcher launch"),
+        "the launcher launch's hold-back reason is missing:\n{err}"
+    );
+
+    // The merge-request text: one game, and it says why the row is there.
+    let md = run(&home, &["umu-misses", "--export-md"]);
+    assert!(md.status.success());
+    let text = stdout(&md);
+    assert!(text.contains("# Add 1 game: Promoted Quest"), "{text}");
+    assert!(
+        text.contains("promoted for submission by the reviewing user 2026-08-24"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Waiting Game,egs") && !text.contains("Danger Scavenger,itchio"),
+        "a non-candidate row leaked into the merge request:\n{text}"
+    );
+
+    // The review list shows all three, each with its candidacy tag.
+    let list = run(&home, &["umu-misses"]);
+    assert!(list.status.success());
+    let text = stdout(&list);
+    for expected in ["Promoted Quest", "Waiting Game", "Danger Scavenger"] {
+        assert!(text.contains(expected), "list missing {expected}:\n{text}");
+    }
+    assert!(text.contains("promoted by you 2026-08-24"), "{text}");
+    assert!(text.contains("not a umu candidate"), "{text}");
+    assert!(text.contains("launcher launch"), "{text}");
 }
 
 // ---- gamedb: the same stash, as pages for the gamebus-gamedb data set.
@@ -1328,4 +1404,126 @@ fn copy_tree(from: &Path, to: &Path) {
             std::fs::copy(entry.path(), &target).expect("copy");
         }
     }
+}
+
+// ---- gamedb: a launcher launch that never went through umu.
+
+/// Danger Scavenger exactly as the daemon records the live launch: a native
+/// itch.io game handed over by Lutris (`umu_id` empty), the codename out of
+/// Lutris's own `.lutrisgame.json`, the title from the wrapper argv.
+const FIXTURE_LAUNCHER_STASH: &str = r#"{
+    "itchio:926077":{"title":"Danger Scavenger","store":"itchio","codename":"926077",
+        "umu_id":"","title_source":"lutris-wrapper","confidence":"medium",
+        "executable":"/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64",
+        "first_seen":"2026-08-23","last_seen":"2026-08-23",
+        "launcher":"lutris","launcher_name":"Danger Scavenger",
+        "launcher_dir":"/media/Data/Spiele/itchio/danger-scavenger",
+        "codename_source":"lutris-config","runner":"native"}}"#;
+
+/// The page that stash entry must fold into, byte for byte: the Lutris
+/// record is the source, the codename makes the confidence, and the native
+/// runner lets the `.x86_64` binary onto the page.
+const DANGER_SCAVENGER_PAGE: &str = "title = \"Danger Scavenger\"\n\
+     gamedb = \"itchio-926077\"\n\
+     note = \"Identified from Lutris: service=itchio, appid=926077.\"\n\
+     \n\
+     [[stores.itchio]]\n\
+     codename = \"926077\"\n\
+     exe = \"Danger_Scavenger.x86_64\"\n\
+     seen = \"2026-08-23\"\n\
+     source = \"lutris\"\n\
+     confidence = \"high\"\n";
+
+#[test]
+fn a_native_lutris_launch_exports_the_danger_scavenger_page_byte_exact() {
+    let home = TempHome::new("gamedb-launcher");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(stash_dir.join("umu-misses.json"), FIXTURE_LAUNCHER_STASH).unwrap();
+    let index = home.path().join("identities.json");
+    std::fs::write(&index, FIXTURE_GAMEDB_INDEX).unwrap();
+    let out_dir = home.path().join("checkout");
+
+    let out = run_env(
+        &home,
+        &["gamedb", "--export", "--out", out_dir.to_str().unwrap()],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "export exited {:?}", out.status);
+    assert!(
+        stdout(&out).contains("1 page(s) written"),
+        "{}",
+        stdout(&out)
+    );
+    let page = std::fs::read_to_string(out_dir.join("games/danger-scavenger.toml"))
+        .expect("no page written");
+    assert_eq!(page, DANGER_SCAVENGER_PAGE, "the page is not byte-exact");
+
+    // The same entry in the listing: still there by default - gamedb is
+    // always active, umu miss or not.
+    let out = run_env(
+        &home,
+        &["gamedb"],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(
+        text.contains("Danger Scavenger") && text.contains("itchio/926077"),
+        "a non-umu launch fell out of the listing:\n{text}"
+    );
+}
+
+/// The exported page has to pass the data set's own lint, run over a
+/// scratch copy of the whole set it would be committed into. Skips cleanly
+/// when python3 or the gamedb submodule is absent, exactly like the
+/// enhancement lint test above - neither is a build dependency.
+#[test]
+fn the_danger_scavenger_page_passes_the_data_sets_own_lint() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let data = repo.join("gamedb");
+    let lint = repo.join(".scripts/gamedb-lint.py");
+    if !data.join("games/control.toml").exists() || !lint.exists() {
+        eprintln!("skipping: the gamedb submodule is not checked out");
+        return;
+    }
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipping: no python3, and the lint is a Python script");
+        return;
+    }
+
+    let home = TempHome::new("gamedb-launcher-lint");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    std::fs::write(stash_dir.join("umu-misses.json"), FIXTURE_LAUNCHER_STASH).unwrap();
+    let index = home.path().join("identities.json");
+    std::fs::write(&index, FIXTURE_GAMEDB_INDEX).unwrap();
+    // The destination is a scratch copy of the data set, which is what a
+    // contributor points --out at: their checkout of gamebus-gamedb.
+    let out_dir = home.path().join("gamebus-gamedb");
+    copy_tree(&data, &out_dir);
+
+    let out = run_env(
+        &home,
+        &["gamedb", "--export", "--out", out_dir.to_str().unwrap()],
+        &[("GAMEBUS_GAMEDB_INDEX", index.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "export exited {:?}", out.status);
+    assert!(
+        out_dir.join("games/danger-scavenger.toml").exists(),
+        "{}",
+        stdout(&out)
+    );
+
+    let lint = Command::new("python3")
+        .arg(&lint)
+        .arg(&out_dir)
+        .output()
+        .expect("python3 runs");
+    let report = String::from_utf8_lossy(&lint.stdout);
+    assert!(
+        lint.status.success() && report.contains("OK:"),
+        "the data set with the page does not lint:\n{report}{}",
+        String::from_utf8_lossy(&lint.stderr)
+    );
 }

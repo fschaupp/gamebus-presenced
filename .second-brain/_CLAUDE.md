@@ -41,7 +41,7 @@ This is a general operating principle, not vault-specific. Keep it in `_CLAUDE.m
 
 ## Section 0.6 - Integration-Test Against the Real Thing
 
-Integration tests exercise the real wire: genuine client libraries, real daemons (gamemoded), or recording fixtures that capture bytes — never hand-written mocks of the protocol under test. Tests must skip gracefully when the session bus, gamemoded, or a real Discord client is unavailable. When a design can only be verified against a real game (wrapper trees, process identification), run the daemon against a live game and assert the bus state.
+Integration tests exercise the real wire: genuine client libraries, real daemons (gamemoded), or recording fixtures that capture bytes - never hand-written mocks of the protocol under test. Tests must skip gracefully when the session bus, gamemoded, or a real Discord client is unavailable. When a design can only be verified against a real game (wrapper trees, process identification), run the daemon against a live game and assert the bus state.
 
 This rule was promoted from a learnings-review candidate after 4 occurrences (S1-S4) caught 11 bugs that unit tests missed.
 
@@ -52,14 +52,14 @@ This rule was promoted from a learnings-review candidate after 4 occurrences (S1
 Nontrivial changes get a fresh-context review whose job is to refute, not
 confirm: reviewers trace failure scenarios through the actual code, and
 skeptics try to kill each finding before it reaches the owner. A fix's
-*mechanism* must be verified — measured, traced, or reproduced — never just
+*mechanism* must be verified - measured, traced, or reproduced - never just
 its intention; the reviewer panel caught a wrong fix for a confirmed bug
 (umask-masked `mkdir` modes) that reading alone had passed. Findings without
 a concrete failure scenario are noise.
 
 This rule was promoted from a learnings-review candidate after 4 occurrences
 on 2026-08-05/06 (S5 branch review, strategic-fit review, adversarial
-find→refute workflow, S4f audit trio) — each produced confirmed,
+find→refute workflow, S4f audit trio) - each produced confirmed,
 consequential findings the author and test suite had both missed.
 
 ---
@@ -75,6 +75,32 @@ Commits the owner makes or runs themselves (e.g. `.scripts/release.sh`
 release commits) carry no trailer. On the `public` branch the tweet-size
 message rule covers the prose only, never the trailer. The public README
 carries a matching one-line disclosure above "Prior art it stands on".
+
+---
+
+## Section 0.9 - Never Commit While Exploring
+
+While the owner and Claude are exploring, reviewing, or iterating on a
+solution, nothing gets committed - not by Claude, not by subagents (their
+prompts must say so). Implement, run the full gate, and present the working
+tree; the owner closes the exploration with an explicit "commit that" /
+"finish the branch". A green test suite does not end an exploration.
+Two related rules from the same session (2026-08-08): feature-branch commits
+stay docs-free (PLAN.md and friends land in one closing docs commit) so code
+commits cherry-pick cleanly onto the public branch, and each commit should
+compile standalone (verify in a throwaway worktree).
+
+---
+
+## Section 0.10 - Only the Owner Pushes
+
+Nothing leaves this machine by Claude's hand: no `git push`, no repo
+creation, no tag push, no release trigger - on any remote, any repo, any
+branch. Claude prepares everything (commits where an exploration is closed,
+tags, pin scripts, exact push commands) and hands the command to the owner.
+Stated by the owner 2026-08-23 ("only i push") mid-publication of
+gamebus-gamedb; it also matches how GitHub enforces it (workflow-scope
+refusals are a symptom, not the reason).
 
 ---
 
@@ -121,7 +147,7 @@ carries a matching one-line disclosure above "Prior art it stands on".
 > Update this section at the start of each major project or focus period.
 
 **Current top priority:** gamebus-presenced - D-Bus presence daemon for Linux desktop
-**Current project:** gamebus-presenced (S0-S4f done and verified; S5 setup tool landed 2026-08-06, STAGED — per repo PLAN.md)
+**Current project:** gamebus-presenced (S0-S4f done and verified; S5 setup tool landed 2026-08-06, STAGED - per repo PLAN.md)
 **Key technologies:** D-Bus, Discord IPC, GameMode, Rust, zbus, tokio, rsrpc
 
 ---

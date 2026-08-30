@@ -37,7 +37,7 @@ mod pages;
 mod tui;
 
 pub(crate) use self::tui::{
-    tui_export, tui_fetch, tui_set_dir, tui_view, GamedbRow, GamedbView, RowState,
+    tui_export, tui_fetch, tui_set_dir, tui_view, GamedbFilter, GamedbRow, GamedbView, RowState,
 };
 
 use self::pages::{additions_label, candidates, Status};
@@ -73,6 +73,16 @@ pub fn run(args: &[String]) -> ExitCode {
             // Not fatal, and not an HTTP error either: an unpublished data
             // set is a normal state of the world, and a listing still works.
             Err(e) => eprintln!("{}", e.message()),
+        }
+        match crate::setup::lutris_library::load() {
+            Ok(games) if !games.is_empty() => {
+                let mut report = UmuReport::load_for_annotations();
+                for line in crate::setup::lutris_library::fill_codenames(&mut report, &games) {
+                    println!("Lutris library: {line}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("Lutris library unreadable ({e}) - codenames stay as they are."),
         }
     }
 

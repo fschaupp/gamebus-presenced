@@ -2,7 +2,7 @@
 //! Discord RPC client with the same pid must become ONE activity record.
 //!
 //! Runs on a private session bus with its own gamemoded and a private runtime
-//! directory, so nothing here depends on — or disturbs — the live session.
+//! directory, so nothing here depends on - or disturbs - the live session.
 
 use discord_rich_presence::activity::{Activity as ClientActivity, ActivityType};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};

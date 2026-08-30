@@ -24,7 +24,7 @@ just at the tip.
 ## The problem
 
 Publishing a curated history from an internal branch requires removing
-internal vocabulary — phase tags, private-spec references, diary dates — from
+internal vocabulary - phase tags, private-spec references, diary dates - from
 **every** commit, not just the tip. Otherwise early commits introduce text
 that later "cleanup" commits delete, which both leaks the internals (they are
 still in history) and adds noise (the deletions show up as diffs).
@@ -32,8 +32,8 @@ Hand-editing each commit invites conflicts and drift between commits.
 
 ## The technique (three separable passes)
 
-1. **Deterministic cleanup script.** Exact-pair replacements — file-scoped,
-   replace-or-die so a silent no-op cannot hide — for prose that needs
+1. **Deterministic cleanup script.** Exact-pair replacements - file-scoped,
+   replace-or-die so a silent no-op cannot hide - for prose that needs
    judgment, plus generic context-free regexes for patterned references
    (parenthetical tags, leading comment tags, section refs). Tune it against
    the final tree until `pristine + script == hand-validated tree`, verified
@@ -51,7 +51,7 @@ Hand-editing each commit invites conflicts and drift between commits.
 ## Key insights
 
 - **Exact pairs written against the final tree miss intermediate-only text**
-  — text that was edited between its introduction and the tip.
+  - text that was edited between its introduction and the tip.
   Countermeasure: after filtering, grep every historical tree for the banned
   patterns (`for c in $(git rev-list branch); do git grep -E '<patterns>'
   $c; done`), add pairs for whatever surfaces, re-filter. Converges in one
@@ -60,7 +60,7 @@ Hand-editing each commit invites conflicts and drift between commits.
   intermediates often carry conflict resolutions that pulled later file
   versions: premature module declarations, build-manifest entries before
   their files exist, test helpers arriving after their users. Fix each
-  commit's tree minimally — the next commit's diff simply re-adds the
+  commit's tree minimally - the next commit's diff simply re-adds the
   stripped lines, which reads as the honest introduction. When a file's
   introduction must move earlier (e.g. `tests/common`), inject the **final
   (cleaned)** version at first use in every tree that lacks it. Sometimes
@@ -68,14 +68,14 @@ Hand-editing each commit invites conflicts and drift between commits.
 - **Do not assume the original history compiled either.** In
   gamebus-presenced, the original S0/S3 commits already referenced modules
   that did not exist yet (verified 2026-08-07), so there was no oracle to
-  restore from — fixes had to be hand-written and compile-verified per
+  restore from - fixes had to be hand-written and compile-verified per
   commit.
 - **Verification battery:** per-commit `cargo check --all-targets` (or the
   language's equivalent), per-commit banned-pattern grep, programmatic
   message constraints, and tip-tree byte-identity against the tree that
   passed the full test gate. The chain of equality:
   `pristine + script == validated`, `filtered-tip == pristine + script`,
-  therefore `filtered-tip == validated` — no need to re-run the suite on
+  therefore `filtered-tip == validated` - no need to re-run the suite on
   the filtered branch.
 - **Follow-up edits that must appear "from the start"** (license files,
   README sections) are cheap one-line tree-filters appended later; verify

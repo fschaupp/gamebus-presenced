@@ -1,9 +1,9 @@
-# gamebus-presenced — one bus for "what is this machine playing"
+# gamebus-presenced - one bus for "what is this machine playing"
 
 Status: **working.** S0 (D-Bus surface), S1 (GameMode source), S2 (Discord IPC
 listener), S3 (proxy + correlator + restart cache) and S4 (Steam enrichment,
 naming, packaging) landed 2026-08-04 and are verified on the session bus; S5
-(the `gamebus-setup` install and status tool) landed 2026-08-06 and is STAGED —
+(the `gamebus-setup` install and status tool) landed 2026-08-06 and is STAGED -
 its user-level install is exercised, its system/pkexec path is not. See
 [`PLAN.md`](../../PLAN.md) for what each slice covers and how it was verified.
 
@@ -21,8 +21,8 @@ same place, and none of them know about each other.
 | MPRIS | media, thoroughly, as a real standard | games |
 
 So today, answering "what is running and what is it doing" means running four
-integrations and correlating them yourself. Every consumer — status bars,
-desk pets, stream overlays, home automation, presence mirrors — reimplements
+integrations and correlating them yourself. Every consumer - status bars,
+desk pets, stream overlays, home automation, presence mirrors - reimplements
 the same join. That is the mess this project deletes.
 
 **One daemon collects every source, correlates them into a single activity
@@ -42,7 +42,7 @@ record, and publishes it on the session bus the way MPRIS publishes media.**
 - **No freedesktop spec** for game/app activity exists or is proposed. Checked
   the portal repo and the specs index; the gap is real and unoccupied.
 - The dozen "discord bridge" projects ([rpc-bridge], [wine-discord-ipc-bridge],
-  …) are all transport plumbing — Wine named pipe to unix socket — or run the
+  …) are all transport plumbing - Wine named pipe to unix socket - or run the
   *other* direction, D-Bus/MPRIS into Discord.
 
 ## Architecture
@@ -87,13 +87,13 @@ record and merge later if a pid shows up.
 ### The Discord half, concretely
 
 Bind `discord-ipc-0` at session start. Discord starts later, finds 0 taken and
-binds ipc-1 — its own docs describe the client walking the range "trying
+binds ipc-1 - its own docs describe the client walking the range "trying
 sequentially until it can bind to one", which is also why Stable and Canary
 coexist. Games connect to the first socket that accepts, which is us.
 
 - **With Discord present**: forward every frame verbatim upstream and pipe
   responses back. The game sees normal Discord; Discord sees a normal client;
-  we see everything. Frames are forwarded whole — never split a write, the pipe
+  we see everything. Frames are forwarded whole - never split a write, the pipe
   breaks on partial writes.
 - **Without Discord**: answer the handshake and echo commands ourselves, which
   is the arRPC behaviour and what [rsRPC] already implements as a library.
@@ -112,7 +112,7 @@ depend on, so the design does not.
 What saves it instead:
 
 1. **The other sources re-derive from scratch.** GameMode and Steam repopulate
-   on startup, so an activity never disappears — at worst the Discord-sourced
+   on startup, so an activity never disappears - at worst the Discord-sourced
    fields (title, chapter text, artwork) go quiet.
 2. **A runtime cache re-adopts the rest.** Records are persisted to
    `$XDG_RUNTIME_DIR`, keyed by **pid plus the process start-time** from
@@ -128,12 +128,12 @@ session daemon of this kind restarts for developer iteration and little else.
 ### Naming
 
 Discord's [`applications/detectable`][detectable] endpoint (~1834 entries)
-maps process names to game names and icons — the same list arRPC caches. That
+maps process names to game names and icons - the same list arRPC caches. That
 is the difference between "playing Elden Ring" and "playing `eldenring.exe`",
 and it enriches *all* sources, not just Discord: a GameMode-only registration
 can still be named from its executable.
 
-Cached on disk, refreshed rarely, and **entirely optional** — no network, no
+Cached on disk, refreshed rarely, and **entirely optional** - no network, no
 naming, everything else still works.
 
 ## The D-Bus surface
@@ -143,7 +143,7 @@ consumers already know how to read.
 
 ### On versioning
 
-**The version is a separate element — `…Presence.v1`, not `…Presence1`.** This
+**The version is a separate element - `…Presence.v1`, not `…Presence1`.** This
 is a deliberate departure from the neighbours (`org.freedesktop.login1`,
 `org.mpris.MediaPlayer2`, and systemd's whole family), so it should not be
 "corrected" back later.
@@ -157,14 +157,14 @@ versions are sub-resources of one endpoint, **a D-Bus well-known name *is* the
 endpoint and has exactly one owner**. Version outside the name and two
 generations can never run at once.
 
-`org.gamebus.Presence.v1` satisfies that identically to `Presence1` — one
-daemon can own `.v1` and `.v2` at the same time and serve both — while reading
+`org.gamebus.Presence.v1` satisfies that identically to `Presence1` - one
+daemon can own `.v1` and `.v2` at the same time and serve both - while reading
 unambiguously. Both are valid D-Bus: name elements may not *begin* with a
 digit, and `v1` begins with a letter. The choice cascades consistently into
 object paths (`/org/gamebus/Presence/v1`) and interface names
 (`org.gamebus.Presence.v1.Manager`).
 
-The same rationale says to bump **only for incompatible changes** — added
+The same rationale says to bump **only for incompatible changes** - added
 methods and properties do not count, provided clients handle `UnknownMethod`.
 So the name suffix is the coarse lever, and the `Version` property on the
 Manager (below) is the fine one, exactly as every xdg-desktop-portal interface
@@ -186,13 +186,13 @@ Activity properties, all read-only, all `emits-change`:
 
 | property | type | notes |
 |---|---|---|
-| `Sources` | `as` | `["discord","gamemode","steam"]` — which sources back this record |
+| `Sources` | `as` | `["discord","gamemode","steam"]` - which sources back this record |
 | `Kind` | `s` | `game` \| `app` \| `unknown` |
 | `Name` | `s` | resolved human name; falls back to the executable stem |
 | `Details` / `State` | `s` | Discord's two free-text lines; empty when unknown |
 | `ProcessId` | `u` | 0 when not correlated to a process |
 | `Executable` | `s` | from GameMode or `/proc/<pid>/exe` |
-| `AppIds` | `a{ss}` | `{"discord": "…", "steam": "…"}` — source-scoped ids |
+| `AppIds` | `a{ss}` | `{"discord": "…", "steam": "…"}` - source-scoped ids |
 | `Since` / `Until` | `t` | unix seconds, 0 = unset |
 | `LargeImage`/`LargeText`/`SmallImage`/`SmallText` | `s` | artwork, resolved to URLs where possible |
 | `PartySize` / `PartyMax` | `u` | 0 = unset |
@@ -202,8 +202,8 @@ Design rules worth stating so they do not erode:
 
 1. **Empty string means "not known", never a placeholder.** Consumers render
    what they get. One deliberate exception (S7): an ungrouped GameMode record
-   whose *name* resolves to empty — a known non-game wrapper with nothing yet
-   naming it — is withheld from the bus entirely rather than published
+   whose *name* resolves to empty - a known non-game wrapper with nothing yet
+   naming it - is withheld from the bus entirely rather than published
    nameless; it publishes, with its original `Since`, the moment any evidence
    names it. Grouped records are never withheld (a merge key is game
    evidence), and stem names still publish. Consequence: `HasActivity`
@@ -216,7 +216,7 @@ Design rules worth stating so they do not erode:
 3. **The record dies with the last evidence for the game.** No lingering
    "last played". For grouped records (a merge key joining several pids) the
    unit of evidence is the *game*, not one pid: helper processes come and go
-   without bus traffic, and the record ends — exactly one `ActivityRemoved` —
+   without bus traffic, and the record ends - exactly one `ActivityRemoved` -
    when the last registered or scanned member is gone. At most one
    publish-first `ActivityAdded`/`ActivityRemoved` migration pair can occur
    per session when a better anchor process appears; consumers should read
@@ -239,7 +239,7 @@ Design rules worth stating so they do not erode:
 
 Possible later, explicitly not now: an arRPC-compatible bridge on 1337 so this
 can replace arRPC outright for Vesktop users; an MPRIS source so "watching" and
-"listening" join the same model — S6 (2026-08-06) landed the *naming-hint*
+"listening" join the same model - S6 (2026-08-06) landed the *naming-hint*
 half of this (player `Identity` fills default names, lowest precedence above
 the stem, never a source); the full media-record source remains not-now.
 
@@ -247,12 +247,12 @@ the stem, never a source); the full media-record source remains not-now.
 
 | | contents | usable after? |
 |---|---|---|
-| **S0** | D-Bus surface foundation, extracted from the original S1: `zbus`, `ListActivities` + signals skeleton. **Done 2026-08-04.** | Yes — interface verified on the bus. |
-| **S1** | GameMode source feeding the surface: `GameRegistered`/`GameUnregistered`, `ListGames` seed, per-activity objects. **Done 2026-08-04.** | Yes — pid/executable presence, zero Discord involvement. This alone is what the epaper pet needs. |
-| **S2** | Discord IPC listener with **no** upstream (the Discord-not-running case): handshake, frame codec, `SET_ACTIVITY` → activity objects, `SO_PEERCRED` pid. Payload model from the pinned [rsRPC] crate. **Done 2026-08-04.** | Yes — full rich presence on a machine without a Discord client. |
-| **S3** | Transparent proxy to a running Discord, plus the correlator: pid join across sources, merge and split rules, and the pid+start-time runtime cache that survives a restart. **Done 2026-08-04.** | Yes — works alongside a real Discord client. |
+| **S0** | D-Bus surface foundation, extracted from the original S1: `zbus`, `ListActivities` + signals skeleton. **Done 2026-08-04.** | Yes - interface verified on the bus. |
+| **S1** | GameMode source feeding the surface: `GameRegistered`/`GameUnregistered`, `ListGames` seed, per-activity objects. **Done 2026-08-04.** | Yes - pid/executable presence, zero Discord involvement. This alone is what the epaper pet needs. |
+| **S2** | Discord IPC listener with **no** upstream (the Discord-not-running case): handshake, frame codec, `SET_ACTIVITY` → activity objects, `SO_PEERCRED` pid. Payload model from the pinned [rsRPC] crate. **Done 2026-08-04.** | Yes - full rich presence on a machine without a Discord client. |
+| **S3** | Transparent proxy to a running Discord, plus the correlator: pid join across sources, merge and split rules, and the pid+start-time runtime cache that survives a restart. **Done 2026-08-04.** | Yes - works alongside a real Discord client. |
 | **S4** | Steam appid enrichment, `detectable.json` naming, a `gamebus-presence monitor` CLI, systemd user unit + D-Bus activation file. Extended in S4d/S4e with the umu/Proton wrapper-tree join and game identification. **Done 2026-08-04.** | Polish. |
-| **S5** | `gamebus-setup`: what is working, what is not, and the remedy for each — plus the install itself, for a user-level (`~/.local`) or system (`/usr/local`) target. **STAGED 2026-08-06.** | Yes for a user-level install; the system target is unexercised. |
+| **S5** | `gamebus-setup`: what is working, what is not, and the remedy for each - plus the install itself, for a user-level (`~/.local`) or system (`/usr/local`) target. **STAGED 2026-08-06.** | Yes for a user-level install; the system target is unexercised. |
 
 S1 and S2 are independent; either can land first.
 
@@ -272,13 +272,13 @@ Both halves have a real answer:
   forwarded byte stream is identical to what the client sent.
 
 Frame codec, correlator and merge rules are pure functions over bytes and
-records — unit-testable without a socket or a bus, and that is where the bulk
+records - unit-testable without a socket or a bus, and that is where the bulk
 of the tests belong.
 
 ## Licensing and dependencies
 
 MIT/Apache-2.0 dual, the Rust norm, and compatible with anything that wants to
-embed the correlator as a library. Note [pog5/rsrpc] is **GPLv3** — fine to
+embed the correlator as a library. Note [pog5/rsrpc] is **GPLv3** - fine to
 learn from, not to vendor. [rsRPC] is MIT and is the reasonable thing to build
 the Discord listener on, or to lift the frame handling from.
 

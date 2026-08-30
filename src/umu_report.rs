@@ -1,14 +1,20 @@
 //! The umu-database miss report (S9).
 //!
 //! Every game launched through umu with no database entry (`GAMEID=umu-0`,
-//! `UMU_ID=umu-default`) is a gap in the shared umu-database — and this
+//! `UMU_ID=umu-default`) is a gap in the shared umu-database - and this
 //! daemon usually works out what the game actually was. This module stashes
 //! those resolutions so the setup tool can show them for review and export a
 //! submission in the database's own CSV shape
 //! (https://github.com/Open-Wine-Components/umu-database:
 //! `TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM,NOTE,EXE_STRINGS`).
 //!
-//! Persisted at `$XDG_DATA_HOME/gamebus-presenced/umu-misses.json` — data,
+//! The stash has since widened past umu: a launch a launcher handed us with
+//! no authoritative identity is the same kind of gap, and is recorded here
+//! with an empty `umu_id` (see [`Miss::is_umu_miss`]). Only umu misses can
+//! become a umu-database submission; the rest still carry launcher facts
+//! worth showing and correcting.
+//!
+//! Persisted at `$XDG_DATA_HOME/gamebus-presenced/umu-misses.json` - data,
 //! not cache: it accumulates across sessions and is the raw material for a
 //! human-reviewed contribution. Two writers share it, each owning half of
 //! every entry: the daemon writes resolutions, the setup tool writes
@@ -17,7 +23,7 @@
 //! network-free; submitting is the user's act, not ours.
 
 // Compiled into both the daemon (which uses the write half) and gamebus-setup
-// (which reads the stash and owns the whole UmuDb/verification half — the
+// (which reads the stash and owns the whole UmuDb/verification half - the
 // daemon is network-free and never touches the database). Each binary alone
 // reports the other's subset as dead; audited 2026-08-07, every item is live
 // in at least one binary.
@@ -33,37 +39,69 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     /// Launcher's own install record, or a detectable.json hit on the real
-    /// game process — exact titles from curated sources.
+    /// game process - exact titles from curated sources.
     High,
     /// A wrapper-layer identification: the Lutris title argv, a descendant
     /// walk, a sandbox-family match. Human-set, occasionally edited.
     Medium,
-    /// An MPRIS hint or an executable stem — better than nothing, verify
+    /// An MPRIS hint or an executable stem - better than nothing, verify
     /// before submitting.
     Low,
 }
 
-/// One observed umu-database miss and what we made of it.
+/// One observed launch with no authoritative identity, and what we made of
+/// it. Originally only umu-database misses; a launch a launcher handed us
+/// without a umu id is the same kind of gap and lives here too, with
+/// `umu_id` empty ([`Miss::is_umu_miss`] tells the two apart).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Miss {
     /// Resolved display title, when anything resolved one.
     pub title: Option<String>,
     /// umu-database store id we believe this came from (`egs`, `gog`,
-    /// `ubisoft`, … or `none`) — a guess, labelled as such.
+    /// `ubisoft`, … or `none`) - a guess, labelled as such.
     pub store: String,
     /// Store-internal codename when known (for EGS this is the App Name the
     /// database wants verbatim).
     pub codename: Option<String>,
-    /// What umu reported (`umu-0` or `umu-default`) — the miss itself.
+    /// What umu reported (`umu-0` or `umu-default`) for a umu launch, or the
+    /// empty string for a launch a launcher handed us with no umu id at all
+    /// (see [`Miss::is_umu_miss`]). Defaulted on read so pre-widening files
+    /// parse, and ALWAYS serialised so an older binary - which has no
+    /// default - keeps parsing files this one writes.
+    #[serde(default)]
     pub umu_id: String,
     /// Where the title came from (`heroic-config`, `detectable`,
     /// `lutris-wrapper`, `mpris-hint`, `stem`).
     pub title_source: Option<String>,
     pub confidence: Option<Confidence>,
-    /// The game executable, when identified — feeds `EXE_STRINGS`/`NOTE`.
+    /// The game executable, when identified - feeds `EXE_STRINGS`/`NOTE`.
     pub executable: Option<String>,
     pub first_seen: String,
     pub last_seen: String,
+    /// Which launcher handed us the launch (`lutris`, `heroic`), read off the
+    /// merge-key prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher: Option<String>,
+    /// The launcher's own title for the game (Lutris `GAME_NAME`, the Heroic
+    /// library title behind `HEROIC_APP_NAME` when it is known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher_name: Option<String>,
+    /// The launcher's install directory for the game (Lutris
+    /// `GAME_DIRECTORY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher_dir: Option<String>,
+    /// How the daemon learned `codename`: `lutris-config` (a
+    /// `.lutrisgame.json`) or `heroic-env` (`HEROIC_APP_NAME`). Absent when
+    /// nothing established it. A codename the SETUP TOOL fills lands on the
+    /// annotation half instead (`codename_override` +
+    /// `codename_override_source`): the annotator re-adopts this whole
+    /// resolution half from disk before every persist, so its own write
+    /// here would be flattened by its own save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename_source: Option<String>,
+    /// Which runtime the launcher ran the game under: `native` or `proton`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
     /// Result of checking this miss against the database (S9b). Absent until
     /// `gamebus-setup umu-misses --verify` runs; old stash files load fine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,7 +114,7 @@ pub struct Miss {
     /// entry (S9b `--check-prs`, best-effort).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub possible_pr: Option<String>,
-    /// Whether this game has a protonfix upstream — the database's own scope
+    /// Whether this game has a protonfix upstream - the database's own scope
     /// rule. Absent until a `--verify` run could read the fix list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<FixCheck>,
@@ -93,6 +131,13 @@ pub struct Miss {
     /// [`Miss::effective_codename`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codename_override: Option<String>,
+    /// Who supplied `codename_override` when it was a tool rather than the
+    /// user: `lutris-library` (pga.db, matched on the launcher's own name
+    /// and store). Cleared whenever the user types a codename themselves,
+    /// so a hand correction never wears a tool's provenance. Annotation-half
+    /// like the override it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename_override_source: Option<String>,
     /// The user's title correction from the setup TUI (typed via `t`, or a
     /// GOG product lookup). `title` stays the daemon's resolution; this
     /// override is annotation-half like the other overrides, so a daemon
@@ -101,16 +146,32 @@ pub struct Miss {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_override: Option<String>,
     /// Set (to the date) when the user dismissed this entry in the setup
-    /// TUI: not wrong, just not wanted — dropped from the exports and
+    /// TUI: not wrong, just not wanted - dropped from the exports and
     /// parked at the bottom of the list. Annotation-half rather than a
     /// deletion, because the daemon's merge would resurrect a deleted key
     /// (and the next launch would re-record it anyway); a flag survives
     /// both. Reversible with the same key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dismissed: Option<String>,
+
+    /// The date the user promoted this entry into the umu-database pipeline
+    /// (TUI key, annotation-half like `dismissed`). umu candidacy is opt-in:
+    /// an entry qualifies when promoted here, or when verification matched
+    /// an existing umu entry from another store (CrossStoreId), or when the
+    /// protonfix check says the game needs umu. Everything else stays a
+    /// gamedb-only identity record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub umu_promoted: Option<String>,
 }
 
 impl Miss {
+    /// Whether this entry is a umu-database miss (umu ran and reported
+    /// `umu-0`/`umu-default`) rather than a launch that never went through
+    /// umu at all. Only the former belongs in a umu-database submission.
+    pub fn is_umu_miss(&self) -> bool {
+        !self.umu_id.is_empty()
+    }
+
     /// The store every lookup and export should use: the user's correction
     /// when present, else the daemon's guess.
     pub fn effective_store(&self) -> &str {
@@ -132,6 +193,26 @@ impl Miss {
     }
 }
 
+/// What the launcher said about a launch, as far as the daemon could read
+/// it off the environment. All optional, all resolution-half: a launcher
+/// that stays quiet contributes `None`, and `None` never clears a fact an
+/// earlier launch established (see
+/// [`UmuReport::note_launch_with`](UmuReport::note_launch_with)).
+#[derive(Debug, Clone, Default)]
+pub struct LaunchFacts {
+    /// `lutris` or `heroic` - the merge-key prefix.
+    pub launcher: Option<String>,
+    /// The launcher's own title for the game.
+    pub launcher_name: Option<String>,
+    /// The launcher's install directory for the game.
+    pub launcher_dir: Option<String>,
+    /// How the codename was learned (`lutris-config`, `heroic-env`,
+    /// `lutris-library`).
+    pub codename_source: Option<String>,
+    /// `native` or `proton`.
+    pub runner: Option<String>,
+}
+
 /// What checking a miss against the database established.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verification {
@@ -139,7 +220,7 @@ pub struct Verification {
     /// The database's umu id, for the two states that found one.
     pub umu_id: Option<String>,
     pub checked: String,
-    /// Anything the check wants a human to read — notably a discarded
+    /// Anything the check wants a human to read - notably a discarded
     /// draft's collision ("umu-X already names Y").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -148,7 +229,7 @@ pub struct Verification {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationState {
-    /// store+codename found — the launcher missed, not the database.
+    /// store+codename found - the launcher missed, not the database.
     AlreadyInDatabase,
     /// The title exists under another store; the database rule shares the id
     /// only when a Steam version exists, so this is a suggestion, not fact.
@@ -165,7 +246,7 @@ pub enum VerificationState {
 /// maintainers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixCheck {
-    /// The umu id the check ran against — a later id change invalidates it.
+    /// The umu id the check ran against - a later id change invalidates it.
     pub umu_id: String,
     /// The fix files found upstream, repository-relative
     /// (`gamefixes-steam/870780.py`). Empty means: no fix, out of scope.
@@ -199,7 +280,7 @@ pub enum DraftBasis {
     /// Made-up per the standalone rule: `umu-<title-slug>`, letters
     /// guaranteed.
     TitleSlug,
-    /// Typed by the user in the setup TUI's misses pane — still
+    /// Typed by the user in the setup TUI's misses pane - still
     /// collision-checked against the database before it is accepted.
     Manual,
 }
@@ -208,9 +289,10 @@ pub enum DraftBasis {
 /// exists), loaded once, written through on change.
 ///
 /// TWO writers share the file, each owning half of every entry: the daemon
-/// writes the resolution half (title, store, codename, confidence, …), the
-/// setup tool writes the annotation half (`verification`, `drafted_id`,
-/// `possible_pr`). Every persist re-reads the file and adopts the other
+/// writes the resolution half (title, store, codename, confidence, the
+/// launcher facts, …), the setup tool writes the annotation half
+/// (`verification`, `drafted_id`, `possible_pr`, the user's `*_override`
+/// corrections). Every persist re-reads the file and adopts the other
 /// writer's half first, so a daemon launch after `--verify` keeps the
 /// verdicts and a `--verify` during a session keeps fresh misses.
 #[derive(Debug, Default)]
@@ -221,7 +303,7 @@ pub struct UmuReport {
     /// True in the setup tool: this instance owns the annotation half.
     annotator: bool,
     /// Set when the file exists but did not parse. The path is dropped in
-    /// that case so no write can ever flatten a file we failed to read —
+    /// that case so no write can ever flatten a file we failed to read -
     /// accumulated knowledge beats a working session.
     load_error: Option<String>,
 }
@@ -268,7 +350,7 @@ impl UmuReport {
         }
     }
 
-    /// Why the stash refused to load, if it did. Callers surface this —
+    /// Why the stash refused to load, if it did. Callers surface this -
     /// silently showing "no misses" over a corrupt file hides data loss.
     pub fn load_error(&self) -> Option<&str> {
         self.load_error.as_deref()
@@ -282,14 +364,38 @@ impl UmuReport {
         Some(data.join("gamebus-presenced").join("umu-misses.json"))
     }
 
-    /// A umu-miss launch was observed. Creates or refreshes the entry; the
-    /// title may arrive later via [`note_title`].
+    /// A launch worth stashing was observed. Creates or refreshes the entry;
+    /// the title may arrive later via [`note_title`].
+    ///
+    /// `umu_id` is what umu reported (`umu-0`/`umu-default`), or `""` for a
+    /// launch that never went through umu.
     pub fn note_launch(
         &mut self,
         store: &str,
         codename: Option<&str>,
         umu_id: &str,
         fallback_key: &str,
+    ) {
+        self.note_launch_with(
+            store,
+            codename,
+            umu_id,
+            fallback_key,
+            LaunchFacts::default(),
+        );
+    }
+
+    /// [`note_launch`](Self::note_launch) plus whatever the launcher said
+    /// about the game. Every fact is optional and only ever ADDS: a fact
+    /// this launch does not carry leaves an earlier launch's value standing,
+    /// so a later, thinner environment can never blank the stash.
+    pub fn note_launch_with(
+        &mut self,
+        store: &str,
+        codename: Option<&str>,
+        umu_id: &str,
+        fallback_key: &str,
+        facts: LaunchFacts,
     ) {
         let key = Self::entry_key(store, codename, fallback_key);
         let today = today();
@@ -303,16 +409,28 @@ impl UmuReport {
             executable: None,
             first_seen: today.clone(),
             last_seen: today.clone(),
+            launcher: None,
+            launcher_name: None,
+            launcher_dir: None,
+            codename_source: None,
+            runner: None,
             verification: None,
             drafted_id: None,
             possible_pr: None,
             fix: None,
             store_override: None,
             codename_override: None,
+            codename_override_source: None,
             title_override: None,
             dismissed: None,
+            umu_promoted: None,
         });
         entry.last_seen = today;
+        fill(&mut entry.launcher, facts.launcher);
+        fill(&mut entry.launcher_name, facts.launcher_name);
+        fill(&mut entry.launcher_dir, facts.launcher_dir);
+        fill(&mut entry.codename_source, facts.codename_source);
+        fill(&mut entry.runner, facts.runner);
         self.dirty = true;
         self.persist();
     }
@@ -368,7 +486,7 @@ impl UmuReport {
     }
 
     /// Mutate one entry in place (verify flow). Marks the stash dirty but
-    /// does NOT write — batch the updates, then [`save`](Self::save) once.
+    /// does NOT write - batch the updates, then [`save`](Self::save) once.
     pub fn update(&mut self, key: &str, f: impl FnOnce(&mut Miss)) {
         if let Some(m) = self.entries.get_mut(key) {
             f(m);
@@ -392,7 +510,7 @@ impl UmuReport {
         if !self.dirty {
             return;
         }
-        // The other writer may have written since we loaded — adopt its half
+        // The other writer may have written since we loaded - adopt its half
         // before flattening the map onto disk.
         self.merge_from_disk();
         let Some(path) = &self.path else { return };
@@ -416,16 +534,16 @@ impl UmuReport {
     /// The daemon owns resolutions, the setup tool owns annotations; each
     /// takes the *other* half from disk (where the other writer put it) and
     /// keeps its own from memory. Entries only the disk knows are kept
-    /// whole — nobody ever deletes a miss. This shrinks the lost-update
+    /// whole - nobody ever deletes a miss. This shrinks the lost-update
     /// window from session-long to the read-write gap; the writers are a
     /// human-run CLI and a rare launch event, which do not race in practice.
     fn merge_from_disk(&mut self) {
         let Some(path) = &self.path else { return };
         let Ok(raw) = std::fs::read_to_string(path) else {
-            return; // no file yet — nothing to adopt
+            return; // no file yet - nothing to adopt
         };
         let Ok(disk) = serde_json::from_str::<HashMap<String, Miss>>(&raw) else {
-            return; // unreadable file — memory is the best surviving copy
+            return; // unreadable file - memory is the best surviving copy
         };
         for (key, theirs) in disk {
             match self.entries.get_mut(&key) {
@@ -443,6 +561,11 @@ impl UmuReport {
                     ours.executable = theirs.executable;
                     ours.first_seen = theirs.first_seen;
                     ours.last_seen = theirs.last_seen;
+                    ours.launcher = theirs.launcher;
+                    ours.launcher_name = theirs.launcher_name;
+                    ours.launcher_dir = theirs.launcher_dir;
+                    ours.codename_source = theirs.codename_source;
+                    ours.runner = theirs.runner;
                 }
                 Some(ours) => {
                     // The setup tool may have annotated since we loaded.
@@ -452,10 +575,23 @@ impl UmuReport {
                     ours.fix = theirs.fix;
                     ours.store_override = theirs.store_override;
                     ours.codename_override = theirs.codename_override;
+                    ours.codename_override_source = theirs.codename_override_source;
                     ours.title_override = theirs.title_override;
                     ours.dismissed = theirs.dismissed;
+                    ours.umu_promoted = theirs.umu_promoted;
                 }
             }
+        }
+    }
+}
+
+/// Adopt a fact when this launch carries one. An absent or empty value
+/// leaves whatever is already there: launcher facts accumulate, they never
+/// blank out.
+fn fill(slot: &mut Option<String>, value: Option<String>) {
+    if let Some(v) = value {
+        if !v.is_empty() {
+            *slot = Some(v);
         }
     }
 }
@@ -489,10 +625,57 @@ pub fn today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Map launch evidence to a umu-database store id. `HEROIC_APP_SOURCE`
-/// speaks for Heroic launches; for the rest, the install path sometimes
-/// does. Anything unproven is `none` — the label is a guess and says so.
-pub fn guess_store(heroic_source: Option<&str>, executable: &str) -> String {
+/// Translate a launcher's own store id into the umu-database's spelling.
+///
+/// Lutris names its services in its own vocabulary (`ea_app`,
+/// `humblebundle`, `steamwindows`) where the database says `ea`, `humble`,
+/// `steam`; the spellings the two already share pass straight through.
+/// Anything that names no store - `flathub`, empty, `unknown`, a service we
+/// have never seen - is `none`, the database's own word for "standalone".
+/// Shared by the daemon's guess and the setup tool so one string never means
+/// two stores.
+pub fn normalize_store(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        // Launcher spellings that need translating.
+        "ea_app" => "ea",
+        "humblebundle" => "humble",
+        "steamwindows" => "steam",
+        // Spellings the umu-database already uses, passed through.
+        "steam" => "steam",
+        "gog" => "gog",
+        "egs" => "egs",
+        "ubisoft" => "ubisoft",
+        "zoomplatform" => "zoomplatform",
+        "humble" => "humble",
+        "itchio" => "itchio",
+        "amazon" => "amazon",
+        "battlenet" => "battlenet",
+        "ea" => "ea",
+        "umu" => "umu",
+        // `flathub` is a distribution channel, not a store; empty and
+        // `unknown` say nothing; anything else is unproven.
+        _ => "none",
+    }
+}
+
+/// Map launch evidence to a umu-database store id. An explicit store from
+/// the launcher settles it; failing that `HEROIC_APP_SOURCE` speaks for
+/// Heroic launches, and for the rest the install path sometimes does.
+/// Anything unproven is `none` - the label is a guess and says so.
+pub fn guess_store(
+    explicit: Option<&str>,
+    heroic_source: Option<&str>,
+    executable: &str,
+) -> String {
+    // A launcher that names the store outranks every sniff below. `none`
+    // is not an answer, so an unrecognised name falls through rather than
+    // shutting the guessing down.
+    if let Some(raw) = explicit {
+        let normalized = normalize_store(raw);
+        if normalized != "none" {
+            return normalized.to_string();
+        }
+    }
     match heroic_source {
         Some("epic") => return "egs".to_string(),
         Some("gog") => return "gog".to_string(),
@@ -520,7 +703,7 @@ pub struct UmuEntry {
 
 /// The upstream database, parsed and indexed (S9b). Sources, in the order
 /// the setup tool tries them: a git checkout's CSV (`--db`/`GAMEBUS_UMU_DB`),
-/// the cached API full dump, or nothing — verification then degrades to
+/// the cached API full dump, or nothing - verification then degrades to
 /// per-entry API queries. Both shapes parse here; both are real, captured
 /// samples in the tests below.
 #[derive(Debug, Default)]
@@ -532,7 +715,7 @@ pub struct UmuDb {
     by_store_codename: HashMap<(String, String), usize>,
     /// lowercased title → entry indexes (one game, many stores).
     by_title: HashMap<String, Vec<usize>>,
-    /// lowercased umu id → entry indexes — the collision index.
+    /// lowercased umu id → entry indexes - the collision index.
     by_umu_id: HashMap<String, Vec<usize>>,
 }
 
@@ -596,7 +779,7 @@ impl UmuDb {
             if i == 0 && record.first().map(String::as_str) == Some("TITLE") {
                 continue; // the header row
             }
-            // TITLE,STORE,CODENAME,UMU_ID — anything shorter is malformed
+            // TITLE,STORE,CODENAME,UMU_ID - anything shorter is malformed
             // and skipped; the zero-entries check upstream catches a file
             // that is not a CSV at all.
             if record.len() < 4 || record[0].is_empty() || record[3].is_empty() {
@@ -654,7 +837,7 @@ impl UmuDb {
             .map(|&i| &self.entries[i])
     }
 
-    /// Every entry sharing this title, case-insensitively — cross-store
+    /// Every entry sharing this title, case-insensitively - cross-store
     /// candidates.
     pub fn find_title(&self, title: &str) -> Vec<&UmuEntry> {
         self.by_title
@@ -663,7 +846,7 @@ impl UmuDb {
             .unwrap_or_default()
     }
 
-    /// Every entry holding this umu id — the collision check.
+    /// Every entry holding this umu id - the collision check.
     pub fn find_umu_id(&self, umu_id: &str) -> Vec<&UmuEntry> {
         self.by_umu_id
             .get(&umu_id.to_lowercase())
@@ -672,7 +855,7 @@ impl UmuDb {
     }
 
     /// Candidates for a human pick: case-insensitive substring match in both
-    /// directions — a database title containing the query ("Control" finds
+    /// directions - a database title containing the query ("Control" finds
     /// "Control Ultimate Edition") or the query containing a database title
     /// (a decorated launcher title finds the plain row). Ranked exact match,
     /// then database-title-starts-with-query, then the rest; capped at 20.
@@ -715,7 +898,7 @@ impl UmuDb {
 }
 
 /// Split CSV text into records, honouring quoted fields (embedded commas,
-/// doubled-quote escapes, embedded newlines) — the repo file uses all of
+/// doubled-quote escapes, embedded newlines) - the repo file uses all of
 /// these except the last.
 fn csv_records(raw: &str) -> Vec<Vec<String>> {
     let mut records = Vec::new();
@@ -766,10 +949,10 @@ fn csv_records(raw: &str) -> Vec<Vec<String>> {
 pub enum DraftOutcome {
     /// A fresh id, absent from the database at check time.
     Drafted { id: String, basis: DraftBasis },
-    /// The id already names this very title in the database — no draft
+    /// The id already names this very title in the database - no draft
     /// needed, that IS the id to submit (the cross-store sharing rule).
     ExistingId { id: String },
-    /// The id already names a *different* game — the draft is discarded and
+    /// The id already names a *different* game - the draft is discarded and
     /// the conflict is for the NOTE column, not the id one.
     Collision { id: String, existing_title: String },
     /// Nothing safe to draft from: no Steam sku, no lettered codename, and
@@ -780,7 +963,7 @@ pub enum DraftOutcome {
 /// Draft a umu id per the database's own rules, then collision-check it.
 ///
 /// The ladder, strongest basis first:
-/// 1. A Steam sku for the title (from detectable.json) → `umu-<appid>` —
+/// 1. A Steam sku for the title (from detectable.json) → `umu-<appid>` -
 ///    the id the database itself would assign.
 /// 2. A codename that doubles as a store product id AND contains a letter →
 ///    `umu-<codename>`. The letter is load-bearing: Proton parses a numeric
@@ -837,7 +1020,7 @@ fn codename_is_store_id(code: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Lowercased alphanumerics of the title — the database's made-up-id style.
+/// Lowercased alphanumerics of the title - the database's made-up-id style.
 fn slugify(title: &str) -> String {
     title
         .chars()
@@ -931,16 +1114,68 @@ mod tests {
 
     #[test]
     fn store_guessing_is_conservative() {
-        assert_eq!(guess_store(Some("epic"), ""), "egs");
-        assert_eq!(guess_store(Some("gog"), ""), "gog");
+        assert_eq!(guess_store(None, Some("epic"), ""), "egs");
+        assert_eq!(guess_store(None, Some("gog"), ""), "gog");
         assert_eq!(
             guess_store(
+                None,
                 None,
                 "/games/ubisoft/drive_c/Program Files (x86)/Ubisoft/x.exe"
             ),
             "ubisoft"
         );
-        assert_eq!(guess_store(None, "/games/somewhere/game.exe"), "none");
+        assert_eq!(guess_store(None, None, "/games/somewhere/game.exe"), "none");
+    }
+
+    #[test]
+    fn an_explicit_launcher_store_outranks_every_sniff() {
+        // Lutris' own spelling, translated, beating a contradicting path.
+        assert_eq!(
+            guess_store(Some("ea_app"), None, "/games/ubisoft/x.exe"),
+            "ea"
+        );
+        assert_eq!(guess_store(Some("humblebundle"), None, ""), "humble");
+        // A store string that names nothing falls through to the old
+        // evidence rather than shutting the guessing down.
+        assert_eq!(guess_store(Some("flathub"), Some("epic"), ""), "egs");
+        assert_eq!(guess_store(Some(""), Some("gog"), ""), "gog");
+        assert_eq!(
+            guess_store(Some("unknown"), None, "/games/ubisoft/x.exe"),
+            "ubisoft"
+        );
+    }
+
+    #[test]
+    fn store_names_normalise_to_the_databases_spelling() {
+        for (raw, want) in [
+            // Launcher spellings that need translating.
+            ("ea_app", "ea"),
+            ("humblebundle", "humble"),
+            ("steamwindows", "steam"),
+            // Spellings the database already uses, passed through.
+            ("steam", "steam"),
+            ("gog", "gog"),
+            ("egs", "egs"),
+            ("ubisoft", "ubisoft"),
+            ("zoomplatform", "zoomplatform"),
+            ("humble", "humble"),
+            ("itchio", "itchio"),
+            ("amazon", "amazon"),
+            ("battlenet", "battlenet"),
+            ("ea", "ea"),
+            ("umu", "umu"),
+            // Nothing a store: a channel, silence, an admission, a stranger.
+            ("flathub", "none"),
+            ("", "none"),
+            ("unknown", "none"),
+            ("none", "none"),
+            ("some-new-launcher", "none"),
+            // Case and stray whitespace never change the answer.
+            ("EA_App", "ea"),
+            ("  SteamWindows  ", "steam"),
+        ] {
+            assert_eq!(normalize_store(raw), want, "normalize_store({raw:?})");
+        }
     }
 
     #[test]
@@ -1002,8 +1237,21 @@ mod tests {
         setup.save();
 
         // The game launches again: the daemon persists from its PRE-verify
-        // copy. The annotations must survive.
-        daemon.note_launch("egs", Some("Calluna"), "umu-0", "heroic:Calluna");
+        // copy, this time with the launcher facts it could read. The
+        // annotations must survive.
+        daemon.note_launch_with(
+            "egs",
+            Some("Calluna"),
+            "umu-0",
+            "heroic:Calluna",
+            LaunchFacts {
+                launcher: Some("heroic".into()),
+                launcher_name: Some("Control".into()),
+                launcher_dir: Some("/games/Control".into()),
+                codename_source: Some("heroic-env".into()),
+                runner: Some("proton".into()),
+            },
+        );
         // And the daemon records a brand-new miss the setup tool never saw.
         daemon.note_launch("gog", Some("1207600000"), "umu-0", "heroic:1207600000");
 
@@ -1038,6 +1286,125 @@ mod tests {
             disk.contains_key("gog:1207600000"),
             "setup save erased the daemon's new miss"
         );
+        // The launcher facts are resolution-half: the annotator's save
+        // adopted them from disk instead of writing its stale Nones back.
+        assert_eq!(calluna.launcher.as_deref(), Some("heroic"));
+        assert_eq!(calluna.launcher_name.as_deref(), Some("Control"));
+        assert_eq!(calluna.launcher_dir.as_deref(), Some("/games/Control"));
+        assert_eq!(calluna.codename_source.as_deref(), Some("heroic-env"));
+        assert_eq!(calluna.runner.as_deref(), Some("proton"));
+    }
+
+    #[test]
+    fn launcher_facts_are_set_once_and_never_blanked() {
+        let mut r = report();
+        r.note_launch_with(
+            "none",
+            None,
+            "",
+            "lutris:1234",
+            LaunchFacts {
+                launcher: Some("lutris".into()),
+                launcher_name: Some("Amnesia: The Bunker".into()),
+                launcher_dir: Some("/games/amnesia".into()),
+                codename_source: Some("lutris-config".into()),
+                runner: Some("proton".into()),
+            },
+        );
+        let e = r.entries.get("lutris:1234").expect("entry exists");
+        assert_eq!(e.launcher.as_deref(), Some("lutris"));
+        assert_eq!(e.launcher_name.as_deref(), Some("Amnesia: The Bunker"));
+        assert_eq!(e.launcher_dir.as_deref(), Some("/games/amnesia"));
+        assert_eq!(e.codename_source.as_deref(), Some("lutris-config"));
+        assert_eq!(e.runner.as_deref(), Some("proton"));
+        let first_seen = e.first_seen.clone();
+
+        // A later, quieter launch (and the plain note_launch, which carries
+        // no facts at all) must not blank a single one of them.
+        r.note_launch_with(
+            "none",
+            None,
+            "",
+            "lutris:1234",
+            LaunchFacts {
+                launcher_name: Some(String::new()),
+                runner: Some("native".into()),
+                ..LaunchFacts::default()
+            },
+        );
+        r.note_launch("none", None, "", "lutris:1234");
+        let e = r.entries.get("lutris:1234").unwrap();
+        assert_eq!(e.launcher.as_deref(), Some("lutris"));
+        assert_eq!(
+            e.launcher_name.as_deref(),
+            Some("Amnesia: The Bunker"),
+            "an empty fact blanked one that was already known"
+        );
+        assert_eq!(e.launcher_dir.as_deref(), Some("/games/amnesia"));
+        assert_eq!(e.codename_source.as_deref(), Some("lutris-config"));
+        // A fact that DID arrive refreshes: the game runs native now.
+        assert_eq!(e.runner.as_deref(), Some("native"));
+        assert_eq!(e.first_seen, first_seen);
+    }
+
+    #[test]
+    fn a_promotion_survives_the_daemons_next_persist() {
+        let stash = TempStash::new("promotion");
+        let mut daemon = UmuReport::from_path(stash.0.clone());
+        daemon.note_launch("itchio", Some("926077"), "", "lutris:danger-scavenger");
+
+        let mut setup = UmuReport {
+            annotator: true,
+            ..UmuReport::from_path(stash.0.clone())
+        };
+        setup.update("itchio:926077", |m| {
+            m.umu_promoted = Some("2026-08-24".into());
+        });
+        setup.save();
+
+        // The daemon persists from its pre-promotion copy: the merge must
+        // adopt the flag like every other annotation.
+        daemon.note_launch("itchio", Some("926077"), "", "lutris:danger-scavenger");
+        let fresh = UmuReport::from_path(stash.0.clone());
+        assert_eq!(
+            fresh.entries()["itchio:926077"].umu_promoted.as_deref(),
+            Some("2026-08-24"),
+            "the promotion flag must survive the daemon's write"
+        );
+    }
+
+    #[test]
+    fn a_launch_without_a_umu_id_is_stashed_but_is_not_a_umu_miss() {
+        // The widened shape: a launcher handed us a launch umu never saw.
+        let raw = r#"{"lutris:1234":{"title":"Amnesia: The Bunker","store":"none",
+            "codename":null,"umu_id":"","title_source":"lutris-wrapper",
+            "confidence":"medium","executable":null,
+            "first_seen":"2026-08-23","last_seen":"2026-08-23",
+            "launcher":"lutris","runner":"native"},
+            "egs:Calluna":{"title":"Control","store":"egs","codename":"Calluna",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "executable":null,"first_seen":"2026-08-06","last_seen":"2026-08-06"}}"#;
+        let entries: HashMap<String, Miss> = serde_json::from_str(raw).unwrap();
+        assert!(!entries["lutris:1234"].is_umu_miss());
+        assert!(entries["egs:Calluna"].is_umu_miss());
+        // `lutris-wrapper` is a title source like any other - nothing rejects
+        // it on the way in or back out.
+        assert_eq!(
+            entries["lutris:1234"].title_source.as_deref(),
+            Some("lutris-wrapper")
+        );
+
+        // Round-trip: the empty umu id is ALWAYS written, so a binary from
+        // before the widening (which has no default for the field) can still
+        // parse what this one wrote.
+        let json = serde_json::to_string(&entries).unwrap();
+        assert!(json.contains(r#""umu_id":"""#), "{json}");
+        let back: HashMap<String, Miss> = serde_json::from_str(&json).unwrap();
+        assert!(!back["lutris:1234"].is_umu_miss());
+        assert_eq!(back["lutris:1234"].launcher.as_deref(), Some("lutris"));
+        assert_eq!(back["lutris:1234"].runner.as_deref(), Some("native"));
+        // Facts nobody established stay out of the file entirely.
+        assert!(!json.contains("launcher_dir"), "{json}");
     }
 
     #[test]
@@ -1063,7 +1430,7 @@ mod tests {
     #[test]
     fn a_pre_s9b_stash_still_loads() {
         // Captured from a stash written before the verification fields
-        // existed — must deserialize with the new fields defaulting to None.
+        // existed - must deserialize with the new fields defaulting to None.
         let old = r#"{"egs:Calluna":{"title":"Control","store":"egs",
             "codename":"Calluna","umu_id":"umu-0","title_source":"heroic-config",
             "confidence":"high","executable":"Control_DX12.exe",
@@ -1076,12 +1443,19 @@ mod tests {
         assert!(m.possible_pr.is_none());
         assert!(m.codename_override.is_none());
         assert!(m.title_override.is_none());
+        // …and the launcher facts, added when the stash widened past umu.
+        assert!(m.launcher.is_none());
+        assert!(m.launcher_name.is_none());
+        assert!(m.launcher_dir.is_none());
+        assert!(m.codename_source.is_none());
+        assert!(m.runner.is_none());
+        assert!(m.is_umu_miss(), "a umu-0 entry is still a umu miss");
         // Without overrides the effective values are the daemon's own.
         assert_eq!(m.effective_codename(), Some("Calluna"));
         assert_eq!(m.effective_title(), Some("Control"));
     }
 
-    // ---- UmuDb parsing (S9b) — every sample below is captured, not made up.
+    // ---- UmuDb parsing (S9b) - every sample below is captured, not made up.
 
     /// Real rows from umu-database.csv: header, plain rows, a quoted NOTE
     /// with commas, and a quoted TITLE with a comma.
@@ -1138,7 +1512,7 @@ mod tests {
     #[test]
     fn none_codenames_never_hit() {
         let db = UmuDb::parse(REAL_CSV).unwrap();
-        // Standalone rows all share store/codename "none" — a lookup with
+        // Standalone rows all share store/codename "none" - a lookup with
         // those must not "find" Dark and Darker.
         assert!(db.find_store_codename("none", "none").is_none());
         assert!(db.find_store_codename("egs", "").is_none());
@@ -1178,7 +1552,7 @@ mod tests {
             .search_title("ultimate")
             .iter()
             .any(|e| e.title == "Control Ultimate Edition"));
-        // Database title inside the query — a decorated launcher title still
+        // Database title inside the query - a decorated launcher title still
         // finds the plain row.
         assert!(db
             .search_title("Control Ultimate Edition GOTY")
@@ -1260,7 +1634,7 @@ mod tests {
     #[test]
     fn numeric_codenames_fall_through_to_the_slug() {
         // A GOG-style pure-numeric codename would be parsed as a SteamAppId
-        // by Proton — it must never become the id.
+        // by Proton - it must never become the id.
         let db = UmuDb::parse(REAL_CSV).unwrap();
         assert_eq!(
             draft_umu_id(&db, "Jazzpunk!", Some("1207658883999"), None),
@@ -1282,7 +1656,7 @@ mod tests {
     fn a_collision_with_the_same_title_is_the_cross_store_id() {
         let db = UmuDb::parse(REAL_CSV).unwrap();
         // Borderlands 3 from another store, appid 397540: the id exists AND
-        // names the same game — use it, do not re-draft.
+        // names the same game - use it, do not re-draft.
         assert_eq!(
             draft_umu_id(&db, "Borderlands 3", Some("SomeCode"), Some("397540")),
             DraftOutcome::ExistingId {

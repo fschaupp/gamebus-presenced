@@ -1,0 +1,10 @@
+title = "Danger Scavenger"
+gamedb = "itchio-926077"
+note = "Identified from Lutris: service=itchio, appid=926077."
+
+[[stores.itchio]]
+codename = "926077"
+exe = "Danger_Scavenger.x86_64"
+seen = "2026-08-23"
+source = "lutris"
+confidence = "high"

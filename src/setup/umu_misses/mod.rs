@@ -1,22 +1,30 @@
-//! S9b — review, verify, draft, and export the umu-database miss stash.
+//! S9b - review, verify, draft, and export the umu-database miss stash.
+//!
+//! The stash holds every identity miss the daemon recorded - umu launches
+//! that reported `GAMEID=umu-0`, and launcher launches (Lutris, Heroic)
+//! that carried no umu id at all. All of them feed gamebus-gamedb; this
+//! module runs the umu-database half of the pipeline, which takes only
+//! [`umu_candidate`] entries: umu participation is opt-in per entry
+//! (owner policy 2026-08-24), suggestion and promotion, never automatic
+//! enrollment.
 //!
 //! The daemon (network-free, always) writes the stash's resolution half;
 //! this module writes the annotation half (verification, drafted ids, PR
-//! marks — merged, never clobbered: see `UmuReport`) and talks to the world
+//! marks - merged, never clobbered: see `UmuReport`) and talks to the world
 //! on the user's explicit command:
 //!
 //! - default: the review list.
-//! - `--verify`: check every miss against the database — local copy first
+//! - `--verify`: check every miss against the database - local copy first
 //!   (`--db`, `GAMEBUS_UMU_DB`, or the cached full dump), then the public
 //!   API for whatever the local copy did not settle. Entries confirmed
 //!   missing get a umu id drafted per the database's own rules, and every
-//!   draft is collision-checked — no exceptions. Each entry is also checked
+//!   draft is collision-checked - no exceptions. Each entry is also checked
 //!   against the protonfix list: the database collects games that need a fix
 //!   in Proton, so a game that runs out of the box is not a gap to submit.
 //! - `--fetch`: refresh the cached full dump and the protonfix list. One
 //!   request each, only when asked.
-//! - `--export`: submission-shaped CSV on stdout — the games that need umu.
-//! - `--export-md [file]`: a slim, ready-to-paste merge-request text —
+//! - `--export`: submission-shaped CSV on stdout - the games that need umu.
+//! - `--export-md [file]`: a slim, ready-to-paste merge-request text -
 //!   written to the file, or to stdout when none is given.
 //! - `--check-prs`: best-effort scan of open upstream merge requests for
 //!   entries someone already submitted. Opt-in, non-fatal, clearly labelled.
@@ -39,14 +47,71 @@ pub use self::online::{EgsBuild, EgsOffer, GogProduct};
 pub use self::tui::PickCandidate;
 pub(crate) use self::tui::{
     tui_assign_id, tui_cycle_store, tui_fetch_and_verify, tui_pick_candidates, tui_pick_entry,
-    tui_set_identity, tui_set_title, tui_toggle_dismiss,
+    tui_set_identity, tui_set_title, tui_toggle_dismiss, tui_toggle_promote,
 };
 
 use self::export::{export_csv, export_markdown};
 use self::verify::{check_open_prs, fetch_full_dump, verify};
 
+/// Whether an entry participates in the umu-database pipeline at all.
+///
+/// Owner policy (2026-08-24): gamedb is ALWAYS active - every identity
+/// record shows there by default - but umu-database participation is
+/// OPT-IN per entry. An entry is a umu candidate only when it actually
+/// went through umu ([`Miss::is_umu_miss`]) AND at least one of:
+///
+/// - the user promoted it in the TUI (`u`; `umu_promoted` carries the date),
+/// - verification found the game already active in the umu database under
+///   another store ([`VerificationState::CrossStoreId`] - the id exists,
+///   this store's copy is the gap), or
+/// - the fix check found a protonfix, i.e. the game needs umu's help.
+///
+/// Suggestion and promotion, never automatic enrollment: everything else
+/// stays a gamedb-only identity record, and drafting, `export::partition`,
+/// both exporters, and `--check-prs` hold it back.
+pub(crate) fn umu_candidate(m: &Miss) -> bool {
+    m.is_umu_miss()
+        && (m.umu_promoted.is_some()
+            || m.verification
+                .as_ref()
+                .is_some_and(|v| v.state == VerificationState::CrossStoreId)
+            || m.fix.as_ref().is_some_and(|f| f.has_fix()))
+}
+
+/// One line on where an entry stands with the umu-database pipeline.
+/// Shared by the CLI list and the TUI's misses detail pane.
+pub(crate) fn candidacy_line(m: &Miss) -> String {
+    if !m.is_umu_miss() {
+        return "launcher launch - no umu id; a gamedb identity record, not a umu-database gap"
+            .into();
+    }
+    if let Some(date) = &m.umu_promoted {
+        return format!("umu candidate: promoted by you {date} (u in the TUI reverts)");
+    }
+    if m.verification
+        .as_ref()
+        .is_some_and(|v| v.state == VerificationState::AlreadyInDatabase)
+    {
+        return "already in the umu database - the launcher missed, not the database".into();
+    }
+    if let Some(v) = m
+        .verification
+        .as_ref()
+        .filter(|v| v.state == VerificationState::CrossStoreId)
+    {
+        return format!(
+            "umu candidate, suggested: in the umu database via another store as {}",
+            v.umu_id.as_deref().unwrap_or("?")
+        );
+    }
+    if m.fix.as_ref().is_some_and(|f| f.has_fix()) {
+        return "umu candidate, suggested: a protonfix exists - the game needs umu".into();
+    }
+    "not a umu candidate - no protonfix and no cross-store match (u in the TUI promotes)".into()
+}
+
 /// The endpoints, from endpoints.toml (user config over installed copy over
-/// bundled defaults) — loaded once per process.
+/// bundled defaults) - loaded once per process.
 fn endpoints() -> &'static Endpoints {
     static CACHE: std::sync::OnceLock<Endpoints> = std::sync::OnceLock::new();
     CACHE.get_or_init(Endpoints::load)
@@ -76,7 +141,7 @@ pub fn run(args: &[String]) -> ExitCode {
             }
         }
         // The second half of "what does upstream know": which games need a
-        // fix at all. Non-fatal — verification degrades to an unchecked
+        // fix at all. Non-fatal - verification degrades to an unchecked
         // scope, and the database copy is still worth having.
         match fixes::fetch(&endpoints().umu_protonfixes_tree) {
             Ok((_, n)) => println!("Fetched the protonfix list: {n} games need umu."),
@@ -86,7 +151,7 @@ pub fn run(args: &[String]) -> ExitCode {
 
     let mut report = UmuReport::load_for_annotations();
     if let Some(e) = report.load_error() {
-        // Never show "no misses" over a file that failed to parse — that
+        // Never show "no misses" over a file that failed to parse - that
         // reads as data loss. Nothing writes to it either (the report
         // refuses), so the user can repair or move it.
         eprintln!("{e}");
@@ -99,9 +164,11 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     if report.entries().is_empty() {
         if !opts.fetch {
-            println!("No umu-database misses recorded yet.");
+            println!("No identity misses recorded yet.");
             println!(
-                "({} — written by the daemon when a game launches with GAMEID=umu-0.)",
+                "({} - written by the daemon when umu launches a game unrecognised \
+                 (GAMEID=umu-0), and when Lutris or Heroic hand it a launch without \
+                 a store identity.)",
                 report.path().expect("checked above").display()
             );
         }
@@ -162,7 +229,7 @@ struct Opts {
 }
 
 impl Opts {
-    /// No flags at all — the TUI flows use the same database resolution as
+    /// No flags at all - the TUI flows use the same database resolution as
     /// a bare CLI invocation (env override, then the fetch cache).
     fn none() -> Self {
         Self {
@@ -227,23 +294,25 @@ fn load_db(opts: &Opts) -> Result<Option<UmuDb>, String> {
     match UmuDb::load_from(&cache) {
         Ok(db) => Ok(Some(db)),
         Err(e) => {
-            eprintln!("Ignoring the cached database ({e}) — re-run with --fetch to refresh it.");
+            eprintln!("Ignoring the cached database ({e}) - re-run with --fetch to refresh it.");
             Ok(None)
         }
     }
 }
 
-/// The default review list.
+/// The default review list: every identity miss, umu or not. Non-umu
+/// entries (launcher launches) show `-` for the id and their launcher-launch
+/// tag; umu misses show where they stand with the candidacy policy.
 fn list(report: &UmuReport) {
     println!(
-        "umu-database misses collected by the daemon ({}):",
+        "Identity misses collected by the daemon ({}):",
         report.path().expect("caller checked").display()
     );
     println!();
     let mut rows: Vec<&Miss> = report.entries().values().collect();
     rows.sort_by(|a, b| a.last_seen.cmp(&b.last_seen).reverse());
     for m in rows {
-        // An overridden title is the user's word, not the resolver's — the
+        // An overridden title is the user's word, not the resolver's - the
         // bracket must not claim a source/confidence for it.
         let provenance = if m.title_override.is_some() {
             "set by you".to_string()
@@ -262,12 +331,17 @@ fn list(report: &UmuReport) {
             m.effective_title().unwrap_or("(unresolved)"),
             m.store,
             m.codename.as_deref().unwrap_or("-"),
-            m.umu_id,
+            // A launcher launch never carried a umu id: `-`, never "".
+            if m.is_umu_miss() {
+                m.umu_id.as_str()
+            } else {
+                "-"
+            },
             m.last_seen,
         );
         let status = match (&m.verification, &m.drafted_id) {
             (Some(v), Some(d)) if v.state == VerificationState::ConfirmedMissing => Some(format!(
-                "confirmed missing {} — drafted {} ({})",
+                "confirmed missing {} - drafted {} ({})",
                 v.checked,
                 d.id,
                 basis_label(d.basis)
@@ -284,7 +358,7 @@ fn list(report: &UmuReport) {
                     v.checked
                 ),
                 VerificationState::ConfirmedMissing => {
-                    format!("confirmed missing {} — no id drafted yet", v.checked)
+                    format!("confirmed missing {} - no id drafted yet", v.checked)
                 }
             }),
             (None, _) => None,
@@ -295,20 +369,24 @@ fn list(report: &UmuReport) {
         if let Some(scope) = scope_line(m) {
             println!("  {:<28} {scope}", "");
         }
+        println!("  {:<28} {}", "", candidacy_line(m));
         if let Some(pr) = &m.possible_pr {
             println!("  {:<28} possibly already submitted: {pr}", "");
         }
         if let Some(when) = &m.dismissed {
             println!(
-                "  {:<28} dismissed {when} — excluded from exports (d in the TUI restores)",
+                "  {:<28} dismissed {when} - excluded from exports (d in the TUI restores)",
                 ""
             );
         }
     }
     println!();
+    println!(
+        "Launches Lutris or Heroic handed over without a store identity land here too;\nthey feed gamebus-gamedb and are never submitted to the umu database."
+    );
     println!("Verify against the database:  gamebus-setup umu-misses --verify   (--fetch first for a local copy)");
     println!(
-        "Export a submission draft:    gamebus-setup umu-misses --export | --export-md [file]\n                              (both print to stdout; --export-md writes to the file when given one)"
+        "Export a submission draft:    gamebus-setup umu-misses --export | --export-md [file]\n                              (umu candidates only; both print to stdout, --export-md writes to the file when given one)"
     );
 }
 
@@ -336,14 +414,14 @@ pub(crate) fn scope_line(m: &Miss) -> Option<String> {
             } else {
                 format!(" +{}", rest.len())
             };
-            format!("needs umu: protonfix {first}{more} — worth submitting")
+            format!("needs umu: protonfix {first}{more} - worth submitting")
         }
         None if id_is_firm(m) => format!(
-            "no protonfix for {} — runs out of the box, and the database only wants games that need a fix",
+            "no protonfix for {} - runs out of the box, and the database only wants games that need a fix",
             scope.umu_id
         ),
         None => format!(
-            "no protonfix for {} — but that id is our own guess, so nothing here shows the game needs umu either",
+            "no protonfix for {} - but that id is our own guess, so nothing here shows the game needs umu either",
             scope.umu_id
         ),
     })
@@ -351,7 +429,7 @@ pub(crate) fn scope_line(m: &Miss) -> Option<String> {
 
 /// Whether the id the scope check ran against is the game's real one: the
 /// database's own, or a Steam appid from detectable.json. A codename or slug
-/// draft is a guess — a fix could exist under the Steam appid we never
+/// draft is a guess - a fix could exist under the Steam appid we never
 /// learned, so "no fix found" must not be read as "runs out of the box".
 pub(super) fn id_is_firm(m: &Miss) -> bool {
     if m.verification
@@ -398,7 +476,7 @@ fn urlencode(s: &str) -> String {
 }
 
 #[cfg(test)]
-/// Fixture database for the pick flow — the shapes the search hands the
+/// Fixture database for the pick flow - the shapes the search hands the
 /// TUI as candidates.
 fn pick_db() -> UmuDb {
     UmuDb::parse(concat!(
@@ -425,4 +503,102 @@ fn pick_report(store: &str, codename: &str) -> (UmuReport, String) {
         None,
     );
     (report, key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::umu_report::{FixCheck, Verification};
+
+    fn miss(umu_id: &str) -> Miss {
+        let (report, key) = pick_report("egs", "Catnip");
+        let mut m = report.entries()[&key].clone();
+        m.umu_id = umu_id.to_string();
+        m
+    }
+
+    fn verified(state: VerificationState) -> Option<Verification> {
+        Some(Verification {
+            state,
+            umu_id: Some("umu-397540".into()),
+            checked: "2026-08-24".into(),
+            note: None,
+        })
+    }
+
+    fn fix_check(fixes: &[&str]) -> Option<FixCheck> {
+        Some(FixCheck {
+            umu_id: "umu-397540".into(),
+            fixes: fixes.iter().map(|s| s.to_string()).collect(),
+            checked: "2026-08-24".into(),
+        })
+    }
+
+    /// The owner policy's truth table: opt-in via promotion, or one of the
+    /// two suggestions - never membership by default, and never for a
+    /// launch that did not go through umu.
+    #[test]
+    fn umu_candidacy_is_opt_in() {
+        // A plain umu miss: recorded, but not a candidate.
+        assert!(!umu_candidate(&miss("umu-0")));
+
+        // Promoted by the user: a candidate whatever else is known.
+        let mut m = miss("umu-0");
+        m.umu_promoted = Some("2026-08-24".into());
+        assert!(umu_candidate(&m));
+
+        // The game is already active in the database via another store.
+        let mut m = miss("umu-0");
+        m.verification = verified(VerificationState::CrossStoreId);
+        assert!(umu_candidate(&m));
+
+        // Found under its own store: the launcher missed, not the database.
+        let mut m = miss("umu-0");
+        m.verification = verified(VerificationState::AlreadyInDatabase);
+        assert!(!umu_candidate(&m));
+
+        // A protonfix exists: the game needs umu.
+        let mut m = miss("umu-0");
+        m.fix = fix_check(&["gamefixes-steam/397540.py"]);
+        assert!(umu_candidate(&m));
+
+        // A fix check that found nothing is no suggestion.
+        let mut m = miss("umu-0");
+        m.fix = fix_check(&[]);
+        assert!(!umu_candidate(&m));
+
+        // A launcher launch never qualifies, whatever its annotations say.
+        let mut m = miss("");
+        m.umu_promoted = Some("2026-08-24".into());
+        m.verification = verified(VerificationState::CrossStoreId);
+        m.fix = fix_check(&["gamefixes-steam/397540.py"]);
+        assert!(!umu_candidate(&m));
+    }
+
+    #[test]
+    fn the_candidacy_line_names_each_state() {
+        assert!(candidacy_line(&miss("")).contains("launcher launch"));
+        assert!(candidacy_line(&miss("umu-0")).contains("not a umu candidate"));
+        assert!(candidacy_line(&miss("umu-0")).contains("u in the TUI promotes"));
+
+        let mut m = miss("umu-0");
+        m.umu_promoted = Some("2026-08-24".into());
+        assert!(candidacy_line(&m).contains("promoted by you 2026-08-24"));
+
+        let mut m = miss("umu-0");
+        m.verification = verified(VerificationState::CrossStoreId);
+        let line = candidacy_line(&m);
+        assert!(
+            line.contains("suggested") && line.contains("umu-397540"),
+            "{line}"
+        );
+
+        let mut m = miss("umu-0");
+        m.fix = fix_check(&["gamefixes-steam/397540.py"]);
+        let line = candidacy_line(&m);
+        assert!(
+            line.contains("suggested") && line.contains("protonfix"),
+            "{line}"
+        );
+    }
 }

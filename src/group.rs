@@ -3,13 +3,13 @@
 //!
 //! Every GameMode-sourced pid that probes to a merge key (`steam:<appid>`,
 //! `lutris:<uuid>`, `umu:<id>`) becomes a **member** of that key's group. One
-//! member — the **representative** — is forwarded to the correlator and
+//! member - the **representative** - is forwarded to the correlator and
 //! published as `pid_<rep>`; everyone else is absorbed silently, so wrapper
 //! and helper churn never reaches the bus (R1).
 //!
 //! Core rules (spec §1):
 //! - The first member becomes rep regardless of class; only a strictly
-//!   higher-class member dethrones a live rep (R2). Depth never dethrones —
+//!   higher-class member dethrones a live rep (R2). Depth never dethrones -
 //!   it is a tie-breaker during election only.
 //! - Rep loss is **deferred**: while any member holds evidence the record is
 //!   held under the existing id ([`GameGroup::member_gone`] returns
@@ -21,7 +21,7 @@
 //!   only, never cleared. An unidentified member can never rename an
 //!   identified record.
 //!
-//! Like the correlator, this module is pure state + functions — zero `/proc`
+//! Like the correlator, this module is pure state + functions - zero `/proc`
 //! I/O, no D-Bus (R7). Liveness is a fact recorded on [`Member`] by the
 //! enricher's reconcile pass, not something this module discovers.
 
@@ -43,7 +43,7 @@ pub enum MemberClass {
     /// `identify_wrapper` resolved the group identity through this pid.
     IdentifiedWrapper,
     /// `identify_process` hit, or exe under `/steamapps/` with a resolvable
-    /// Steam appid — the real game process.
+    /// Steam appid - the real game process.
     GameProcess,
 }
 
@@ -74,7 +74,7 @@ pub struct Member {
     pub class: MemberClass,
     /// Process-tree depth below the shallowest known ancestor.
     pub depth: usize,
-    /// `/proc/<pid>/stat` start time at insert — the pid-reuse guard.
+    /// `/proc/<pid>/stat` start time at insert - the pid-reuse guard.
     pub start_time: Option<u64>,
     /// `/proc/<pid>` existed (with the key intact) at the last refresh.
     pub alive: bool,
@@ -82,7 +82,7 @@ pub struct Member {
 
 impl Member {
     /// Active evidence per spec §1.2: a gamemode registration, or scan
-    /// evidence with the process still alive (and still carrying the key —
+    /// evidence with the process still alive (and still carrying the key -
     /// the enricher's liveness refresh folds that into `alive`).
     fn evidenced(&self) -> bool {
         self.gamemode || (self.scan && self.alive)
@@ -97,7 +97,7 @@ pub struct GameGroup {
     /// The pid whose `pid_<rep>` id is on the bus. 0 until the first upsert.
     pub rep: u32,
     pub identity: Option<Identity>,
-    /// Group creation time — `Since` never jumps across migrations.
+    /// Group creation time - `Since` never jumps across migrations.
     pub since: i64,
     pub steam_appid: Option<String>,
 }
@@ -132,7 +132,7 @@ impl GameGroup {
     /// Insert or refresh a member (spec §1.1).
     ///
     /// The first member becomes rep regardless of class. A later member
-    /// dethrones only with a **strictly greater** class — equal or lower is
+    /// dethrones only with a **strictly greater** class - equal or lower is
     /// absorbed; depth never dethrones a live rep. `rep_pinned` is the
     /// Discord exception (spec §1.2): a rep carrying a joined Discord
     /// partial is displaced by rep death only, never by class.
@@ -170,7 +170,7 @@ impl GameGroup {
     ///
     /// Non-rep members were never on the bus: bookkeeping only. For the rep,
     /// the gamemode flag is cleared and the record is **held** under the
-    /// existing id while any member still carries evidence — this returns
+    /// existing id while any member still carries evidence - this returns
     /// [`GroupEffect::Absorb`], never `Migrate` (the tick sweep elects a
     /// successor later). Only when the last evidence is gone does it return
     /// [`GroupEffect::RemoveAll`].
@@ -197,7 +197,7 @@ impl GameGroup {
     }
 
     /// Elect the best successor rep (spec §1.2): among `alive && evidenced`
-    /// members, highest class first; ties by depth — deepest within
+    /// members, highest class first; ties by depth - deepest within
     /// GameProcess (the game sits at the bottom of the wrapper tree),
     /// shallowest otherwise (longest-lived wrapper); final tie lowest pid.
     pub fn elect(&self) -> Option<u32> {
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn equal_class_never_displaces_live_rep() {
         // Hysteresis (Brotato helpers): srt-bwrap arriving after reaper is
-        // the same class — absorb, no churn. Same for equal wrappers.
+        // the same class - absorb, no churn. Same for equal wrappers.
         let mut g = GameGroup::new("steam:1942280", 1_700_000_000);
         g.upsert(698374, member(MemberClass::Helper, 0), false);
         assert_eq!(
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn rep_death_holds_record_while_evidence_survives() {
         // Exit-cascade guard: member_gone returns Absorb (hold the record),
-        // never Migrate — migration is the tick sweep's job.
+        // never Migrate - migration is the tick sweep's job.
         let mut g = GameGroup::new("steam:1942280", 0);
         g.upsert(10, member(MemberClass::Helper, 0), false);
         g.upsert(11, member(MemberClass::Helper, 1), false);
@@ -365,7 +365,7 @@ mod tests {
         g.upsert(40, member(MemberClass::Helper, 0), false);
         g.upsert(41, member(MemberClass::Helper, 2), false);
         assert_eq!(g.member_gone(40), GroupEffect::Absorb);
-        // Last evidence goes with the non-rep survivor (bookkeeping only —
+        // Last evidence goes with the non-rep survivor (bookkeeping only -
         // the tick sweep turns the evidence-less group into a RemoveAll).
         assert_eq!(g.member_gone(41), GroupEffect::Absorb);
         assert!(!g.has_evidence());
@@ -492,7 +492,7 @@ mod tests {
         assert!(!g.members.contains_key(&500));
         assert!(g.members.contains_key(&600));
 
-        // All equal now: lowest pid among the lowest class goes — but never
+        // All equal now: lowest pid among the lowest class goes - but never
         // the rep, even when it is the lowest-class lowest pid.
         g.upsert(601, member(MemberClass::Plain, 1), false);
         assert_eq!(g.members.len(), MAX_GROUP_MEMBERS);

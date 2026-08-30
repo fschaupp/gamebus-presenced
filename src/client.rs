@@ -1,7 +1,7 @@
 //! Shared D-Bus client for the `org.gamebus.Presence.v1` surface.
 //!
 //! Included by both `gamebus-presence` and `gamebus-setup` with
-//! `#[path = "../client.rs"] mod client;` — the proxies and the property reads
+//! `#[path = "../client.rs"] mod client;` - the proxies and the property reads
 //! live here once, and each binary renders the result its own way (plain text
 //! for the CLI, a list widget for the TUI).
 //!
@@ -57,7 +57,7 @@ trait ActivityProps {
 
 /// One activity, read off the bus into plain data.
 ///
-/// Every field degrades to its default on a read error — an activity that
+/// Every field degrades to its default on a read error - an activity that
 /// vanished mid-read is a normal race, not a failure worth propagating.
 #[derive(Debug, Clone, Default)]
 pub struct ActivityView {
@@ -85,7 +85,7 @@ impl ActivityView {
 
     /// How long this has been going, from the `Since` timestamp.
     ///
-    /// `None` when no source supplied one, or when it is in the future — a
+    /// `None` when no source supplied one, or when it is in the future - a
     /// clock change should read as "unknown", not as a negative duration.
     pub fn elapsed(&self) -> Option<String> {
         if self.since == 0 {

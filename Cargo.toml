@@ -39,7 +39,7 @@ required-features = ["setup"]
 default = ["setup"]
 # The setup/status TUI. On by default because you need it to install the
 # daemon; `--no-default-features` builds the daemon and CLI without ratatui.
-setup = ["dep:ratatui", "dep:toml_edit"]
+setup = ["dep:ratatui", "dep:toml_edit", "dep:rusqlite"]
 
 [dependencies]
 zbus = { version = "4", features = ["tokio"] }
@@ -52,7 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 rsrpc = { git = "https://github.com/SpikeHD/rsRPC", rev = "062e0fd9fe34a475640a822facfee68296ba22e3" }
 ureq = { version = "2", features = ["json"] }
-# Tooling only — never linked into the daemon binary (src/main.rs does not use
+# Tooling only - never linked into the daemon binary (src/main.rs does not use
 # it). crossterm comes via `ratatui::crossterm` rather than a direct dependency,
 # so the two can never disagree on a version. default-features = false drops
 # all-widgets (which pulls `time`) and the macros crate.
@@ -67,6 +67,10 @@ ratatui = { version = "0.30", optional = true, default-features = false, feature
 # went in. That is a format-preserving editor's job, not an emitter's. It is
 # already in Cargo.lock through gamedb-build, so the lock gains nothing.
 toml_edit = { version = "0.22", optional = true }
+# Tooling only, same rule. Reads Lutris's pga.db (a sqlite file) so the setup
+# tool can fill codenames from the user's own library. Same version and
+# features as gamedb-build's rusqlite, so Cargo.lock gains no new package.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 discord-rich-presence = "1"

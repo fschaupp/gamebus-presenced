@@ -11,7 +11,7 @@ use super::{api_base, load_db, Opts};
 use super::{EgsBuild, EgsOffer, GogProduct};
 
 /// Everything the TUI misses pane's `v` key does: refresh the cached full
-/// dump, then verify the stash against it (and the live API). Blocking —
+/// dump, then verify the stash against it (and the live API). Blocking -
 /// run it off the render path. Returns the log lines and whether the flow
 /// completed.
 pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
@@ -20,7 +20,7 @@ pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
         Ok((_, n)) => lines.push(format!("Fetched the umu database: {n} entries.")),
         // Not fatal: verify still has the previous cache and the API.
         Err(e) => lines.push(format!(
-            "Fetch failed ({e}) — verifying with what is available."
+            "Fetch failed ({e}) - verifying with what is available."
         )),
     }
     let mut report = UmuReport::load_for_annotations();
@@ -29,7 +29,7 @@ pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
         return (lines, false);
     }
     if report.entries().is_empty() {
-        lines.push("No umu-database misses recorded yet.".to_string());
+        lines.push("No identity misses recorded yet.".to_string());
         return (lines, true);
     }
     let db = match load_db(&Opts::none()) {
@@ -55,7 +55,7 @@ pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
 }
 
 /// The TUI's manual id assignment: validate the shape, collision-check
-/// against the local database (mandatory — no database, no assignment),
+/// against the local database (mandatory - no database, no assignment),
 /// then store it as a [`DraftBasis::Manual`] draft on the entry.
 pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
     let id = id.trim().to_lowercase();
@@ -78,7 +78,7 @@ pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
         Ok(None) => {
             return (
                 vec![
-                    "No local database to collision-check against — press v to fetch it first."
+                    "No local database to collision-check against - press v to fetch it first."
                         .to_string(),
                 ],
                 false,
@@ -106,64 +106,87 @@ pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
 /// keymap dispatches per kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickCandidate {
-    /// A umu-database row — Enter records the id verdict on the miss.
+    /// A umu-database row - Enter records the id verdict on the miss.
     Db(UmuEntry),
-    /// A Heroic library identity — Enter writes the store+codename
+    /// A Heroic library identity - Enter writes the store+codename
     /// overrides. NOT a verdict: the game may still be missing from the
     /// database; identity and verdict are different facts.
     Library(super::super::heroic_library::LibraryGame),
-    /// A GOG catalog hit (`o`) — Enter writes the product id as the
+    /// A Lutris library identity (pga.db) - Enter writes the store+codename
+    /// overrides, exactly like a Heroic library pick. NOT a verdict either.
+    Lutris(super::super::lutris_library::LutrisGame),
+    /// A GOG catalog hit (`o`) - Enter writes the product id as the
     /// codename override.
     GogProduct(GogProduct),
     /// The GOG product record for the miss's own numeric codename (`o` on
-    /// such an entry) — Enter writes the TITLE override: the id was never
+    /// such an entry) - Enter writes the TITLE override: the id was never
     /// in question there, the (possibly mis-resolved) title was.
     GogById {
         id: String,
         title: String,
         game_type: String,
     },
-    /// An egdata offer hit (`o`) — Enter commits its last Windows build's
+    /// An egdata offer hit (`o`) - Enter commits its last Windows build's
     /// App Name, or fires the builds request when the hit carries none. The
     /// namespace itself is NEVER offered as a codename: Control's namespace
     /// is lowercase `calluna`, its Builds App Name is `Calluna`.
     EgsOffer(EgsOffer),
-    /// One build from the sandboxes list — Enter writes its App Name as the
+    /// One build from the sandboxes list - Enter writes its App Name as the
     /// codename override.
     EgsBuild(EgsBuild),
 }
 
 impl PickCandidate {
-    /// The pick list's section header — the candidates arrive grouped, and
+    /// The pick list's section header - the candidates arrive grouped, and
     /// the label is what tells a database row from a library identity.
     /// Owned, not `&'static`: the by-id header names the product it hit.
     pub fn section_label(&self) -> String {
         match self {
-            PickCandidate::Db(_) => "umu database — Enter records the verdict".into(),
-            PickCandidate::Library(_) => "your Heroic library — Enter sets the identity".into(),
-            PickCandidate::GogProduct(_) => "GOG catalog — Enter sets the codename".into(),
+            PickCandidate::Db(_) => "umu database - Enter records the verdict".into(),
+            PickCandidate::Library(_) => "your Heroic library - Enter sets the identity".into(),
+            PickCandidate::Lutris(_) => "your Lutris library - Enter sets the identity".into(),
+            PickCandidate::GogProduct(_) => "GOG catalog - Enter sets the codename".into(),
             PickCandidate::GogById { id, .. } => {
-                format!("GOG product {id} — Enter sets the title")
+                format!("GOG product {id} - Enter sets the title")
             }
-            PickCandidate::EgsOffer(_) => "egdata offers — Enter picks the build".into(),
-            PickCandidate::EgsBuild(_) => "egdata builds — Enter sets the codename".into(),
+            PickCandidate::EgsOffer(_) => "egdata offers - Enter picks the build".into(),
+            PickCandidate::EgsBuild(_) => "egdata builds - Enter sets the codename".into(),
         }
     }
 }
 
 /// Candidates for the TUI's `p`: a title search against the local database
 /// ([`UmuDb::search_title`] ranks and caps them) plus the user's Heroic
-/// store_cache libraries — both local files, no network, ever; `v` stays
-/// the only pane key that fetches. Blocking — run it off the render path.
-/// The second value is a warning: an aging fetch cache, or a missing
-/// database when the libraries still produced something to pick.
+/// store_cache libraries and Lutris library - all local files, no network,
+/// ever; `v` stays the only pane key that fetches. Blocking - run it off
+/// the render path. The second value is a warning: an aging fetch cache, a
+/// missing database when the libraries still produced something to pick,
+/// or a Lutris library that exists but cannot be read.
 pub(crate) fn tui_pick_candidates(
     title: &str,
 ) -> Result<(Vec<PickCandidate>, Option<String>), String> {
-    let library: Vec<PickCandidate> = super::super::heroic_library::candidates(title)
+    let mut library: Vec<PickCandidate> = super::super::heroic_library::candidates(title)
         .into_iter()
         .map(PickCandidate::Library)
         .collect();
+    // The Lutris library joins the pick on equal footing with Heroic's: the
+    // same identity class, the same Enter. An unreadable pga.db is a
+    // warning naming its path, never a failure - the database and Heroic
+    // still pick without it.
+    let mut lutris_warning = None;
+    match super::super::lutris_library::load() {
+        Ok(games) => library.extend(
+            super::super::lutris_library::candidates(&games, title)
+                .into_iter()
+                .cloned()
+                .map(PickCandidate::Lutris),
+        ),
+        Err(e) => lutris_warning = Some(format!("Lutris library unreadable ({e}).")),
+    }
+    let merged = |stale: Option<String>, lutris: Option<String>| -> Option<String> {
+        let parts: Vec<String> = stale.into_iter().chain(lutris).collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    };
     match load_db(&Opts::none()) {
         Ok(Some(db)) => {
             let mut candidates: Vec<PickCandidate> = db
@@ -173,18 +196,30 @@ pub(crate) fn tui_pick_candidates(
                 .map(PickCandidate::Db)
                 .collect();
             candidates.extend(library);
-            Ok((candidates, cache_staleness()))
+            Ok((candidates, merged(cache_staleness(), lutris_warning)))
         }
         Ok(None) if !library.is_empty() => Ok((
             library,
-            Some(
-                "No local umu database — candidates are your Heroic library only; \
-                 v fetches the database (net)."
-                    .to_string(),
+            merged(
+                Some(
+                    "No local umu database - candidates are your launcher libraries only; \
+                     v fetches the database (net)."
+                        .to_string(),
+                ),
+                lutris_warning,
             ),
         )),
         Ok(None) => {
-            Err("No local database — press v to fetch, or set --db/GAMEBUS_UMU_DB.".to_string())
+            // Nothing to pick from at all; if the Lutris library could not
+            // even be read, say so - it is why this list is emptier than
+            // the machine's games deserve.
+            let mut e =
+                "No local database - press v to fetch, or set --db/GAMEBUS_UMU_DB.".to_string();
+            if let Some(w) = lutris_warning {
+                e.push(' ');
+                e.push_str(&w);
+            }
+            Err(e)
         }
         Err(e) => Err(e),
     }
@@ -200,14 +235,14 @@ fn staleness_note(age: Duration) -> Option<String> {
         return None;
     }
     Some(format!(
-        "Database cache is {} days old — v refreshes it (net).",
+        "Database cache is {} days old - v refreshes it (net).",
         age.as_secs() / 86_400
     ))
 }
 
 /// Only the fetch cache ages into a warning: an explicit `--db`/
 /// `GAMEBUS_UMU_DB` checkout is the user's to keep fresh, and `v` would
-/// not refresh it anyway — warning about it would point at the wrong fix.
+/// not refresh it anyway - warning about it would point at the wrong fix.
 fn cache_staleness() -> Option<String> {
     if std::env::var_os("GAMEBUS_UMU_DB").is_some() {
         return None;
@@ -219,7 +254,7 @@ fn cache_staleness() -> Option<String> {
 }
 
 /// The TUI's pick: the user chose a database entry as "this game IS that
-/// entry" — recorded as the verification verdict, no network. Same shape as
+/// entry" - recorded as the verification verdict, no network. Same shape as
 /// [`tui_assign_id`]; the decision itself lives in [`pick_entry`].
 pub(crate) fn tui_pick_entry(
     key: &str,
@@ -240,7 +275,7 @@ pub(crate) fn tui_pick_entry(
 
 /// Record a picked database entry on a miss. A pick whose store+codename
 /// exactly equals the miss's own launch (case-insensitive) means the row
-/// already exists — a launcher-side miss, [`AlreadyInDatabase`]; anything
+/// already exists - a launcher-side miss, [`AlreadyInDatabase`]; anything
 /// else is the cross-store verdict carrying the picked id. The picked id
 /// supersedes any drafted one, so the draft is cleared either way.
 ///
@@ -265,7 +300,7 @@ fn pick_entry(
     let (state, line) = if same_row {
         (
             VerificationState::AlreadyInDatabase,
-            format!("{title}: already in the database as {umu_id} — the launcher missed, not the database."),
+            format!("{title}: already in the database as {umu_id} - the launcher missed, not the database."),
         )
     } else {
         (
@@ -312,7 +347,7 @@ pub(crate) fn tui_set_identity(
 /// online lookup already ran under the miss's effective store). Both are
 /// annotation-half, so a daemon write never reverts them. Deliberately NOT
 /// a verification verdict: knowing what the game is says nothing about
-/// whether the database has it — a later `v` verifies with the new
+/// whether the database has it - a later `v` verifies with the new
 /// identity.
 fn set_identity(
     report: &mut UmuReport,
@@ -336,6 +371,8 @@ fn set_identity(
     }
     report.update(key, |m| {
         m.codename_override = Some(codename.to_string());
+        // A hand correction never wears a tool's provenance.
+        m.codename_override_source = None;
         if let Some(s) = &store {
             // Mirrors the s-cycle: landing on the daemon's own guess means
             // the entry is back to "guessed", not "corrected to the guess".
@@ -344,7 +381,7 @@ fn set_identity(
     });
     (
         vec![format!(
-            "{title}: {what} from {source} — v verifies with the new identity (net)."
+            "{title}: {what} from {source} - v verifies with the new identity (net)."
         )],
         true,
     )
@@ -368,12 +405,12 @@ pub(crate) fn tui_set_title(key: &str, title: &str, source: &str) -> (Vec<String
 /// Record a title correction on a miss: `title_override`, annotation-half
 /// like the other overrides, so a daemon write never reverts it. Entering
 /// the daemon's own resolved title clears the override instead of storing a
-/// copy — mirrors the s-cycle: back to "resolved", not "corrected to the
+/// copy - mirrors the s-cycle: back to "resolved", not "corrected to the
 /// resolution". A title, never a verdict; `v` re-verifies with it.
 fn set_title(report: &mut UmuReport, key: &str, title: &str, source: &str) -> (Vec<String>, bool) {
     let title = title.trim();
     if title.is_empty() {
-        return (vec!["Empty title — nothing recorded.".to_string()], false);
+        return (vec!["Empty title - nothing recorded.".to_string()], false);
     }
     let Some(m) = report.entries().get(key) else {
         return (
@@ -397,7 +434,9 @@ fn set_title(report: &mut UmuReport, key: &str, title: &str, source: &str) -> (V
 }
 
 /// Every store id the database actually uses (counted from the upstream
-/// CSV, 2026-08-07), most common first — the TUI's `s` key cycles these.
+/// CSV, 2026-08-07), most common first - the TUI's `s` key cycles these.
+/// The tail holds the ids a launcher can hand us but the CSV rarely
+/// carries, in umu's own order; `none` stays last, as the way out.
 pub(crate) const KNOWN_STORES: &[&str] = &[
     "egs",
     "gog",
@@ -406,6 +445,9 @@ pub(crate) const KNOWN_STORES: &[&str] = &[
     "humble",
     "ea",
     "zoomplatform",
+    "steam",
+    "itchio",
+    "battlenet",
     "none",
 ];
 
@@ -433,7 +475,7 @@ pub(crate) fn tui_cycle_store(key: &str) -> (Vec<String>, bool) {
         format!("Store back to the daemon's guess: {guessed}.")
     } else {
         report.update(key, |m| m.store_override = Some(next.clone()));
-        format!("Store set to {next} (daemon guessed {guessed}) — press v to re-verify.")
+        format!("Store set to {next} (daemon guessed {guessed}) - press v to re-verify.")
     };
     report.save();
     (vec![line], true)
@@ -441,7 +483,7 @@ pub(crate) fn tui_cycle_store(key: &str) -> (Vec<String>, bool) {
 
 /// The TUI's `d`: dismiss the selected entry, or restore it. A dismissed
 /// entry is parked (bottom of the list, greyed, out of every export), not
-/// deleted — a deleted key would be resurrected by the daemon's merge and
+/// deleted - a deleted key would be resurrected by the daemon's merge and
 /// re-recorded on the next launch anyway, and "not wanted" is a judgment
 /// worth being able to reverse.
 pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
@@ -458,12 +500,58 @@ pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
     let title = m.effective_title().unwrap_or("(unresolved)").to_string();
     let line = if m.dismissed.is_some() {
         report.update(key, |m| m.dismissed = None);
-        format!("{title} restored — back in the list and the exports.")
+        format!("{title} restored - back in the list and the exports.")
     } else {
         report.update(key, |m| m.dismissed = Some(umu_report::today()));
-        format!("{title} dismissed — kept in the stash, out of the exports (d restores).")
+        format!("{title} dismissed - kept in the stash, out of the exports (d restores).")
     };
     report.save();
+    (vec![line], true)
+}
+
+/// The TUI's `u`: promote the selected entry into the umu-database pipeline,
+/// or take the promotion back. Same annotation write path as
+/// [`tui_toggle_dismiss`]; the decision lives in [`toggle_promote`].
+pub(crate) fn tui_toggle_promote(key: &str) -> (Vec<String>, bool) {
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let (lines, ok) = toggle_promote(&mut report, key);
+    if ok {
+        report.save();
+    }
+    (lines, ok)
+}
+
+/// Toggle `umu_promoted` (today's date / None) on a umu miss. Promotion is
+/// the opt-in of the owner policy: it makes the entry a umu candidate even
+/// without a protonfix or cross-store match. A launcher launch (empty umu
+/// id) never went through umu, so there is nothing to promote - refused
+/// with a line saying so.
+fn toggle_promote(report: &mut UmuReport, key: &str) -> (Vec<String>, bool) {
+    let Some(m) = report.entries().get(key) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
+    if !m.is_umu_miss() {
+        return (
+            vec![format!(
+                "{title} never went through umu - a launcher launch has nothing to promote into the umu database."
+            )],
+            false,
+        );
+    }
+    let line = if m.umu_promoted.is_some() {
+        report.update(key, |m| m.umu_promoted = None);
+        format!("{title} no longer promoted - a umu candidate only if a protonfix or cross-store match suggests it.")
+    } else {
+        report.update(key, |m| m.umu_promoted = Some(umu_report::today()));
+        format!("{title} promoted - in the umu exports even without a protonfix or cross-store match (u reverts).")
+    };
     (vec![line], true)
 }
 
@@ -471,6 +559,91 @@ pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
 mod tests {
     use super::super::{pick_db, pick_report};
     use super::*;
+
+    /// The `p` pick's local sources are the umu database, the Heroic store
+    /// caches, and the Lutris library. Database rows come first; a Lutris
+    /// row arrives as an identity candidate; and a pga.db that exists but
+    /// cannot be read is a warning naming the path, not a failure - the
+    /// database still picks.
+    #[test]
+    fn the_pick_joins_the_lutris_library_and_survives_an_unreadable_one() {
+        let _env = crate::setup::lutris_library::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("gamebus-pick-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+
+        // A one-row umu database (a game the query must NOT match, so the
+        // Lutris rows are the only hits) and a pga.db carrying Control
+        // twice, on two stores - the choice the pick exists to offer.
+        let db = dir.join("umu.csv");
+        std::fs::write(
+            &db,
+            "TITLE,STORE,CODENAME,UMU_ID\nBorderlands 3,egs,Catnip,umu-397540\n",
+        )
+        .expect("scratch csv");
+        let pga = dir.join("pga.db");
+        {
+            let conn = rusqlite::Connection::open(&pga).expect("scratch pga.db");
+            conn.execute_batch(
+                "create table games (id integer primary key, name text, slug text, \
+                 runner text, service text, service_id text, directory text)",
+            )
+            .expect("create games table");
+            for (service, service_id) in [("egs", "Calluna"), ("gog", "2049187585")] {
+                conn.execute(
+                    "insert into games (name, slug, runner, service, service_id, directory) \
+                     values ('Control', 'control', 'wine', ?1, ?2, null)",
+                    rusqlite::params![service, service_id],
+                )
+                .expect("insert row");
+            }
+        }
+
+        std::env::set_var("GAMEBUS_UMU_DB", &db);
+        std::env::set_var("GAMEBUS_LUTRIS_DB", &pga);
+        let (candidates, warning) = tui_pick_candidates("control").expect("the pick resolves");
+        // The explicit --db-style override never ages into a warning.
+        assert_eq!(
+            warning, None,
+            "an explicit db and a healthy pga.db warn about nothing"
+        );
+        let lutris: Vec<&str> = candidates
+            .iter()
+            .filter_map(|c| match c {
+                PickCandidate::Lutris(g) => Some(g.codename.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lutris,
+            vec!["Calluna", "2049187585"],
+            "the library's editions, as identities"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|c| !matches!(c, PickCandidate::Db(_))),
+            "the database row is for another game"
+        );
+
+        // An unreadable pga.db: the pick still answers, with a warning that
+        // names the file instead of hiding the library's absence.
+        let corrupt = dir.join("corrupt.db");
+        std::fs::write(&corrupt, "this is not a sqlite database at all").unwrap();
+        std::env::set_var("GAMEBUS_LUTRIS_DB", &corrupt);
+        let (candidates, warning) =
+            tui_pick_candidates("control").expect("the pick still resolves");
+        assert!(
+            candidates
+                .iter()
+                .all(|c| !matches!(c, PickCandidate::Lutris(_))),
+            "a corrupt library contributed identities"
+        );
+        let warning = warning.expect("the corruption must be said, not hidden");
+        assert!(warning.contains("corrupt.db"), "{warning}");
+
+        std::env::remove_var("GAMEBUS_UMU_DB");
+        std::env::remove_var("GAMEBUS_LUTRIS_DB");
+    }
 
     #[test]
     fn a_week_old_cache_warns_a_fresher_one_does_not() {
@@ -483,7 +656,7 @@ mod tests {
     #[test]
     fn picking_the_misss_own_row_is_a_launcher_side_miss() {
         let db = pick_db();
-        // Case differs from the database row — the comparison must not care.
+        // Case differs from the database row - the comparison must not care.
         let (mut report, key) = pick_report("EGS", "catnip");
         let cand = db.search_title("Borderlands 3")[0].clone();
         let (lines, ok) = pick_entry(&mut report, &key, &cand.store, &cand.codename, &cand.umu_id);
@@ -560,6 +733,45 @@ mod tests {
             report.entries()[&key].verification.as_ref().unwrap().state,
             VerificationState::AlreadyInDatabase
         );
+    }
+
+    // ---- Promotion (`u`): the opt-in of the owner policy.
+
+    #[test]
+    fn u_toggles_the_promotion_on_a_umu_miss() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        let (lines, ok) = toggle_promote(&mut report, &key);
+        assert!(ok, "{lines:?}");
+        assert!(
+            report.entries()[&key].umu_promoted.is_some(),
+            "promotion not recorded"
+        );
+        assert!(lines[0].contains("promoted"), "{lines:?}");
+        // The same key takes it back.
+        let (lines, ok) = toggle_promote(&mut report, &key);
+        assert!(ok, "{lines:?}");
+        assert!(
+            report.entries()[&key].umu_promoted.is_none(),
+            "promotion not cleared"
+        );
+        assert!(lines[0].contains("no longer promoted"), "{lines:?}");
+    }
+
+    #[test]
+    fn u_refuses_a_launcher_launch_and_a_vanished_entry() {
+        let (mut report, _) = pick_report("egs", "Catnip");
+        report.note_launch("itchio", Some("926077"), "", "itchio:926077");
+        let (lines, ok) = toggle_promote(&mut report, "itchio:926077");
+        assert!(!ok);
+        assert!(lines[0].contains("never went through umu"), "{lines:?}");
+        assert!(
+            report.entries()["itchio:926077"].umu_promoted.is_none(),
+            "a launcher launch got promoted"
+        );
+
+        let (lines, ok) = toggle_promote(&mut report, "gone:key");
+        assert!(!ok);
+        assert!(lines[0].contains("gone:key"), "{lines:?}");
     }
 
     // ---- Identity writes (library picks and online lookups).

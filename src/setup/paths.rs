@@ -11,7 +11,7 @@ pub const DETECTABLE_NAME: &str = "detectable.json";
 
 /// Where an install writes to.
 ///
-/// `System` means the system *prefix*, not the system bus — the unit stays a
+/// `System` means the system *prefix*, not the system bus - the unit stays a
 /// systemd **user** unit, one daemon per login session. It only changes where
 /// the files live and who may write them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,13 +49,13 @@ pub struct Dirs {
     pub cache_home: PathBuf,
     pub runtime_dir: PathBuf,
     /// System data directories in XDG order, for mirroring the daemon's
-    /// naming-database search. Not used by `layout` — see its note on why the
+    /// naming-database search. Not used by `layout` - see its note on why the
     /// system layout must stay free of the environment.
     pub data_dirs: Vec<PathBuf>,
 }
 
 impl Dirs {
-    /// Resolve from the environment. `None` when `HOME` is unset — every
+    /// Resolve from the environment. `None` when `HOME` is unset - every
     /// user-level path depends on it and guessing would write to the wrong place.
     pub fn from_env() -> Option<Self> {
         let home = PathBuf::from(std::env::var_os("HOME")?);
@@ -126,14 +126,14 @@ impl Layout {
     }
 
     /// The installed reference copy of the endpoint configuration. User
-    /// overrides belong in the config dir, not here — install rewrites this
+    /// overrides belong in the config dir, not here - install rewrites this
     /// one with the bundled content.
     pub fn endpoints_file(&self) -> PathBuf {
         self.data_dir.join(crate::endpoints::ENDPOINTS_NAME)
     }
 
     /// The installed reference copy of the shared-helper list. User additions
-    /// belong in the config dir, not here — the lists union, so this copy can
+    /// belong in the config dir, not here - the lists union, so this copy can
     /// only add entries; install rewrites it with the bundled content.
     pub fn shared_helpers_file(&self) -> PathBuf {
         self.data_dir.join(crate::naming::SHARED_HELPERS_NAME)
@@ -150,7 +150,7 @@ impl Layout {
 
 /// Resolve the layout for a target.
 ///
-/// The `System` arm reads **nothing** from `dirs` — that is load-bearing.
+/// The `System` arm reads **nothing** from `dirs` - that is load-bearing.
 /// A system install re-executes this binary under `pkexec`, which scrubs the
 /// environment, so the privileged process must arrive at the same paths as the
 /// unprivileged one that planned them. See the test at the bottom of this file.
@@ -160,13 +160,13 @@ impl Layout {
 /// installing there from a hand-run tool collides with any future package at
 /// the same paths with nothing tracking ownership, and fails outright on the
 /// image-based distributions much of Linux gaming runs on. All three
-/// `/usr/local` locations are searched by default — it is in `XDG_DATA_DIRS`,
+/// `/usr/local` locations are searched by default - it is in `XDG_DATA_DIRS`,
 /// and `/usr/local/lib/systemd/user` is in systemd's user unit path.
 pub fn layout(dirs: &Dirs, target: Target) -> Layout {
     match target {
         Target::User => Layout {
             target,
-            // Not an XDG variable — ~/.local/bin is the systemd-file-hierarchy
+            // Not an XDG variable - ~/.local/bin is the systemd-file-hierarchy
             // convention, and what distributions put on PATH by default.
             bin_dir: dirs.home.join(".local/bin"),
             data_dir: dirs.data_home.join("gamebus-presenced"),
@@ -185,15 +185,15 @@ pub fn layout(dirs: &Dirs, target: Target) -> Layout {
 
 /// Which of the naming database's search locations a file was found in.
 ///
-/// **Mirrors `find_detectable_json()` in `src/naming.rs` — keep the two in the
+/// **Mirrors `find_detectable_json()` in `src/naming.rs` - keep the two in the
 /// same order.** If they drift, this tool reports a tier the daemon does not use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectableTier {
-    /// `$XDG_CACHE_HOME/gamebus-presenced/` — written by `fetch-detectable`.
+    /// `$XDG_CACHE_HOME/gamebus-presenced/` - written by `fetch-detectable`.
     Cache,
-    /// `$XDG_DATA_HOME/gamebus-presenced/` — a user-level install.
+    /// `$XDG_DATA_HOME/gamebus-presenced/` - a user-level install.
     UserData,
-    /// A system data directory from `XDG_DATA_DIRS` — a system install.
+    /// A system data directory from `XDG_DATA_DIRS` - a system install.
     SystemData,
 }
 

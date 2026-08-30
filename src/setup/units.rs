@@ -2,7 +2,7 @@
 //!
 //! Both files name the daemon by absolute path, so neither can be installed
 //! verbatim outside `/usr`. The systemd unit could have used `%h`, but the
-//! D-Bus activation file's `Exec=` takes **no** specifiers at all — no `%h`,
+//! D-Bus activation file's `Exec=` takes **no** specifiers at all - no `%h`,
 //! no `$HOME`, no expansion of any kind. A user-level install therefore has to
 //! generate both.
 //!

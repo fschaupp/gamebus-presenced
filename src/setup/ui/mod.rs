@@ -1,7 +1,7 @@
 //! The terminal interface: three views, a confirm modal, and an output log.
 //!
 //! Rendering is a pure function of [`App`]; nothing here does I/O beyond
-//! drawing. Everything slow — probing, subprocesses, the 12 MB download —
+//! drawing. Everything slow - probing, subprocesses, the 12 MB download -
 //! happens on other tasks and arrives as a [`Msg`].
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, ListState, Paragraph};
 use ratatui::Frame;
 
 use super::actions::{Action, Plan};
-use super::gamedb::{GamedbRow, GamedbView};
+use super::gamedb::{GamedbFilter, GamedbRow, GamedbView};
 use super::paths::Target;
 use super::status::{Health, Row, Status};
 use super::umu_misses::PickCandidate;
@@ -33,14 +33,16 @@ use self::status::render_status;
 pub enum View {
     Status,
     Monitor,
-    /// The umu-database miss stash (S9b): what the daemon collected, what
+    /// The identity-miss stash (S9b): what the daemon collected - umu misses
+    /// and launcher launches without a store identity - and what
     /// verification made of it. The pane drives the flows on explicit
-    /// keypresses — `v` fetches+verifies (network, and the footer says so),
+    /// keypresses - `v` fetches+verifies (network, and the footer says so),
     /// `o` looks the title up at its store (network, labelled likewise),
     /// `a` assigns an id (collision-checked before it saves), `p` picks the
     /// matching entry from the local database or the Heroic libraries,
     /// `s` corrects the store guess, `t` corrects the title,
-    /// `d` dismisses/restores an entry.
+    /// `d` dismisses/restores an entry, `u` promotes a umu miss into the
+    /// umu-database pipeline (or takes the promotion back).
     Misses,
     /// The same stash, folded into gamebus-gamedb pages: one row per GAME
     /// rather than per launch identity, checked against what the data set
@@ -69,7 +71,7 @@ impl View {
         match self {
             View::Status => "status",
             View::Monitor => "monitor",
-            View::Misses => "umu misses",
+            View::Misses => "identity misses",
             View::Gamedb => "gamedb",
         }
     }
@@ -119,17 +121,17 @@ impl Confirm {
 }
 
 /// The misses pane's pick mode: candidates for one miss, waiting for the
-/// user to choose (or Esc out). The candidates are kind-tagged — database
-/// rows, Heroic library identities, online hits — and Enter dispatches per
+/// user to choose (or Esc out). The candidates are kind-tagged - database
+/// rows, Heroic library identities, online hits - and Enter dispatches per
 /// kind; the list renders them in labelled sections.
 pub struct Pick {
-    /// The stash key the candidates were fetched for — the pick lands on
+    /// The stash key the candidates were fetched for - the pick lands on
     /// this entry, never on whatever the selection moved to since.
     pub key: String,
     /// Never empty: the binary logs "no matches" instead of opening the mode.
     pub candidates: Vec<PickCandidate>,
     pub selected: usize,
-    /// A warning when the candidates came from an aging fetch cache — the
+    /// A warning when the candidates came from an aging fetch cache - the
     /// footer then advertises `v` as the way out.
     pub stale: Option<String>,
 }
@@ -157,14 +159,19 @@ pub struct App {
     /// land here instead of the keymap. Committed with Enter (which checks
     /// the id before anything is saved), cancelled with Esc.
     pub id_input: Option<String>,
-    /// While `Some`, the misses pane is in title-entry mode (`t`) — same
+    /// While `Some`, the misses pane is in title-entry mode (`t`) - same
     /// keyboard ownership as `id_input`. Starts empty; the input line shows
     /// the current effective title beside it.
     pub title_input: Option<String>,
-    /// The gamedb pane's rows: the same stash folded into one page per
-    /// game, with what the published index made of each. Loaded off the
-    /// render path and arriving as a message, like the miss list.
+    /// The gamedb pane's rows as currently shown: the same stash folded
+    /// into one page per game, with what the published index made of each,
+    /// narrowed by [`App::gamedb_filter`]. Loaded off the render path and
+    /// arriving as a message, like the miss list.
     pub gamedb: Vec<GamedbRow>,
+    /// Every gamedb row, unfiltered - what `f` narrows down from.
+    pub gamedb_all: Vec<GamedbRow>,
+    /// The pane's `f`: which rows [`App::gamedb`] shows.
+    pub gamedb_filter: GamedbFilter,
     pub gamedb_list: ListState,
     /// The one-line index state the pane's header shows.
     pub gamedb_index: String,
@@ -212,6 +219,8 @@ impl Default for App {
             misses: Vec::new(),
             miss_list: ListState::default(),
             gamedb: Vec::new(),
+            gamedb_all: Vec::new(),
+            gamedb_filter: GamedbFilter::default(),
             gamedb_list: ListState::default(),
             gamedb_index: "loading…".to_string(),
             gamedb_index_ok: false,
@@ -259,7 +268,7 @@ impl App {
     /// What pressing Enter would do right now.
     pub fn selected_action(&self) -> Option<Action> {
         match self.focus {
-            // On a check row, Enter runs that row's remedy — the shortest path
+            // On a check row, Enter runs that row's remedy - the shortest path
             // from "this is broken" to "fixed".
             Focus::Checks => self
                 .checks
@@ -305,8 +314,8 @@ impl App {
     }
 
     /// The stash entry a correction typed right now would land on: the
-    /// selected entry on the misses pane, and on the gamedb pane — whose
-    /// rows are games, not entries — that game's representative entry.
+    /// selected entry on the misses pane, and on the gamedb pane - whose
+    /// rows are games, not entries - that game's representative entry.
     pub fn edit_key(&self) -> Option<String> {
         match self.view {
             View::Gamedb => self
@@ -317,7 +326,7 @@ impl App {
         }
     }
 
-    /// Move the selection off the current entry onto its list neighbor —
+    /// Move the selection off the current entry onto its list neighbor -
     /// the one below, or the one above when the cursor sits on the last
     /// row. Used before an action that resorts the current entry away
     /// (dismiss), so the key-stable refresh follows the neighbor instead
@@ -334,8 +343,8 @@ impl App {
     }
 
     /// Replace the miss list, keeping the selection on the same entry (by
-    /// stash key): the once-a-second refresh may reorder rows — a bump of
-    /// `last_seen`, a new miss on top — and a bare index would silently
+    /// stash key): the once-a-second refresh may reorder rows - a bump of
+    /// `last_seen`, a new miss on top - and a bare index would silently
     /// switch the detail pane to a different game mid-review.
     pub fn set_misses(&mut self, misses: Vec<(String, Miss)>) {
         let selected_key = self
@@ -367,20 +376,41 @@ impl App {
             .selected()
             .and_then(|i| self.gamedb.get(i))
             .map(|row| row.key.clone());
-        self.gamedb = view.rows;
+        self.gamedb_all = view.rows;
         self.gamedb_index = view.index;
         self.gamedb_index_ok = view.index_ok;
         self.gamedb_dir = view.export_dir;
-        if let Some(key) = selected_key {
-            if let Some(idx) = self.gamedb.iter().position(|row| row.key == key) {
-                self.gamedb_list.select(Some(idx));
-            }
-        }
-        // The pane's keys act on the selected game; without this they stay
-        // inert until the first keypress.
-        if self.gamedb_list.selected().is_none() && !self.gamedb.is_empty() {
-            self.gamedb_list.select(Some(0));
-        }
+        self.refilter_gamedb(selected_key);
+    }
+
+    /// The pane's `f`: narrow the rows to the next filter mode, keeping the
+    /// selection on the same game where it is still shown.
+    pub fn cycle_gamedb_filter(&mut self) {
+        let selected_key = self
+            .gamedb_list
+            .selected()
+            .and_then(|i| self.gamedb.get(i))
+            .map(|row| row.key.clone());
+        self.gamedb_filter = self.gamedb_filter.next();
+        self.refilter_gamedb(selected_key);
+    }
+
+    /// Rebuild the shown rows from the unfiltered set, putting the
+    /// selection back on `selected_key` when the filter still shows it,
+    /// else on the first row. The pane's keys act on the selected game;
+    /// without a selection they stay inert until the first keypress.
+    fn refilter_gamedb(&mut self, selected_key: Option<String>) {
+        let filter = self.gamedb_filter;
+        self.gamedb = self
+            .gamedb_all
+            .iter()
+            .filter(|row| filter.matches(row))
+            .cloned()
+            .collect();
+        let idx = selected_key
+            .and_then(|key| self.gamedb.iter().position(|row| row.key == key))
+            .or_else(|| (!self.gamedb.is_empty()).then_some(0));
+        self.gamedb_list.select(idx);
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -411,8 +441,9 @@ pub enum Intent {
     Run(Action),
     ConfirmYes,
     ConfirmNo,
-    /// Misses pane `v`: fetch the database dump and verify the stash.
-    /// Network — the footer labels the key as such.
+    /// The stash panes' `v` (misses and gamedb alike): fetch the database
+    /// dump and verify the stash. Network - the footer labels the key as
+    /// such.
     UmuVerify,
     /// Misses pane, Enter in id-entry mode: collision-check `id` against
     /// the local database and save it on the entry when it survives.
@@ -422,12 +453,12 @@ pub enum Intent {
     },
     /// Misses pane `p`: search the local database and the Heroic libraries
     /// for candidates matching the selected entry's title. Local files
-    /// only — never the network.
+    /// only - never the network.
     UmuPick {
         key: String,
     },
     /// Misses pane `o`: one online lookup at the entry's effective store.
-    /// Network — the footer labels the key as such.
+    /// Network - the footer labels the key as such.
     UmuOnline {
         key: String,
     },
@@ -469,8 +500,15 @@ pub enum Intent {
         source: String,
     },
     /// Misses pane `d`: dismiss the selected entry (parked, out of the
-    /// exports) or restore it — a toggle, not a deletion.
+    /// exports) or restore it - a toggle, not a deletion.
     UmuDismiss {
+        key: String,
+    },
+    /// Misses pane `u`: promote the selected umu miss into the umu-database
+    /// pipeline, or take the promotion back - a toggle, like dismiss.
+    /// Emitted only for umu misses: on a launcher launch the key answers in
+    /// the status line instead (nothing to promote).
+    UmuPromote {
         key: String,
     },
     /// gamedb pane `r`: fetch the published identity index. Network - the
@@ -644,6 +682,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                         codename: g.codename.clone(),
                         source: "your Heroic library".into(),
                     },
+                    // A Lutris library pick commits exactly like a Heroic
+                    // one: the identity the launcher itself installed under.
+                    Some(PickCandidate::Lutris(g)) => Intent::UmuSetIdentity {
+                        key: pick.key,
+                        store: Some(g.store.clone()),
+                        codename: g.codename.clone(),
+                        source: "your Lutris library".into(),
+                    },
                     Some(PickCandidate::GogProduct(p)) => Intent::UmuSetIdentity {
                         key: pick.key,
                         store: None,
@@ -721,6 +767,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             app.dir_input = Some(app.gamedb_dir.clone());
             Intent::None
         }
+        // Narrow the list to what still needs work: all / gaps / umu / weak.
+        KeyCode::Char('f') if app.view == View::Gamedb => {
+            app.cycle_gamedb_filter();
+            Intent::None
+        }
         // `d` is taken here, so dismiss gets its own key. It parks the
         // representative entry only - the other launches folded into this
         // game are separate judgements.
@@ -734,8 +785,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             app.view = View::ALL[(idx + 1) % View::ALL.len()];
             Intent::None
         }
+        // Both stash tabs share `v`: the flows reachable from the gamedb
+        // tab too (the assign refusal, the pick's stale note, the store
+        // cycle's re-verify line) all say "press v", so the key has to
+        // work wherever the sentence was read from.
+        KeyCode::Char('v') if app.view.edits_misses() => Intent::UmuVerify,
         // The misses pane's own verbs.
-        KeyCode::Char('v') if app.view == View::Misses => Intent::UmuVerify,
         KeyCode::Char('a') if app.view.edits_misses() => {
             if let Some(key) = app.edit_key() {
                 // Prefill with the existing draft so a small correction is
@@ -772,12 +827,38 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             Some(key) => Intent::UmuStore { key },
             None => Intent::None,
         },
+        // Promotion is a umu-pipeline verb, so it only means something on a
+        // umu miss; on a launcher launch the key refuses in the status line
+        // rather than silently doing nothing.
+        KeyCode::Char('u') if app.view == View::Misses => {
+            let selected = app
+                .miss_list
+                .selected()
+                .and_then(|i| app.misses.get(i))
+                .map(|(k, m)| {
+                    (
+                        k.clone(),
+                        m.is_umu_miss(),
+                        m.effective_title().unwrap_or("(unresolved)").to_string(),
+                    )
+                });
+            match selected {
+                Some((key, true, _)) => Intent::UmuPromote { key },
+                Some((_, false, title)) => {
+                    app.log(format!(
+                        "{title} never went through umu - a launcher launch has nothing to promote into the umu database."
+                    ));
+                    Intent::None
+                }
+                None => Intent::None,
+            }
+        }
         KeyCode::Char('d') if app.view == View::Misses => match app.selected_miss_key() {
             Some(key) => {
                 // Dismissing resorts the entry to the bottom of the list; the
                 // key-stable selection would follow it there, stranding a
                 // triage run (d, navigate all the way back, d, …). Hop to the
-                // neighbor first — the refresh then keeps THAT entry selected
+                // neighbor first - the refresh then keeps THAT entry selected
                 // wherever the resort puts everything.
                 app.select_neighbor_miss();
                 Intent::UmuDismiss { key }
@@ -785,7 +866,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             None => Intent::None,
         },
         // Pane focus, install target, and Enter act on the Status pane's
-        // selections — which are invisible from the other views. Gated on
+        // selections - which are invisible from the other views. Gated on
         // the view, or Enter in the read-only misses pane would fire
         // whatever Status row happened to be highlighted underneath.
         KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
@@ -873,7 +954,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Where am I, and what else is there — the answer Tab cycles through.
+/// Where am I, and what else is there - the answer Tab cycles through.
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![Span::raw(" ")];
     for (i, view) in View::ALL.iter().enumerate() {
@@ -931,7 +1012,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Greedy word wrap. Words longer than the width are left alone rather than
-/// broken — they are paths, and a broken path is worse than a long line.
+/// broken - they are paths, and a broken path is worse than a long line.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
@@ -976,43 +1057,67 @@ fn render_output(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let keys = match app.view {
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            footer_keys(app),
+            Style::default().fg(Color::DarkGray),
+        )),
+        area,
+    );
+}
+
+/// The footer's key list, as the app's CURRENT state makes each key true.
+/// A hint for a key that would do nothing right now - no row to act on, no
+/// candidates to pick through - trains nobody to read the footer, so the
+/// entry modes come first and the list states drop their entry verbs.
+fn footer_keys(app: &App) -> &'static str {
+    // The entry modes edit the stash, so both stash tabs open them and both
+    // draw the same line while one is up.
+    if app.view.edits_misses() {
+        if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) {
+            return "↑↓ choose · Enter pick · Esc cancel · v refresh (net)";
+        }
+        if app.pick.is_some() {
+            return "↑↓ choose · Enter pick · Esc cancel";
+        }
+        if app.id_input.is_some() {
+            return "type the id · ⏎ check+save · esc cancel";
+        }
+        if app.title_input.is_some() {
+            return "type the title · ⏎ save · esc cancel";
+        }
+        if app.dir_input.is_some() {
+            return "type the export directory · ⏎ save · esc cancel";
+        }
+    }
+    match app.view {
         View::Status => {
             "↑↓ select · ←→ pane · ⏎ run · u/s target · tab next view · r refresh · q quit"
         }
         View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
-        // The export hint lives in the verify output and the empty state —
-        // this line carries the pane's own verbs.
-        View::Misses if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
-            "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
-        }
-        View::Misses if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
-        View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
-        View::Misses if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
+        // Nothing to act on: the matchup keys and the selection are inert,
+        // so none of them is advertised. `v` stays - it fetches and then
+        // honestly reports an empty stash.
+        View::Misses if app.misses.is_empty() => "tab view · v verify (net) · q quit",
         View::Misses => {
-            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · d dismiss · q quit"
+            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · u promote (umu) · d dismiss · q quit"
         }
-        View::Gamedb if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
-            "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
+        // The filter is hiding every row: the entry verbs have no row to
+        // act on, but `f` is the way back and must stay in the line.
+        View::Gamedb if app.gamedb.is_empty() && !app.gamedb_all.is_empty() => {
+            "tab view · f filter · r index (net) · v verify (net) · e export · d directory · q quit"
         }
-        View::Gamedb if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
-        View::Gamedb if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
-        View::Gamedb if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
-        View::Gamedb if app.dir_input.is_some() => {
-            "type the export directory · ⏎ save · esc cancel"
+        View::Gamedb if app.gamedb.is_empty() => {
+            "tab view · r index (net) · v verify (net) · e export · d directory · q quit"
         }
         // The pane's own verbs, then the matchup verbs - which act on this
         // game's representative stash entry only.
         View::Gamedb => {
-            "↑↓ · tab view · ⏎ show entry · r index (net) · e export · d directory · \
-             on the entry: o lookup (net) · a assign · t title · p pick · s store · \
-             x dismiss · q quit"
+            "↑↓ · tab view · ⏎ show entry · f filter · r index (net) · v verify (net) · \
+             e export · d directory · on the entry: o lookup (net) · a assign · t title · \
+             p pick · s store · x dismiss · q quit"
         }
-    };
-    f.render_widget(
-        Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
-        area,
-    );
+    }
 }
 
 fn render_confirm(f: &mut Frame, app: &App) {
@@ -1073,7 +1178,7 @@ fn render_confirm(f: &mut Frame, app: &App) {
         )));
     }
 
-    // How far the change reaches — the question behind the dialog.
+    // How far the change reaches - the question behind the dialog.
     if !details {
         lines.push(Line::from(""));
         for line in wrap(&confirm.scope, inner) {
@@ -1087,7 +1192,7 @@ fn render_confirm(f: &mut Frame, app: &App) {
     if confirm.needs_root {
         lines.push(Line::from(""));
         for line in wrap(
-            "Some steps need root — you will be asked to authenticate. \
+            "Some steps need root - you will be asked to authenticate. \
              Only the file writes run privileged.",
             inner,
         ) {
@@ -1217,7 +1322,7 @@ mod tests {
         // Enter must NOT confirm: it is the same key that opened the dialog,
         // so accepting it would let one key repeat run the action unread.
         assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::ConfirmNo);
-        // Even quit does not escape the modal — it cancels it.
+        // Even quit does not escape the modal - it cancels it.
         assert_eq!(
             handle_key(&mut app, key(KeyCode::Char('q'))),
             Intent::ConfirmNo
@@ -1295,6 +1400,10 @@ mod tests {
             entries: 9,
             entry_keys: vec![format!("egs:{title}")],
             rep_key: format!("egs:{title}"),
+            gap: false,
+            umu: false,
+            weak: false,
+            launcher: None,
         }
     }
 
@@ -1341,6 +1450,143 @@ mod tests {
             Intent::GamedbExport { force: false }
         );
         assert!(app.confirm.is_none(), "a fresh index asked anyway");
+    }
+
+    /// The pane's `f` cycles all → gaps → umu → weak → all, narrows the
+    /// shown rows to the matching predicate, and fires no intent - it is a
+    /// view of the same rows, not an action.
+    #[test]
+    fn f_cycles_the_gamedb_filter_through_gaps_umu_and_weak() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        let mut view = gamedb_view(true);
+        view.rows = vec![
+            GamedbRow {
+                gap: true,
+                ..sample_gamedb_row("Gappy", RowState::Ready)
+            },
+            GamedbRow {
+                umu: true,
+                ..sample_gamedb_row("Umuish", RowState::Ready)
+            },
+            GamedbRow {
+                weak: true,
+                ..sample_gamedb_row("Weakling", RowState::Ready)
+            },
+        ];
+        app.set_gamedb(view);
+        assert_eq!(app.gamedb.len(), 3, "all is the default");
+
+        let titles = |app: &App| {
+            app.gamedb
+                .iter()
+                .map(|r| r.title.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Gaps);
+        assert_eq!(titles(&app), ["Gappy"]);
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Umu);
+        assert_eq!(titles(&app), ["Umuish"]);
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Weak);
+        assert_eq!(titles(&app), ["Weakling"]);
+        handle_key(&mut app, key(KeyCode::Char('f')));
+        assert_eq!(app.gamedb_filter, GamedbFilter::All);
+        assert_eq!(app.gamedb.len(), 3, "the cycle did not come back to all");
+
+        // Every narrowed list has a selection, so the entry verbs keep
+        // working; and a refresh keeps the filter in force.
+        handle_key(&mut app, key(KeyCode::Char('f')));
+        assert!(app.gamedb_list.selected().is_some());
+        assert_eq!(app.edit_key().as_deref(), Some("egs:Gappy"));
+        let mut view = gamedb_view(true);
+        view.rows = vec![GamedbRow {
+            gap: true,
+            ..sample_gamedb_row("Gappy", RowState::Ready)
+        }];
+        app.set_gamedb(view);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Gaps);
+        assert_eq!(titles(&app), ["Gappy"]);
+    }
+
+    /// `f` is a gamedb verb: everywhere else the key stays inert.
+    #[test]
+    fn the_filter_key_is_inert_outside_the_gamedb_view() {
+        let mut app = app_with_rows();
+        app.set_gamedb(gamedb_view(true));
+        for view in [View::Status, View::Monitor, View::Misses] {
+            app.view = view;
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+            assert_eq!(app.gamedb_filter, GamedbFilter::All, "{view:?} cycled it");
+        }
+    }
+
+    /// `v` means the same thing on both stash tabs: the flows reachable
+    /// from the gamedb tab too (the assign refusal, the pick's stale note,
+    /// the store cycle's re-verify line) all say "press v", so the key has
+    /// to fire there - and to stay inert on the read-only views.
+    #[test]
+    fn v_verifies_from_both_stash_tabs_and_is_inert_elsewhere() {
+        let mut app = app_with_rows();
+        app.set_gamedb(gamedb_view(true));
+        app.set_misses(vec![sample_miss("Control")]);
+        for view in [View::Misses, View::Gamedb] {
+            app.view = view;
+            assert_eq!(
+                handle_key(&mut app, key(KeyCode::Char('v'))),
+                Intent::UmuVerify,
+                "{view:?}"
+            );
+        }
+        for view in [View::Status, View::Monitor] {
+            app.view = view;
+            assert_eq!(
+                handle_key(&mut app, key(KeyCode::Char('v'))),
+                Intent::None,
+                "{view:?}"
+            );
+        }
+    }
+
+    /// A footer key that would do nothing right now is a lie: with no row
+    /// selected the entry verbs stay out of the line, and a filter hiding
+    /// every row keeps `f` (the way back) while dropping them.
+    #[test]
+    fn the_footer_advertises_only_keys_that_work_right_now() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        assert_eq!(footer_keys(&app), "tab view · v verify (net) · q quit");
+        app.set_misses(vec![sample_miss("Control")]);
+        let misses = footer_keys(&app);
+        assert!(misses.contains("v verify (net)"), "{misses}");
+        assert!(misses.contains("u promote (umu)"), "{misses}");
+
+        app.view = View::Gamedb;
+        assert_eq!(
+            footer_keys(&app),
+            "tab view · r index (net) · v verify (net) · e export · d directory · q quit"
+        );
+        // A filter that matches nothing: f is the way out, the entry verbs
+        // are not in the line.
+        app.gamedb_filter = GamedbFilter::Umu;
+        let mut view = gamedb_view(true);
+        view.rows = vec![sample_gamedb_row("Control", RowState::Ready)];
+        app.set_gamedb(view);
+        assert!(
+            app.gamedb.is_empty(),
+            "the fixture row should not match the umu filter"
+        );
+        let keys = footer_keys(&app);
+        assert!(keys.contains("f filter"), "{keys}");
+        assert!(!keys.contains("on the entry"), "{keys}");
+        // Unfiltered, the full verb set is back - v included.
+        app.gamedb_filter = GamedbFilter::All;
+        app.set_gamedb(gamedb_view(true));
+        let keys = footer_keys(&app);
+        assert!(keys.contains("v verify (net)"), "{keys}");
+        assert!(keys.contains("on the entry"), "{keys}");
     }
 
     /// Without an index nothing can say whether a page duplicates one the
@@ -1637,7 +1883,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Down)); // first ↓ lands on index 1
         handle_key(&mut app, key(KeyCode::Up)); // index 0: Control
 
-        // d dismisses Control, but the cursor must hop to Brotato — a triage
+        // d dismisses Control, but the cursor must hop to Brotato - a triage
         // run (d, d, d) works top-down without re-navigating.
         let intent = handle_key(&mut app, key(KeyCode::Char('d')));
         assert_eq!(
@@ -1670,7 +1916,7 @@ mod tests {
         app.view = View::Misses;
         app.set_misses(vec![sample_miss("Control")]);
         // Enter must NOT fire the hidden Status-pane action from the
-        // read-only misses pane — nor may ←→/u/s mutate invisible state.
+        // read-only misses pane - nor may ←→/u/s mutate invisible state.
         assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
         handle_key(&mut app, key(KeyCode::Char('s')));
         assert_eq!(
@@ -1717,6 +1963,41 @@ mod tests {
         );
     }
 
+    /// `u` promotes only what can be promoted: a umu miss toggles, a
+    /// launcher launch (empty umu id) gets a status line and no intent.
+    #[test]
+    fn u_promotes_a_umu_miss_and_refuses_a_launcher_launch() {
+        let mut app = app_with_rows();
+        // Inert outside the misses view (on Status it pins the target).
+        app.view = View::Gamedb;
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('u'))), Intent::None);
+
+        app.view = View::Misses;
+        let mut launcher = sample_miss("Danger Scavenger");
+        launcher.1.umu_id = String::new();
+        app.set_misses(vec![sample_miss("Control"), launcher]);
+
+        // First ↓ lands on index 1: the launcher launch. Refused, with a
+        // status line saying why.
+        handle_key(&mut app, key(KeyCode::Down));
+        let logged = app.output.len();
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('u'))), Intent::None);
+        assert_eq!(
+            app.output.len(),
+            logged + 1,
+            "no status line for the refusal"
+        );
+
+        // On the umu miss the toggle fires.
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('u'))),
+            Intent::UmuPromote {
+                key: "egs:Control".into()
+            }
+        );
+    }
+
     #[test]
     fn id_entry_mode_owns_the_keyboard_and_commits_on_enter() {
         let mut app = app_with_rows();
@@ -1727,7 +2008,7 @@ mod tests {
         // 'a' opens the input, prefilled with "umu-".
         handle_key(&mut app, key(KeyCode::Char('a')));
         assert_eq!(app.id_input.as_deref(), Some("umu-"));
-        // Printable keys type — including q and v, which must NOT quit or
+        // Printable keys type - including q and v, which must NOT quit or
         // verify while the field is open.
         for c in ['8', '7', 'q', 'v'] {
             assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
@@ -1754,7 +2035,7 @@ mod tests {
     }
 
     /// Follows the a-verb precedent exactly: the mode owns the keyboard,
-    /// Enter commits, Esc cancels — but the buffer starts EMPTY (the point
+    /// Enter commits, Esc cancels - but the buffer starts EMPTY (the point
     /// of the verb is that the resolver's title is wrong).
     #[test]
     fn title_entry_mode_owns_the_keyboard_and_commits_on_enter() {
@@ -1765,7 +2046,7 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Char('t')));
         assert_eq!(app.title_input.as_deref(), Some(""));
-        // Printable keys type — including q, v and t itself.
+        // Printable keys type - including q, v and t itself.
         for c in ['P', 'q', 'v', 't'] {
             assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
         }
@@ -1812,7 +2093,7 @@ mod tests {
             key: "egs:Control".into(),
             candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
             selected: 0,
-            stale: Some("Database cache is 9 days old — v refreshes it (net).".into()),
+            stale: Some("Database cache is 9 days old - v refreshes it (net).".into()),
         });
         // The one network key means the same thing inside the mode: leave
         // the stale candidate list and fetch fresh.
@@ -1857,7 +2138,7 @@ mod tests {
         );
     }
 
-    /// Enter must dispatch on the candidate's kind — a database row records
+    /// Enter must dispatch on the candidate's kind - a database row records
     /// a verdict, everything else an identity, and an egs offer without a
     /// Windows build fires the builds request instead of committing its
     /// (lowercase, wrong) namespace.
@@ -1893,6 +2174,24 @@ mod tests {
                     source: "your Heroic library".into(),
                 },
             ),
+            // A Lutris library pick commits the same identity, from the
+            // other launcher's own records.
+            (
+                PickCandidate::Lutris(crate::setup::lutris_library::LutrisGame {
+                    name: "Control".into(),
+                    slug: "control".into(),
+                    store: "egs".into(),
+                    codename: "Calluna".into(),
+                    runner: None,
+                    directory: None,
+                }),
+                Intent::UmuSetIdentity {
+                    key: "egs:Control".into(),
+                    store: Some("egs".into()),
+                    codename: "Calluna".into(),
+                    source: "your Lutris library".into(),
+                },
+            ),
             (
                 PickCandidate::GogProduct(GogProduct {
                     id: "2049187585".into(),
@@ -1907,7 +2206,7 @@ mod tests {
                 },
             ),
             (
-                // The by-id record corrects the TITLE — the codename it was
+                // The by-id record corrects the TITLE - the codename it was
                 // fetched by was already right.
                 PickCandidate::GogById {
                     id: "1660194629".into(),
@@ -1989,7 +2288,7 @@ mod tests {
             stale: None,
         });
         // q must NOT quit while the list is up (v is the deliberate
-        // exception — it abandons the pick to refresh, tested separately).
+        // exception - it abandons the pick to refresh, tested separately).
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::None);
         // ↓/j and ↑/k move, wrapping at both ends.
         handle_key(&mut app, key(KeyCode::Down));
@@ -2036,7 +2335,7 @@ mod tests {
         // A refresh that keeps the miss keeps the mode.
         app.set_misses(vec![sample_miss("Brotato"), sample_miss("Control")]);
         assert!(app.pick.is_some());
-        // One that drops it cancels — the pick has nothing to land on.
+        // One that drops it cancels - the pick has nothing to land on.
         app.set_misses(vec![sample_miss("Brotato")]);
         assert!(app.pick.is_none(), "pick mode outlived its miss");
     }
@@ -2054,14 +2353,21 @@ mod tests {
                 executable: None,
                 first_seen: "2026-08-07".into(),
                 last_seen: "2026-08-07".into(),
+                launcher: None,
+                launcher_name: None,
+                launcher_dir: None,
+                codename_source: None,
+                runner: None,
                 verification: None,
                 drafted_id: None,
                 possible_pr: None,
                 fix: None,
                 store_override: None,
                 codename_override: None,
+                codename_override_source: None,
                 title_override: None,
                 dismissed: None,
+                umu_promoted: None,
             },
         )
     }
