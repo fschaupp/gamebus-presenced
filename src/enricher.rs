@@ -585,6 +585,30 @@ impl Enricher {
         if is_wrapper_executable(raw_exe) {
             (MemberClass::Helper, None)
         } else {
+            // Steam names its own installs: for a steam-keyed member whose
+            // exe runs out of a steamapps library, the appmanifest beside it
+            // carries the official title — authoritative even when
+            // detectable.json has never heard of the game (observed live
+            // 2026-08-30: Danger Scavenger, a real Steam app absent from
+            // detectable, published nothing at all). The member stays Plain;
+            // the identity is GameProcess-class because Steam's own record
+            // for the running appid is as curated as it gets.
+            if let Some(name) = key
+                .strip_prefix("steam:")
+                .and_then(|appid| steam_manifest_name(raw_exe, appid))
+            {
+                return (
+                    MemberClass::Plain,
+                    Some((
+                        Identity {
+                            name,
+                            exe: raw_exe.to_string(),
+                            class: IdentityClass::GameProcess,
+                        },
+                        IdentitySource::Curated,
+                    )),
+                );
+            }
             // A game binary Lutris launched directly — a native Linux game,
             // `gamemoderun ./Game.x86_64` — registers with GameMode itself,
             // so no wrapper pid ever runs the ancestor layer on its behalf
@@ -1216,13 +1240,20 @@ impl Enricher {
     /// detectable.json resolves. Keeps the `/usr/bin/sleep` fixture and
     /// wrapper-chain utility processes unpublishable.
     fn new_group_gate(&self, pid: u32, exe: &str, appid: &str) -> bool {
-        let Some(ref db) = self.naming else {
-            return false;
-        };
-        if identify_process(pid, db).is_some() {
-            return true;
+        if let Some(ref db) = self.naming {
+            if identify_process(pid, db).is_some() {
+                return true;
+            }
+            if exe.contains("/steamapps/") && db.lookup_by_steam_appid(appid).is_some() {
+                return true;
+            }
         }
-        exe.contains("/steamapps/") && db.lookup_by_steam_appid(appid).is_some()
+        // Steam's own appmanifest is the third authority, and the only one
+        // that needs no database: a game absent from detectable.json is
+        // still a real install with an official name (R5 holds — nothing
+        // outside a steamapps library, and no appid without a manifest,
+        // gets a record).
+        exe.contains("/steamapps/") && steam_manifest_name(exe, appid).is_some()
     }
 
     /// The sweep: evidence-less groups are removed;
@@ -1675,6 +1706,26 @@ fn umu_miss_id(environ: &str) -> Option<&'static str> {
             "GAMEID=umu-0" | "UMU_ID=umu-0" => return Some("umu-0"),
             "UMU_ID=umu-default" | "GAMEID=umu-default" => return Some("umu-default"),
             _ => {}
+        }
+    }
+    None
+}
+
+/// The name Steam's own appmanifest records for an appid: the exe runs out
+/// of `<library>/steamapps/common/<game>/`, and the manifest sits at
+/// `<library>/steamapps/appmanifest_<appid>.acf`. A shallow line parse is
+/// enough — the `"name"` key is one quoted pair — and any miss (no
+/// steamapps segment, no file, no name line) is a silent None.
+fn steam_manifest_name(exe: &str, appid: &str) -> Option<String> {
+    let end = exe.find("/steamapps/")? + "/steamapps/".len();
+    let path = format!("{}appmanifest_{}.acf", &exe[..end], appid);
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.trim().strip_prefix("\"name\"") {
+            let name = rest.trim().trim_matches('"').trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
         }
     }
     None
@@ -3203,6 +3254,49 @@ mod tests {
 
         child.kill().ok();
         child.wait().ok();
+    }
+
+    #[test]
+    fn a_steam_install_names_itself_from_its_own_manifest() {
+        // The live case (Danger Scavenger via Steam, 2026-08-30): a real
+        // Steam app absent from detectable.json published nothing at all.
+        let dir = std::env::temp_dir().join(format!("gamebus-manifest-{}", std::process::id()));
+        let steamapps = dir.join("SteamLibrary/steamapps");
+        let game_dir = steamapps.join("common/Danger Scavenger");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        std::fs::write(
+            steamapps.join("appmanifest_1169740.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"1169740\"\n\t\"name\"\t\t\"Danger Scavenger\"\n}\n",
+        )
+        .unwrap();
+        let exe = game_dir.join("Danger_Scavenger.x86_64");
+        let exe = exe.to_str().unwrap();
+
+        // The parser finds the name; a wrong appid finds nothing.
+        assert_eq!(
+            steam_manifest_name(exe, "1169740").as_deref(),
+            Some("Danger Scavenger")
+        );
+        assert_eq!(steam_manifest_name(exe, "999"), None);
+        assert_eq!(steam_manifest_name("/usr/bin/sleep", "1169740"), None);
+
+        // classify_member: a steam-keyed non-wrapper member takes the
+        // manifest name as a GameProcess-class identity, member Plain.
+        let e = Enricher::with_naming(None);
+        let (class, identity) = e.classify_member(std::process::id(), exe, "steam:1169740", None);
+        assert_eq!(class, MemberClass::Plain);
+        let (id, source) = identity.expect("the manifest names the install");
+        assert_eq!(id.name, "Danger Scavenger");
+        assert_eq!(id.class, IdentityClass::GameProcess);
+        assert_eq!(source, IdentitySource::Curated);
+
+        // The scan gate accepts it with no naming database at all, and
+        // still refuses anything outside a steamapps library (R5).
+        assert!(e.new_group_gate(std::process::id(), exe, "1169740"));
+        assert!(!e.new_group_gate(std::process::id(), "/usr/bin/sleep", "1169740"));
+        assert!(!e.new_group_gate(std::process::id(), exe, "999"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
