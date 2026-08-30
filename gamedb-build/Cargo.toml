@@ -1,6 +1,6 @@
 [package]
 name = "gamedb-build"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["fschaupp <spritzwine.absently488@passinbox.com>"]
 description = "Lint the gamedb data set and build its published artifacts"
