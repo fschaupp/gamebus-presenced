@@ -126,6 +126,20 @@ pub(super) struct Candidate {
     /// the entry the fold reads first, so correcting it corrects the page.
     pub(super) rep_key: String,
     pub(super) status: Status,
+    /// Where the winning title came from - the predicates below read it.
+    pub(super) title_source: Option<String>,
+    /// The gamedb gap predicate: the index does not fully know this page's
+    /// identifiers, or its title never came from a curated source. What the
+    /// TUI's `gaps` filter shows.
+    pub(super) gap: bool,
+    /// Whether any folded entry is a umu-database miss ([`Miss::is_umu_miss`]).
+    pub(super) umu: bool,
+    /// Weak identity: no folded entry was both confidently resolved and
+    /// titled by something better than a wrapper argv.
+    pub(super) weak: bool,
+    /// `lutris Danger Scavenger (itchio/926077)` - which launcher handed us
+    /// the game and under what name, for the detail pane.
+    pub(super) launcher: Option<String>,
 }
 
 impl Candidate {
@@ -206,6 +220,7 @@ pub(super) fn candidates(report: &UmuReport, index: Option<&GamedbIndex>) -> Vec
         .map(|group| {
             let mut candidate = group.finish();
             candidate.status = status(&candidate, index);
+            candidate.gap = gap(&candidate, index);
             candidate
         })
         .collect()
@@ -220,14 +235,40 @@ fn group_key(stash_key: &str, miss: &Miss) -> String {
         (store, Some(codename)) if store != "none" && !codename.is_empty() => {
             format!("{store}-{codename}")
         }
-        // Nothing but a title left to group on. With not even that, the
-        // stash key stands in: two unidentified games must not merge into
-        // one page just because neither resolved a name.
-        _ => match miss.effective_title() {
-            Some(title) if !title.trim().is_empty() => title.to_lowercase(),
-            _ => format!("stash:{stash_key}"),
-        },
+        // No store identity left. The launcher's own name for the game
+        // outranks the resolved title - it is the same string on every
+        // launch, so eight Control launches collapse whether or not any of
+        // them resolved a codename. With neither, the stash key stands in:
+        // two unidentified games must not merge into one page just because
+        // neither resolved a name.
+        _ => {
+            let name = miss
+                .launcher_name
+                .as_deref()
+                .map(slug)
+                .filter(|s| !s.is_empty());
+            let title = miss.effective_title().map(slug).filter(|s| !s.is_empty());
+            match name.or(title) {
+                Some(key) => key,
+                None => format!("stash:{stash_key}"),
+            }
+        }
     }
+}
+
+/// The gamedb gap predicate: something here is not fully mapped out yet -
+/// an identifier the index cannot resolve, or a title no curated source
+/// vouches for. What the TUI's `gaps` filter shows; with no index in hand,
+/// nothing is known to be covered, so everything is a gap.
+fn gap(candidate: &Candidate, index: Option<&GamedbIndex>) -> bool {
+    let unknown_identifier = match index {
+        Some(index) => candidate
+            .identifiers()
+            .iter()
+            .any(|id| index.resolve(id).is_none()),
+        None => true,
+    };
+    unknown_identifier || candidate.title_source.as_deref() != Some("detectable")
 }
 
 /// The Steam app id a `steam-sku` draft carries. That basis means the id
@@ -251,11 +292,23 @@ struct Group {
     /// Whether the title came from a correction the user typed - which
     /// outranks any resolver's, and must not be overwritten by one.
     title_is_yours: bool,
+    /// Where the winning title came from.
+    title_source: Option<String>,
     steam: Option<u64>,
     stores: BTreeMap<(String, String), StoreEntry>,
     exes: Vec<String>,
     /// The `checked` date of the newest firm "no protonfix upstream".
     no_fix_checked: Option<String>,
+    /// The note a Lutris-identified entry earns: which record named it.
+    lutris_note: Option<String>,
+    /// Any folded entry is a umu-database miss.
+    umu: bool,
+    /// Some folded entry identifies the game strongly - confidently
+    /// resolved, and titled by something better than a wrapper argv.
+    strong: bool,
+    /// The launcher line for the detail pane, from the first entry that
+    /// named its launcher.
+    launcher: Option<String>,
     seen: String,
     entries: usize,
     /// Every stash key absorbed, in the order they were walked (sorted).
@@ -295,23 +348,40 @@ impl Group {
             if self.title.is_none() || (yours && !self.title_is_yours) {
                 self.title = Some(title.to_string());
                 self.title_is_yours = yours;
+                self.title_source.clone_from(&miss.title_source);
             }
         }
         if self.steam.is_none() {
             self.steam = steam_appid(miss);
         }
+        self.umu |= miss.is_umu_miss();
+        // Weak is a property of the whole page: one strong identification
+        // outweighs any number of wrapper launches folded in beside it.
+        self.strong |= miss.confidence == Some(Confidence::High)
+            && !matches!(
+                miss.title_source.as_deref(),
+                Some("wrapper-layer") | Some("lutris-wrapper")
+            );
+        if self.launcher.is_none() {
+            self.launcher = launcher_line(miss);
+        }
+        if self.lutris_note.is_none() {
+            self.lutris_note = lutris_note(miss);
+        }
         // A firm id with no protonfix upstream is the fact that sends a
         // game here at all: umu-database does not want it, so its store
-        // codename has nowhere else to live.
+        // codename has nowhere else to live. Only a umu miss ever went near
+        // that scope gate, so only a umu miss can carry the verdict.
         if let Some(fix) = miss.fix.as_ref().filter(|f| f.fixes.is_empty()) {
-            if super::super::umu_misses::id_is_firm(miss)
+            if miss.is_umu_miss()
+                && super::super::umu_misses::id_is_firm(miss)
                 && self.no_fix_checked.as_deref() < Some(fix.checked.as_str())
             {
                 self.no_fix_checked = Some(fix.checked.clone());
             }
         }
 
-        let exe = miss.executable.as_deref().and_then(game_exe);
+        let exe = miss.executable.as_deref().and_then(|p| game_exe(p, miss));
         match (miss.effective_store(), miss.effective_codename()) {
             (store, Some(codename)) if store != "none" && !codename.is_empty() => {
                 let slot = self
@@ -349,25 +419,70 @@ impl Group {
     }
 
     fn finish(self) -> Candidate {
-        let note = self.no_fix_checked.map(|checked| {
-            format!(
+        let mut notes = Vec::new();
+        if let Some(note) = self.lutris_note {
+            notes.push(note);
+        }
+        if let Some(checked) = self.no_fix_checked {
+            notes.push(format!(
                 "No protonfix upstream (checked {checked}), so umu-database does not \
                  want this game and it has no umu id."
-            )
-        });
+            ));
+        }
         Candidate {
             key: self.key,
             title: self.title,
             steam: self.steam,
             stores: self.stores.into_values().collect(),
             exes: self.exes,
-            note,
+            note: (!notes.is_empty()).then(|| notes.join(" ")),
             seen: self.seen,
             entries: self.entries,
             rep_key: self.rep.map(|(_, _, key)| key).unwrap_or_default(),
             entry_keys: self.entry_keys,
             status: Status::Ready,
+            title_source: self.title_source,
+            // Filled in by `candidates` once the index is in hand.
+            gap: false,
+            umu: self.umu,
+            weak: !self.strong,
+            launcher: self.launcher,
         }
+    }
+}
+
+/// The detail pane's launcher line: `lutris Danger Scavenger
+/// (itchio/926077)`, from whatever of the launcher facts this entry has.
+fn launcher_line(miss: &Miss) -> Option<String> {
+    let launcher = miss.launcher.as_deref()?;
+    let mut line = launcher.to_string();
+    if let Some(name) = miss.launcher_name.as_deref().filter(|n| !n.is_empty()) {
+        line.push(' ');
+        line.push_str(name);
+    }
+    if let (store, Some(codename)) = (miss.effective_store(), miss.effective_codename()) {
+        if store != "none" && !codename.is_empty() {
+            line.push_str(&format!(" ({store}/{codename})"));
+        }
+    }
+    Some(line)
+}
+
+/// The note a Lutris-identified entry earns: names the record the codename
+/// came out of, so a reviewer can go look at the same thing.
+fn lutris_note(miss: &Miss) -> Option<String> {
+    let (store, codename) = match (miss.effective_store(), miss.effective_codename()) {
+        (store, Some(codename)) if store != "none" && !codename.is_empty() => (store, codename),
+        _ => return None,
+    };
+    match miss.codename_source.as_deref() {
+        Some("lutris-config") => Some(format!(
+            "Identified from Lutris: service={store}, appid={codename}."
+        )),
+        Some("lutris-library") => Some(format!(
+            "Identified from the Lutris library: service={store}, appid={codename}."
+        )),
+        _ => None,
     }
 }
 
@@ -378,24 +493,44 @@ fn source_of(miss: &Miss) -> &'static str {
     if miss.store_override.is_some() || miss.codename_override.is_some() {
         return "manual";
     }
+    // How the CODENAME was learned outranks how the title was: the store
+    // entry's claim is the codename, and a launcher's own record for it is
+    // the thing a reviewer can go look at.
+    match miss.codename_source.as_deref() {
+        Some("lutris-config") | Some("lutris-library") => return "lutris",
+        Some("heroic-env") => return "heroic-config",
+        _ => {}
+    }
     match miss.title_source.as_deref() {
+        Some("lutris-wrapper") => "lutris",
         Some("heroic-config") => "heroic-config",
         Some("heroic-library") => "heroic-library",
         Some("detectable") => "detectable",
-        // Everything else the daemon can report (a Lutris wrapper argv, an
-        // MPRIS hint, an executable stem) has no vocabulary entry, and the
-        // schema rejects an invented one. `manual` puts the weight on the
-        // note, which is where CONTRIBUTING.md wants it.
+        // Everything else the daemon can report (an MPRIS hint, an
+        // executable stem) has no vocabulary entry, and the schema rejects
+        // an invented one. `manual` puts the weight on the note, which is
+        // where CONTRIBUTING.md wants it.
         _ => "manual",
     }
 }
 
-/// How sure the stash is. An entry nothing resolved has no confidence to
-/// report, and `low` is the level that says exactly that.
+/// How sure the stash is. A codename read out of the launcher's own record
+/// for the game leaves nothing to guess about, whatever the title's
+/// confidence; short of that it is the daemon's resolution confidence, and
+/// a title that only a Lutris wrapper argv vouches for never claims `high`.
+/// An entry nothing resolved has no confidence to report, and `low` is the
+/// level that says exactly that.
 fn confidence_of(miss: &Miss) -> &'static str {
-    match miss.confidence {
-        Some(Confidence::High) => "high",
-        Some(Confidence::Medium) => "medium",
+    if matches!(
+        miss.codename_source.as_deref(),
+        Some("lutris-config") | Some("heroic-env") | Some("lutris-library")
+    ) {
+        return "high";
+    }
+    match (miss.confidence, miss.title_source.as_deref()) {
+        (Some(Confidence::High), Some("lutris-wrapper")) => "medium",
+        (Some(Confidence::High), _) => "high",
+        (Some(Confidence::Medium), _) => "medium",
         _ => "low",
     }
 }
@@ -408,18 +543,34 @@ fn basename(path: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// Wine's own launch plumbing. Deliberately absent from
+/// `naming::is_wrapper_executable` (the daemon identifies Wine games
+/// through the cmdline layer and needs them classifiable), but never a
+/// page's exe on any runner: they run beside every Wine game there is.
+const WINE_PLUMBING: [&str; 4] = ["wine", "wine64", "wine-preloader", "wine64-preloader"];
+
 /// The executable a page may claim, or nothing. The stash records whatever
 /// process the launcher reported, and for a wrapper that is the wrapper:
 /// `/usr/bin/python3.13`, `/usr/bin/env`, a launcher script. Those identify
 /// no game, and written to a page they would poison the alias table for
-/// every game launched the same way. Every umu launch is a Windows game
-/// under Proton, so a game's own executable always ends in `.exe`; and a
-/// shared helper (a crash handler that ships beside every Unity game) names
-/// no game either, which is the whole reason the helper list exists.
-fn game_exe(path: &str) -> Option<String> {
+/// every game launched the same way. A umu or Proton launch is a Windows
+/// game, so its own executable always ends in `.exe` - which is what keeps
+/// `wine64-preloader` off a page. Only an entry the launcher ran natively
+/// relaxes that rule, and it still refuses every wrapper, every piece of
+/// Wine plumbing, and every shared helper (a crash handler that ships
+/// beside every Unity game names no game, which is the whole reason the
+/// helper list exists).
+fn game_exe(path: &str, miss: &Miss) -> Option<String> {
     let name = basename(path)?;
     let lower = name.to_lowercase();
-    if !lower.ends_with(".exe") || crate::naming::is_shared_helper(&lower) {
+    if crate::naming::is_shared_helper(&lower) {
+        return None;
+    }
+    let native = miss.runner.as_deref() == Some("native") && !miss.is_umu_miss();
+    if !native {
+        return lower.ends_with(".exe").then_some(name);
+    }
+    if crate::naming::is_wrapper_executable(&lower) || WINE_PLUMBING.contains(&lower.as_str()) {
         return None;
     }
     Some(name)
@@ -580,13 +731,17 @@ pub(super) fn render_page(candidate: &Candidate) -> String {
     out
 }
 
-/// The note as a multi-line basic string with line continuations - the
-/// shape every page in the data set uses, so a diff between two pages is
-/// about the words and not about the wrapping.
+/// The note as TOML: a plain string while it fits on one line, else a
+/// multi-line basic string with line continuations - the shape every page
+/// in the data set uses, so a diff between two pages is about the words and
+/// not about the wrapping.
 fn render_note(note: &str) -> String {
     const WIDTH: usize = 72;
-    let mut out = String::from("note = \"\"\"\n");
     let lines = wrap(note, WIDTH);
+    if let [line] = lines.as_slice() {
+        return format!("note = {}\n", toml_string(line));
+    }
+    let mut out = String::from("note = \"\"\"\n");
     for (i, line) in lines.iter().enumerate() {
         out.push_str(&escape(line));
         if i + 1 < lines.len() {
@@ -653,30 +808,120 @@ fn escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::umu_report::{DraftedId, FixCheck};
+    use crate::umu_report::{DraftedId, FixCheck, LaunchFacts};
 
-    /// Build a stash the way the daemon does, then annotate it the way
-    /// `--verify` would.
+    // The `Stash` helper below builds a stash the way the daemon does, then
+    // annotates it the way `--verify` would.
+
+    /// A bare miss with just the fields `game_exe` reads: the umu id and
+    /// the runner.
+    fn runner_miss(umu_id: &str, runner: Option<&str>) -> Miss {
+        Miss {
+            title: None,
+            store: "none".into(),
+            codename: None,
+            umu_id: umu_id.into(),
+            title_source: None,
+            confidence: None,
+            executable: None,
+            first_seen: "2026-08-23".into(),
+            last_seen: "2026-08-23".into(),
+            launcher: None,
+            launcher_name: None,
+            launcher_dir: None,
+            codename_source: None,
+            runner: runner.map(str::to_string),
+            verification: None,
+            drafted_id: None,
+            possible_pr: None,
+            fix: None,
+            store_override: None,
+            codename_override: None,
+            title_override: None,
+            dismissed: None,
+            umu_promoted: None,
+        }
+    }
 
     #[test]
     fn wrapper_processes_and_shared_helpers_never_become_a_page_exe() {
+        let umu = runner_miss("umu-0", None);
         // The stash records what the launcher reported; for a wrapper that
         // is the wrapper. None of these identifies a game.
-        assert_eq!(game_exe("/usr/bin/python3.13"), None);
-        assert_eq!(game_exe("/usr/bin/env"), None);
-        assert_eq!(game_exe("/home/u/.local/share/Steam/steam.sh"), None);
-        assert_eq!(game_exe("C:\\Game\\UnityCrashHandler64.exe"), None);
+        assert_eq!(game_exe("/usr/bin/python3.13", &umu), None);
+        assert_eq!(game_exe("/usr/bin/env", &umu), None);
+        assert_eq!(game_exe("/home/u/.local/share/Steam/steam.sh", &umu), None);
+        assert_eq!(game_exe("C:\\Game\\UnityCrashHandler64.exe", &umu), None);
         // A Windows path, a Unix path, either slash: the game's own exe.
         assert_eq!(
-            game_exe("S:\\Spiele\\Call of Duty Black Ops Cold War\\BlackOpsColdWar.exe").as_deref(),
+            game_exe(
+                "S:\\Spiele\\Call of Duty Black Ops Cold War\\BlackOpsColdWar.exe",
+                &umu
+            )
+            .as_deref(),
             Some("BlackOpsColdWar.exe")
         );
         assert_eq!(
-            game_exe("/media/NVME/Spiele/Project Hospital/ProjectHospital.exe").as_deref(),
+            game_exe(
+                "/media/NVME/Spiele/Project Hospital/ProjectHospital.exe",
+                &umu
+            )
+            .as_deref(),
             Some("ProjectHospital.exe")
         );
         assert_eq!(
-            game_exe("Control_DX12.exe").as_deref(),
+            game_exe("Control_DX12.exe", &umu).as_deref(),
+            Some("Control_DX12.exe")
+        );
+    }
+
+    /// The `.exe` rule is store-aware: it binds umu and Proton entries, and
+    /// only an entry the launcher ran natively may claim a native binary -
+    /// which still never means a wrapper, Wine's own plumbing, or a shared
+    /// helper.
+    #[test]
+    fn a_native_entry_may_claim_a_native_binary_and_a_proton_entry_may_not() {
+        let native = runner_miss("", Some("native"));
+        let proton = runner_miss("", Some("proton"));
+        let umu = runner_miss("umu-0", None);
+        // A umu miss that claims to be native is still held to the .exe
+        // rule: umu ran it, so it ran under Proton.
+        let umu_native = runner_miss("umu-default", Some("native"));
+        // A pre-widening entry with no runner recorded stays on the old,
+        // conservative rule.
+        let unknown = runner_miss("", None);
+
+        let ds = "/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64";
+        assert_eq!(
+            game_exe(ds, &native).as_deref(),
+            Some("Danger_Scavenger.x86_64")
+        );
+        for miss in [&proton, &umu, &umu_native, &unknown] {
+            assert_eq!(game_exe(ds, miss), None, "{:?}", miss.runner);
+        }
+
+        // Rejected for BOTH runners: Wine plumbing, wrappers, helpers.
+        for exe in [
+            "/usr/bin/wine64-preloader",
+            "/usr/bin/wine-preloader",
+            "/usr/bin/wine",
+            "/usr/bin/wine64",
+            "/usr/bin/python3.13",
+            "/usr/bin/env",
+            "/usr/bin/gamemoderun",
+            "C:\\Game\\UnityCrashHandler64.exe",
+        ] {
+            assert_eq!(game_exe(exe, &native), None, "{exe} accepted for native");
+            assert_eq!(game_exe(exe, &proton), None, "{exe} accepted for proton");
+        }
+
+        // A Windows exe stays claimable on either runner.
+        assert_eq!(
+            game_exe("Control_DX12.exe", &proton).as_deref(),
+            Some("Control_DX12.exe")
+        );
+        assert_eq!(
+            game_exe("Control_DX12.exe", &native).as_deref(),
             Some("Control_DX12.exe")
         );
     }
@@ -1141,6 +1386,11 @@ mod tests {
             entry_keys: vec!["egs:Calluna".into(), "gog:2049187585".into()],
             rep_key: "egs:Calluna".into(),
             status: Status::Ready,
+            title_source: None,
+            gap: false,
+            umu: false,
+            weak: false,
+            launcher: None,
         };
         assert_eq!(merged.canonical_id().as_deref(), Some("gog-2049187585"));
     }
@@ -1229,6 +1479,11 @@ mod tests {
             entry_keys: vec!["gog:1660194629".into()],
             rep_key: "gog:1660194629".into(),
             status: Status::Ready,
+            title_source: None,
+            gap: false,
+            umu: false,
+            weak: false,
+            launcher: None,
         };
         assert_eq!(
             render_page(&candidate),
@@ -1267,6 +1522,11 @@ mod tests {
             entry_keys: vec!["gog:1660194629".into()],
             rep_key: "gog:1660194629".into(),
             status: Status::Ready,
+            title_source: None,
+            gap: false,
+            umu: false,
+            weak: false,
+            launcher: None,
         };
         let text = render_page(&candidate);
         assert!(
@@ -1274,5 +1534,312 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("codename = \"a\\\"b\"\n"), "{text}");
+    }
+
+    /// A Lutris launch as the daemon records it: launcher facts on the
+    /// entry, a wrapper-argv title, and (when `codename` is given) the
+    /// store identity the launcher's own record named.
+    #[allow(clippy::too_many_arguments)]
+    fn lutris_launch(
+        report: &mut UmuReport,
+        store: &str,
+        codename: Option<&str>,
+        fallback: &str,
+        name: &str,
+        title: Option<&str>,
+        exe: Option<&str>,
+        seen: &str,
+    ) -> String {
+        report.note_launch_with(
+            store,
+            codename,
+            "",
+            fallback,
+            LaunchFacts {
+                launcher: Some("lutris".into()),
+                launcher_name: Some(name.into()),
+                launcher_dir: None,
+                codename_source: codename.map(|_| "lutris-config".into()),
+                runner: Some("native".into()),
+            },
+        );
+        if let Some(title) = title {
+            report.note_title(
+                store,
+                codename,
+                fallback,
+                title,
+                "lutris-wrapper",
+                Confidence::Medium,
+                exe,
+            );
+        }
+        let key = match codename {
+            Some(c) if !c.is_empty() => format!("{store}:{c}"),
+            _ => fallback.to_string(),
+        };
+        report.update(&key, |m| {
+            m.first_seen = seen.to_string();
+            m.last_seen = seen.to_string();
+            if let Some(exe) = exe {
+                m.executable = Some(exe.to_string());
+            }
+        });
+        key
+    }
+
+    /// The launcher's own name for the game groups launches that never
+    /// resolved a codename with the ones that did not even resolve a title,
+    /// and with title-only launches of the same game.
+    #[test]
+    fn launches_group_on_the_launcher_name_before_the_title() {
+        let mut report = UmuReport::default();
+        // Two per-launch uuids, no codename: only GAME_NAME identifies them.
+        for i in 0..2 {
+            lutris_launch(
+                &mut report,
+                "none",
+                None,
+                &format!("lutris:uuid-{i}"),
+                "Danger Scavenger",
+                None,
+                None,
+                "2026-08-22",
+            );
+        }
+        // A third launch that resolved a title but carries no launcher name
+        // (an older daemon's entry): the slug of the title matches the slug
+        // of the launcher name, so it is the same page.
+        let mut stash = Stash { report };
+        stash.launch(
+            "none",
+            None,
+            "wrapper:ds",
+            Some("Danger Scavenger"),
+            "detectable",
+            Confidence::High,
+            None,
+            "2026-08-23",
+        );
+        let pages = candidates(&stash.report, None);
+        assert_eq!(pages.len(), 1, "{pages:#?}");
+        assert_eq!(pages[0].key, "danger-scavenger");
+        assert_eq!(pages[0].entries, 3);
+
+        // A different launcher name is a different page, codename or not.
+        lutris_launch(
+            &mut stash.report,
+            "none",
+            None,
+            "lutris:uuid-9",
+            "Amnesia: The Bunker",
+            None,
+            None,
+            "2026-08-22",
+        );
+        assert_eq!(candidates(&stash.report, None).len(), 2);
+    }
+
+    #[test]
+    fn the_codename_source_names_the_store_entrys_source_and_confidence() {
+        let mut report = UmuReport::default();
+        let key = lutris_launch(
+            &mut report,
+            "itchio",
+            Some("926077"),
+            "lutris:uuid-1",
+            "Danger Scavenger",
+            Some("Danger Scavenger"),
+            Some("/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64"),
+            "2026-08-23",
+        );
+        let miss = &report.entries()[&key];
+        // The codename came out of Lutris's own record: `lutris` is where a
+        // reviewer can see the same thing, and there is nothing left to
+        // guess about - whatever the wrapper-argv title's confidence.
+        assert_eq!(source_of(miss), "lutris");
+        assert_eq!(confidence_of(miss), "high");
+
+        // Without a codename source, the title source speaks: a Lutris
+        // wrapper argv maps to `lutris` and never claims `high`.
+        let mut argv_only = miss.clone();
+        argv_only.codename_source = None;
+        assert_eq!(source_of(&argv_only), "lutris");
+        assert_eq!(confidence_of(&argv_only), "medium");
+        argv_only.confidence = Some(Confidence::High);
+        assert_eq!(
+            confidence_of(&argv_only),
+            "medium",
+            "a lutris-wrapper-only title claimed high"
+        );
+
+        // The other codename and title sources, by the table.
+        for (codename_source, want) in [
+            ("heroic-env", "heroic-config"),
+            ("lutris-library", "lutris"),
+        ] {
+            let mut m = miss.clone();
+            m.codename_source = Some(codename_source.into());
+            assert_eq!(source_of(&m), want, "{codename_source}");
+            assert_eq!(confidence_of(&m), "high", "{codename_source}");
+        }
+        for (title_source, want) in [
+            ("heroic-config", "heroic-config"),
+            ("heroic-library", "heroic-library"),
+            ("detectable", "detectable"),
+            ("mpris-hint", "manual"),
+            ("stem", "manual"),
+        ] {
+            let mut m = miss.clone();
+            m.codename_source = None;
+            m.title_source = Some(title_source.into());
+            assert_eq!(source_of(&m), want, "{title_source}");
+        }
+
+        // A correction the user typed outranks every resolver.
+        let mut yours = miss.clone();
+        yours.codename_override = Some("926078".into());
+        assert_eq!(source_of(&yours), "manual");
+    }
+
+    /// The gap predicate: fully known to the index AND curated-titled means
+    /// no gap; anything less is one.
+    #[test]
+    fn a_gap_is_anything_the_index_or_a_curated_source_does_not_vouch_for() {
+        let index = GamedbIndex::parse(super::super::index::FIXTURE).expect("fixture");
+
+        // Control: every identifier resolves, title from detectable.
+        let mut stash = Stash::default();
+        let key = stash.launch(
+            "egs",
+            Some("Calluna"),
+            "egs:Calluna",
+            Some("Control"),
+            "detectable",
+            Confidence::High,
+            None,
+            "2026-08-15",
+        );
+        stash.steam_sku(&key, 870780);
+        let pages = candidates(&stash.report, Some(&index));
+        assert!(!pages[0].gap, "{pages:#?}");
+
+        // The same entry titled by Heroic's config: curated enough for the
+        // page, but not `detectable` - the identity map still has a hole.
+        stash.report.update(&key, |m| {
+            m.title_source = Some("heroic-config".into());
+        });
+        let pages = candidates(&stash.report, Some(&index));
+        assert!(pages[0].gap);
+
+        // A store identity the index has never heard of is a gap however
+        // the title was learned.
+        let mut stash = Stash::default();
+        stash.launch(
+            "gog",
+            Some("999"),
+            "gog:999",
+            Some("Mystery"),
+            "detectable",
+            Confidence::High,
+            None,
+            "2026-08-15",
+        );
+        let pages = candidates(&stash.report, Some(&index));
+        assert!(pages[0].gap);
+
+        // And with no index at all, nothing is known to be covered.
+        assert!(candidates(&stash.report, None)[0].gap);
+    }
+
+    /// The row predicates the TUI's filter cycles: umu follows
+    /// `is_umu_miss`, weak follows "nothing identified this strongly".
+    #[test]
+    fn the_umu_and_weak_predicates_read_the_folded_entries() {
+        // A umu miss, confidently identified: umu, not weak.
+        let stash = control();
+        let pages = candidates(&stash.report, None);
+        assert!(pages[0].umu);
+        assert!(!pages[0].weak);
+
+        // A native Lutris launch: not umu, and its wrapper-argv title never
+        // counts as strong - but the launcher line names what Lutris knew.
+        let mut report = UmuReport::default();
+        lutris_launch(
+            &mut report,
+            "itchio",
+            Some("926077"),
+            "lutris:uuid-1",
+            "Danger Scavenger",
+            Some("Danger Scavenger"),
+            None,
+            "2026-08-23",
+        );
+        let pages = candidates(&report, None);
+        assert!(!pages[0].umu);
+        assert!(pages[0].weak);
+        assert_eq!(
+            pages[0].launcher.as_deref(),
+            Some("lutris Danger Scavenger (itchio/926077)")
+        );
+    }
+
+    /// The whole Danger Scavenger fold, byte for byte: the page the task's
+    /// fixture is pinned to, single-line note included.
+    #[test]
+    fn a_native_lutris_launch_renders_the_danger_scavenger_page() {
+        let mut report = UmuReport::default();
+        lutris_launch(
+            &mut report,
+            "itchio",
+            Some("926077"),
+            "lutris:uuid-1",
+            "Danger Scavenger",
+            Some("Danger Scavenger"),
+            Some("/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64"),
+            "2026-08-23",
+        );
+        let pages = candidates(&report, None);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].status, Status::Ready);
+        assert_eq!(pages[0].file_name(), "danger-scavenger.toml");
+        assert_eq!(
+            render_page(&pages[0]),
+            "title = \"Danger Scavenger\"\n\
+             gamedb = \"itchio-926077\"\n\
+             note = \"Identified from Lutris: service=itchio, appid=926077.\"\n\
+             \n\
+             [[stores.itchio]]\n\
+             codename = \"926077\"\n\
+             exe = \"Danger_Scavenger.x86_64\"\n\
+             seen = \"2026-08-23\"\n\
+             source = \"lutris\"\n\
+             confidence = \"high\"\n"
+        );
+    }
+
+    /// The library join words its note differently: the fact came out of
+    /// pga.db, not a file beside the game.
+    #[test]
+    fn a_library_identified_entry_says_so_in_its_note() {
+        let mut report = UmuReport::default();
+        let key = lutris_launch(
+            &mut report,
+            "gog",
+            Some("1186009992"),
+            "lutris:uuid-2",
+            "Amnesia: The Bunker",
+            Some("Amnesia: The Bunker"),
+            None,
+            "2026-08-23",
+        );
+        report.update(&key, |m| {
+            m.codename_source = Some("lutris-library".into());
+        });
+        let pages = candidates(&report, None);
+        assert_eq!(
+            pages[0].note.as_deref(),
+            Some("Identified from the Lutris library: service=gog, appid=1186009992.")
+        );
     }
 }

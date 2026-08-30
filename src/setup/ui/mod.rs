@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, ListState, Paragraph};
 use ratatui::Frame;
 
 use super::actions::{Action, Plan};
-use super::gamedb::{GamedbRow, GamedbView};
+use super::gamedb::{GamedbFilter, GamedbRow, GamedbView};
 use super::paths::Target;
 use super::status::{Health, Row, Status};
 use super::umu_misses::PickCandidate;
@@ -163,10 +163,15 @@ pub struct App {
     /// keyboard ownership as `id_input`. Starts empty; the input line shows
     /// the current effective title beside it.
     pub title_input: Option<String>,
-    /// The gamedb pane's rows: the same stash folded into one page per
-    /// game, with what the published index made of each. Loaded off the
-    /// render path and arriving as a message, like the miss list.
+    /// The gamedb pane's rows as currently shown: the same stash folded
+    /// into one page per game, with what the published index made of each,
+    /// narrowed by [`App::gamedb_filter`]. Loaded off the render path and
+    /// arriving as a message, like the miss list.
     pub gamedb: Vec<GamedbRow>,
+    /// Every gamedb row, unfiltered - what `f` narrows down from.
+    pub gamedb_all: Vec<GamedbRow>,
+    /// The pane's `f`: which rows [`App::gamedb`] shows.
+    pub gamedb_filter: GamedbFilter,
     pub gamedb_list: ListState,
     /// The one-line index state the pane's header shows.
     pub gamedb_index: String,
@@ -214,6 +219,8 @@ impl Default for App {
             misses: Vec::new(),
             miss_list: ListState::default(),
             gamedb: Vec::new(),
+            gamedb_all: Vec::new(),
+            gamedb_filter: GamedbFilter::default(),
             gamedb_list: ListState::default(),
             gamedb_index: "loading…".to_string(),
             gamedb_index_ok: false,
@@ -369,20 +376,41 @@ impl App {
             .selected()
             .and_then(|i| self.gamedb.get(i))
             .map(|row| row.key.clone());
-        self.gamedb = view.rows;
+        self.gamedb_all = view.rows;
         self.gamedb_index = view.index;
         self.gamedb_index_ok = view.index_ok;
         self.gamedb_dir = view.export_dir;
-        if let Some(key) = selected_key {
-            if let Some(idx) = self.gamedb.iter().position(|row| row.key == key) {
-                self.gamedb_list.select(Some(idx));
-            }
-        }
-        // The pane's keys act on the selected game; without this they stay
-        // inert until the first keypress.
-        if self.gamedb_list.selected().is_none() && !self.gamedb.is_empty() {
-            self.gamedb_list.select(Some(0));
-        }
+        self.refilter_gamedb(selected_key);
+    }
+
+    /// The pane's `f`: narrow the rows to the next filter mode, keeping the
+    /// selection on the same game where it is still shown.
+    pub fn cycle_gamedb_filter(&mut self) {
+        let selected_key = self
+            .gamedb_list
+            .selected()
+            .and_then(|i| self.gamedb.get(i))
+            .map(|row| row.key.clone());
+        self.gamedb_filter = self.gamedb_filter.next();
+        self.refilter_gamedb(selected_key);
+    }
+
+    /// Rebuild the shown rows from the unfiltered set, putting the
+    /// selection back on `selected_key` when the filter still shows it,
+    /// else on the first row. The pane's keys act on the selected game;
+    /// without a selection they stay inert until the first keypress.
+    fn refilter_gamedb(&mut self, selected_key: Option<String>) {
+        let filter = self.gamedb_filter;
+        self.gamedb = self
+            .gamedb_all
+            .iter()
+            .filter(|row| filter.matches(row))
+            .cloned()
+            .collect();
+        let idx = selected_key
+            .and_then(|key| self.gamedb.iter().position(|row| row.key == key))
+            .or_else(|| (!self.gamedb.is_empty()).then_some(0));
+        self.gamedb_list.select(idx);
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -730,6 +758,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             app.dir_input = Some(app.gamedb_dir.clone());
             Intent::None
         }
+        // Narrow the list to what still needs work: all / gaps / umu / weak.
+        KeyCode::Char('f') if app.view == View::Gamedb => {
+            app.cycle_gamedb_filter();
+            Intent::None
+        }
         // `d` is taken here, so dismiss gets its own key. It parks the
         // representative entry only - the other launches folded into this
         // game are separate judgements.
@@ -1039,9 +1072,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         // The pane's own verbs, then the matchup verbs - which act on this
         // game's representative stash entry only.
         View::Gamedb => {
-            "↑↓ · tab view · ⏎ show entry · r index (net) · e export · d directory · \
-             on the entry: o lookup (net) · a assign · t title · p pick · s store · \
-             x dismiss · q quit"
+            "↑↓ · tab view · ⏎ show entry · f filter (all/gaps/umu/weak) · r index (net) · \
+             e export · d directory · on the entry: o lookup (net) · a assign · t title · \
+             p pick · s store · x dismiss · q quit"
         }
     };
     f.render_widget(
@@ -1330,6 +1363,10 @@ mod tests {
             entries: 9,
             entry_keys: vec![format!("egs:{title}")],
             rep_key: format!("egs:{title}"),
+            gap: false,
+            umu: false,
+            weak: false,
+            launcher: None,
         }
     }
 
@@ -1376,6 +1413,77 @@ mod tests {
             Intent::GamedbExport { force: false }
         );
         assert!(app.confirm.is_none(), "a fresh index asked anyway");
+    }
+
+    /// The pane's `f` cycles all → gaps → umu → weak → all, narrows the
+    /// shown rows to the matching predicate, and fires no intent - it is a
+    /// view of the same rows, not an action.
+    #[test]
+    fn f_cycles_the_gamedb_filter_through_gaps_umu_and_weak() {
+        let mut app = app_with_rows();
+        app.view = View::Gamedb;
+        let mut view = gamedb_view(true);
+        view.rows = vec![
+            GamedbRow {
+                gap: true,
+                ..sample_gamedb_row("Gappy", RowState::Ready)
+            },
+            GamedbRow {
+                umu: true,
+                ..sample_gamedb_row("Umuish", RowState::Ready)
+            },
+            GamedbRow {
+                weak: true,
+                ..sample_gamedb_row("Weakling", RowState::Ready)
+            },
+        ];
+        app.set_gamedb(view);
+        assert_eq!(app.gamedb.len(), 3, "all is the default");
+
+        let titles = |app: &App| {
+            app.gamedb
+                .iter()
+                .map(|r| r.title.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Gaps);
+        assert_eq!(titles(&app), ["Gappy"]);
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Umu);
+        assert_eq!(titles(&app), ["Umuish"]);
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Weak);
+        assert_eq!(titles(&app), ["Weakling"]);
+        handle_key(&mut app, key(KeyCode::Char('f')));
+        assert_eq!(app.gamedb_filter, GamedbFilter::All);
+        assert_eq!(app.gamedb.len(), 3, "the cycle did not come back to all");
+
+        // Every narrowed list has a selection, so the entry verbs keep
+        // working; and a refresh keeps the filter in force.
+        handle_key(&mut app, key(KeyCode::Char('f')));
+        assert!(app.gamedb_list.selected().is_some());
+        assert_eq!(app.edit_key().as_deref(), Some("egs:Gappy"));
+        let mut view = gamedb_view(true);
+        view.rows = vec![GamedbRow {
+            gap: true,
+            ..sample_gamedb_row("Gappy", RowState::Ready)
+        }];
+        app.set_gamedb(view);
+        assert_eq!(app.gamedb_filter, GamedbFilter::Gaps);
+        assert_eq!(titles(&app), ["Gappy"]);
+    }
+
+    /// `f` is a gamedb verb: everywhere else the key stays inert.
+    #[test]
+    fn the_filter_key_is_inert_outside_the_gamedb_view() {
+        let mut app = app_with_rows();
+        app.set_gamedb(gamedb_view(true));
+        for view in [View::Status, View::Monitor, View::Misses] {
+            app.view = view;
+            assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
+            assert_eq!(app.gamedb_filter, GamedbFilter::All, "{view:?} cycled it");
+        }
     }
 
     /// Without an index nothing can say whether a page duplicates one the
