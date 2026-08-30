@@ -361,13 +361,14 @@ fn pick_display_index(candidates: &[PickCandidate], selected: usize) -> usize {
     selected + headers
 }
 
-/// A Heroic library row whose store differs from the one the miss already
-/// carries. Only library identities grey this way: database rows are
-/// cross-store on purpose, and the online sections were store-dispatched
-/// to begin with.
+/// A library row - Heroic or Lutris - whose store differs from the one the
+/// miss already carries. Only library identities grey this way: database
+/// rows are cross-store on purpose, and the online sections were
+/// store-dispatched to begin with.
 fn cross_store_library(c: &PickCandidate, miss_store: Option<&str>) -> bool {
     match (c, miss_store) {
         (PickCandidate::Library(g), Some(store)) => store != "none" && g.store != store,
+        (PickCandidate::Lutris(g), Some(store)) => store != "none" && g.store != store,
         _ => false,
     }
 }
@@ -380,6 +381,7 @@ fn candidate_row(c: &PickCandidate) -> (String, String) {
             format!("{} · {} · {}", e.store, e.codename, e.umu_id),
         ),
         PickCandidate::Library(g) => (g.title.clone(), format!("{} · {}", g.store, g.codename)),
+        PickCandidate::Lutris(g) => (g.name.clone(), format!("{} · {}", g.store, g.codename)),
         PickCandidate::GogProduct(p) => (p.title.clone(), format!("{} · {}", p.id, p.product_type)),
         PickCandidate::GogById {
             id,
@@ -549,5 +551,21 @@ mod tests {
             &sample_candidate("gog", "2049187585", "umu-870780"),
             Some("egs")
         ));
+        // The Lutris library greys by the same rule: same identity class,
+        // same "probably not the row you are after" when the store differs.
+        let lutris = PickCandidate::Lutris(crate::setup::lutris_library::LutrisGame {
+            name: "Control".into(),
+            slug: "control".into(),
+            store: "gog".into(),
+            codename: "2049187585".into(),
+            runner: None,
+            directory: None,
+        });
+        assert!(cross_store_library(&lutris, Some("egs")));
+        assert!(!cross_store_library(&lutris, Some("gog")));
+        // And its row names the game like any other identity candidate.
+        let (name, detail) = candidate_row(&lutris);
+        assert_eq!(name, "Control");
+        assert_eq!(detail, "gog · 2049187585");
     }
 }
