@@ -44,7 +44,7 @@ const MAX_DESCENDANT_DEPTH: usize = 12;
 /// number of processes visited.
 const MAX_DESCENDANT_BREADTH: usize = 64;
 
-/// Where a group identity's name came from (S9c title provenance). A tag
+/// Where a group identity's name came from. A tag
 /// BESIDE [`IdentityClass`], never part of it: provenance must not change
 /// the election order, only the stash's `title_source` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,10 +106,10 @@ pub struct Enricher {
     /// merge key → (store guess, codename, stable entry fallback) for keys
     /// whose launch went into the identity-miss stash, so later title
     /// resolutions can find their stash entry. The fallback may be a
-    /// GAME_NAME slug rather than the per-launch merge key (S9c), which is
+    /// GAME_NAME slug rather than the per-launch merge key, which is
     /// what collapses repeated per-uuid Lutris launches onto one entry.
     stash_keys: HashMap<String, (String, Option<String>, String)>,
-    /// merge key → provenance of the group's CURRENT identity (S9c). Kept in
+    /// merge key → provenance of the group's CURRENT identity. Kept in
     /// lockstep with [`GameGroup::set_identity`]'s monotone rule: recorded
     /// only when the offered identity was actually adopted, so the tag
     /// always describes the identity the group holds. Never consulted for
@@ -697,7 +697,7 @@ impl Enricher {
             .or_insert_with(|| GameGroup::new(key, activity.since));
         self.pid_to_group.insert(pid, key.to_string());
         if let Some((id, source)) = identity {
-            // Mirror set_identity's monotone rule (spec §1.3) so the
+            // Mirror set_identity's monotone rule so the
             // provenance tag always describes the identity the group holds.
             let adopted = match &group.identity {
                 None => true,
@@ -753,7 +753,7 @@ impl Enricher {
         let group_appid = group.steam_appid.clone();
 
         let effect = group.upsert(pid, member, rep_pinned);
-        // S9: the stash mirrors the group's ELECTED identity, never a
+        // The stash mirrors the group's ELECTED identity, never a
         // member's raw claim. A claim that loses the election must not reach
         // the stash - the Unity crash handler resolved to another game and
         // overwrote a correct same-confidence title, while the published
@@ -976,7 +976,7 @@ impl Enricher {
                         exe,
                         class: IdentityClass::Wrapper,
                     };
-                    // Mirror set_identity's monotone rule (spec §1.3) so
+                    // Mirror set_identity's monotone rule so
                     // the provenance tag tracks the held identity.
                     let adopted = match &group.identity {
                         None => true,
@@ -1014,10 +1014,10 @@ impl Enricher {
         out
     }
 
-    /// S9: write the group's elected identity through to the umu-miss stash.
+    /// Write the group's elected identity through to the identity-miss stash.
     /// GameProcess identities are curated-database hits; wrapper layers are
     /// launcher/human titles - a Lutris-argv title is labelled with its own
-    /// source (`lutris-wrapper`, S9c) so downstream knows the name came off
+    /// source (`lutris-wrapper`) so downstream knows the name came off
     /// the launcher's command line. note_title never downgrades, so the
     /// heroic-config High note (recorded at its creation site) survives the
     /// Medium wrapper-class mapping here. No-op for keys that never missed.
@@ -1790,7 +1790,7 @@ fn env_value(environ: &str, var: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The store codename Lutris wrote beside the game (S9c): read
+/// The store codename Lutris wrote beside the game: read
 /// `<dir>/.lutrisgame.json` and take its `appid`. Only itch.io installs
 /// carry the file on a measured machine; a missing or malformed file is a
 /// silent `None` - same precedent as [`heroic_title`].
@@ -1805,7 +1805,7 @@ fn lutris_marker_appid(dir: &str) -> Option<String> {
     (!appid.is_empty()).then_some(appid)
 }
 
-/// A stable slug of a launcher's game name (S9c stash fallback key):
+/// A stable slug of a launcher's game name, the stash fallback key:
 /// lowercase, runs of `[a-z0-9]` joined by single hyphens, everything else
 /// dropped. "Danger Scavenger" becomes "danger-scavenger".
 fn slug(name: &str) -> String {
@@ -1826,7 +1826,7 @@ fn slug(name: &str) -> String {
     out
 }
 
-/// Which runtime a launch ran under (S9c): `proton` when umu's marker was
+/// Which runtime a launch ran under: `proton` when umu's marker was
 /// present or the raw exe is a Wine/Proton binary (the preloaders, plain
 /// wine, or a Windows `.exe` under a prefix), `native` otherwise.
 fn runner_of(umu_marker: bool, raw_exe: &str) -> &'static str {
@@ -3691,7 +3691,7 @@ mod tests {
 
     #[test]
     fn a_heroic_umu_miss_records_the_same_entry_plus_launcher_facts() {
-        // The pre-S9c Heroic umu-0 shape must produce the entry it always
+        // The original Heroic umu-0 shape must produce the entry it always
         // did - same key, same store guess, same codename, same umu id  -
         // with the launcher facts added beside it.
         let mut e = with_scratch_stash("heroic-facts");

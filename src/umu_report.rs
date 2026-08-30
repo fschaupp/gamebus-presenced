@@ -1518,7 +1518,7 @@ mod tests {
         assert!(db.find_store_codename("egs", "").is_none());
     }
 
-    // ---- Title search for the TUI's pick verb (S9b).
+    // ---- Title search for the TUI's pick verb.
 
     /// Real row shapes: one game in three spellings, plus the CSV's literal
     /// duplicate-row habit (the upstream file really contains repeated rows).

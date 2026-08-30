@@ -1,4 +1,4 @@
-//! S9b - review, verify, draft, and export the umu-database miss stash.
+//! Review, verify, draft, and export the umu-database miss stash.
 //!
 //! The stash holds every identity miss the daemon recorded - umu launches
 //! that reported `GAMEID=umu-0`, and launcher launches (Lutris, Heroic)

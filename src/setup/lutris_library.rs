@@ -159,9 +159,9 @@ pub fn candidates<'a>(games: &'a [LutrisGame], title: &str) -> Vec<&'a LutrisGam
 /// `service_id` for (launcher_name, effective store) - written as the
 /// annotation-half `codename_override`, because that is the half this tool
 /// owns. Writing `codename`/`codename_source` here would not survive: both
-/// are resolution-half, and every persist (ADR-009) adopts the resolution
-/// half from the daemon's side, flattening a setup-tool write on the next
-/// merge. `codename_source = "lutris-library"` therefore stays daemon
+/// are resolution-half, and every persist adopts the resolution half from
+/// the daemon's side, flattening a setup-tool write on the next merge.
+/// `codename_source = "lutris-library"` therefore stays daemon
 /// vocabulary; the returned report lines are what names the source to the
 /// user.
 ///
