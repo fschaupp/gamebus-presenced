@@ -514,6 +514,7 @@ mod tests {
             codename_override: None,
             title_override: None,
             dismissed: None,
+            umu_promoted: None,
         }
     }
 
