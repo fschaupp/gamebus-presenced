@@ -14,15 +14,15 @@ struct SubmissionRow<'a> {
     /// Where the id came from, for the NOTE column and the evidence list.
     id_provenance: Option<String>,
     /// The CODENAME column value. The README's standalone rule pairs
-    /// store `none` with codename `none` — a codename without a store
+    /// store `none` with codename `none` - a codename without a store
     /// namespace is meaningless upstream, so it moves to the NOTE instead.
     codename: String,
     /// True when the id provably honors the "Steam appid when on Steam"
     /// rule: verified cross-store from the database, or drafted from a
     /// detectable.json Steam sku. Slug/codename drafts only prove Discord's
-    /// file had no entry — NOT that the game is absent from Steam.
+    /// file had no entry - NOT that the game is absent from Steam.
     steam_rule_certain: bool,
-    /// The protonfixes this row's id is served by — why the entry belongs in
+    /// The protonfixes this row's id is served by - why the entry belongs in
     /// the database at all. Empty only for a candidate that earned its place
     /// another way: promoted by the user, or already active in the database
     /// under another store; every other fix-less entry is held back before
@@ -74,7 +74,7 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             held.push((m, format!("possibly already submitted: {pr}")));
             continue;
         }
-        // A title the user typed outranks any resolver guess — an override
+        // A title the user typed outranks any resolver guess - an override
         // is confident by definition; the resolver gate stays for the rest.
         let confident = m.title_override.is_some()
             || matches!(
@@ -122,7 +122,7 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
         // promotion, a cross-store match, or a protonfix under this very id
         // (a fix checked under a stale id proves nothing about this row).
         // Promotion and the cross-store match carry an entry even without a
-        // fix — the user said the database should have it, or the database
+        // fix - the user said the database should have it, or the database
         // already actively serves the game under another store.
         let scope = m
             .fix
@@ -199,7 +199,7 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
 }
 
 /// The submission wants executable names, not this machine's absolute
-/// paths — those embed `/home/<user>` and whatever else the install layout
+/// paths - those embed `/home/<user>` and whatever else the install layout
 /// leaks. Basename only, either separator (Wine paths carry backslashes).
 fn exe_basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
@@ -209,15 +209,15 @@ fn csv_line(row: &SubmissionRow<'_>) -> String {
     let m = row.miss;
     // The NOTE column is the database's, not ours: it carries game-related
     // remarks only (which of two standalone versions a row means, per the
-    // README's Genshin example). Provenance — who resolved the title, how
-    // the id was drafted — belongs in the merge request's evidence text,
+    // README's Genshin example). Provenance - who resolved the title, how
+    // the id was drafted - belongs in the merge request's evidence text,
     // never in the submitted CSV. The column stays empty.
     format!(
         "{},{},{},{},,,{}",
         csv_field(row.title),
         m.effective_store().to_lowercase(),
         // Codename comes verbatim from an untrusted process's environment
-        // (HEROIC_APP_NAME) — escaped like every other external field, or a
+        // (HEROIC_APP_NAME) - escaped like every other external field, or a
         // comma in it would shift the columns and forge the UMU_ID cell.
         csv_field(&row.codename),
         row.umu_id,
@@ -249,7 +249,7 @@ pub(super) fn export_csv(report: &UmuReport) {
     }
 }
 
-/// `--export-md`: the slim merge request — title line, one honest paragraph,
+/// `--export-md`: the slim merge request - title line, one honest paragraph,
 /// the CSV in a fenced block, per-entry evidence, and the README's own rules
 /// as a checklist.
 pub(super) fn export_markdown(
@@ -259,7 +259,7 @@ pub(super) fn export_markdown(
     let (rows, held) = partition(report);
     if rows.is_empty() {
         // The common case now that the scope rule is enforced: every game
-        // ran fine. That is a result, not a failure — say which it was.
+        // ran fine. That is a result, not a failure - say which it was.
         let out_of_scope = held
             .iter()
             .filter(|(_, reason)| reason.contains("protonfix"))
@@ -339,7 +339,7 @@ pub(super) fn export_markdown(
             .map(|n| format!("; {n}"))
             .unwrap_or_default();
         // Why the row exists, stated per entry: the fix, linked so a
-        // reviewer sees in one click that this game needs umu — or, for a
+        // reviewer sees in one click that this game needs umu - or, for a
         // fix-less candidate, the promotion or cross-store entry that
         // earned it the place instead.
         let why = if row.fixes.is_empty() {
@@ -377,7 +377,7 @@ pub(super) fn export_markdown(
     }
     md.push_str("\n## Checklist\n\n");
     // The checklist is for what a human must verify, not for what the code
-    // guarantees mechanically — lowercase STORE entries and the empty NOTE
+    // guarantees mechanically - lowercase STORE entries and the empty NOTE
     // column are enforced at the emit site, and a self-ticked box for them
     // would be a box nobody actually checked.
     md.push_str("- [ ] Titles match the store's spelling and capitalization\n");
@@ -439,7 +439,7 @@ pub(super) fn export_markdown(
 }
 
 /// The evidence list's title-provenance phrase. An overridden title is the
-/// user's word, not the resolver's — saying "high confidence" over it would
+/// user's word, not the resolver's - saying "high confidence" over it would
 /// dress a human correction up as machine evidence.
 fn title_provenance(m: &Miss) -> String {
     match (&m.title_override, m.title.as_deref()) {
@@ -468,7 +468,7 @@ mod tests {
     use super::*;
     use crate::umu_report::{DraftedId, FixCheck, UmuReport};
 
-    /// A drafted id plus the protonfix that justifies submitting it — the
+    /// A drafted id plus the protonfix that justifies submitting it - the
     /// state an entry reaches after `--verify` when the game does need umu.
     fn in_scope(report: &mut UmuReport, key: &str, id: &str) {
         report.update(key, |m| {
@@ -534,7 +534,7 @@ mod tests {
         let (mut report, key) = pick_report("egs", "Catnip");
         in_scope(&mut report, &key, "umu-397540");
         // Never verified against the fix list: unchecked is not "runs fine",
-        // and it is not "needs umu" either — nothing gets submitted on it.
+        // and it is not "needs umu" either - nothing gets submitted on it.
         report.update(&key, |m| m.fix = None);
         let (rows, held) = partition(&report);
         assert!(rows.is_empty());
@@ -608,7 +608,7 @@ mod tests {
         assert!(rows.is_empty(), "a low-confidence title reached a row");
         assert_eq!(held[0].1, "unresolved or low-confidence title");
         // …until the user says what the game is. The typed title outranks
-        // any resolver guess — it exports, under the user's spelling.
+        // any resolver guess - it exports, under the user's spelling.
         report.update(&key, |m| m.title_override = Some("Project Hospital".into()));
         let (rows, held) = partition(&report);
         assert!(held.is_empty(), "{:?}", held.first().map(|(_, r)| r));

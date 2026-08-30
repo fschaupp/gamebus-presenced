@@ -10,7 +10,7 @@
 //! 2. `$XDG_DATA_HOME/gamebus-presenced/detectable.json` (user-installed)
 //! 3. `/usr/share/gamebus-presenced/detectable.json` (system-installed)
 //!
-//! If no database is found, naming enrichment is silently disabled — the
+//! If no database is found, naming enrichment is silently disabled - the
 //! daemon works without it ("no network, no naming, everything else still
 //! works", design doc).
 
@@ -41,14 +41,14 @@ struct DetectableSku {
 }
 
 /// The shipped shared-helper list (helper executables that can never name a
-/// game — see `shared-helpers.txt` at the repo root, incident history
+/// game - see `shared-helpers.txt` at the repo root, incident history
 /// included), compiled in so the protections exist even with no file on disk.
 const BUNDLED_SHARED_HELPERS: &str = include_str!("../shared-helpers.txt");
 
 pub const SHARED_HELPERS_NAME: &str = "shared-helpers.txt";
 
 /// The effective shared-helper set: the bundled list unioned with every
-/// `shared-helpers.txt` found on disk. Union, not override — each file only
+/// `shared-helpers.txt` found on disk. Union, not override - each file only
 /// adds entries, so a local file can extend the shipped protections but never
 /// remove them. Parsed once per process; the daemon is long-running and the
 /// files do not change under it.
@@ -101,7 +101,7 @@ fn shared_helpers_candidates() -> Vec<PathBuf> {
 }
 
 /// Lines → lowercase basenames. Blank lines and `#` comments are skipped; a
-/// junk line is an entry that matches nothing, not an error — a typo in a
+/// junk line is an entry that matches nothing, not an error - a typo in a
 /// user file must not cost the shipped protections.
 fn parse_shared_helpers(raw: &str) -> HashSet<String> {
     raw.lines()
@@ -116,7 +116,7 @@ pub struct NamingDb {
     /// executable basename (lowercase) → [(entry name, game name)].
     ///
     /// detectable.json entries come in two forms: plain (`eldenring.exe`)
-    /// and path-prefixed (`amnesia the bunker/amnesiathebunker.exe`) — the
+    /// and path-prefixed (`amnesia the bunker/amnesiathebunker.exe`) - the
     /// prefixed form is the majority (~83% of entries). Both are bucketed by
     /// basename; path-prefixed entries additionally match by path suffix at
     /// lookup time (mirroring Discord's own scanner), which disambiguates
@@ -125,7 +125,7 @@ pub struct NamingDb {
     by_executable: HashMap<String, Vec<(String, String)>>,
     /// steam appid → game name
     by_steam_appid: HashMap<String, String>,
-    /// game name (lowercase) → steam appid — the reverse direction, used by
+    /// game name (lowercase) → steam appid - the reverse direction, used by
     /// gamebus-setup to draft umu ids from a resolved title (S9b). Dead in
     /// the daemon's copy of this shared module, live in gamebus-setup's.
     #[allow(dead_code)]
@@ -184,12 +184,12 @@ impl NamingDb {
     /// Look up a game name by executable path or filename.
     ///
     /// Matching order per basename bucket:
-    /// 1. **Path-suffix match** — a path-prefixed entry whose full name is a
+    /// 1. **Path-suffix match** - a path-prefixed entry whose full name is a
     ///    suffix of the lowercased input path
     ///    (`amnesia the bunker/amnesiathebunker.exe` matches
     ///    `.../Amnesia The Bunker/AmnesiaTheBunker.exe`). Most specific.
-    /// 2. **Plain entry** — an entry with no path component (`eldenring.exe`).
-    /// 3. **First entry in bucket** — deterministic fallback for ambiguous
+    /// 2. **Plain entry** - an entry with no path component (`eldenring.exe`).
+    /// 3. **First entry in bucket** - deterministic fallback for ambiguous
     ///    basenames.
     pub fn lookup_by_executable(&self, executable: &str) -> Option<&str> {
         // Normalise Windows path separators: Wine process cmdlines carry
@@ -224,7 +224,7 @@ impl NamingDb {
     }
 
     /// The reverse: a Steam appid for an exact (case-insensitive) title.
-    /// This is Discord's curated sku data — an offline source for the
+    /// This is Discord's curated sku data - an offline source for the
     /// umu-database rule "on Steam → umu-<appid>" (S9b drafting).
     /// Dead in the daemon's copy, live in gamebus-setup's (see the field).
     #[allow(dead_code)]
@@ -243,7 +243,7 @@ impl NamingDb {
 /// System data directories, per the XDG base directory specification.
 ///
 /// The default is `/usr/local/share:/usr/share`, so software installed by hand
-/// under `/usr/local` — the FHS home for locally built software — is found
+/// under `/usr/local` - the FHS home for locally built software - is found
 /// without colliding with the paths a distribution package owns.
 pub(crate) fn xdg_data_dirs() -> Vec<PathBuf> {
     std::env::var_os("XDG_DATA_DIRS")
@@ -259,7 +259,7 @@ pub(crate) fn xdg_data_dirs() -> Vec<PathBuf> {
 
 /// Find the detectable.json file in the standard search paths.
 ///
-/// `gamebus-setup` mirrors this order to report which copy is live — keep the
+/// `gamebus-setup` mirrors this order to report which copy is live - keep the
 /// two in step (`src/setup/paths.rs`, `detectable_candidates`).
 fn find_detectable_json() -> Option<PathBuf> {
     let mut candidates = Vec::new();
@@ -295,20 +295,20 @@ fn find_detectable_json() -> Option<PathBuf> {
 ///
 /// Three rules over a backslash-aware lowercase basename (Wine paths like
 /// `C:\windows\system32\services.exe` contain no `/`):
-/// 1. literal basenames — shells, launchers, Wine service processes;
-/// 2. prefix families — the pressure-vessel / steam-runtime-tools crowd,
+/// 1. literal basenames - shells, launchers, Wine service processes;
+/// 2. prefix families - the pressure-vessel / steam-runtime-tools crowd,
 ///    which ships dozens of helpers (`pv-verify`, `srt-logger`,
 ///    `x86_64-linux-gnu-check-vulkan`, …) that appear and vanish around a
 ///    launch, all preloaded into GameMode by libgamemodeauto;
-/// 3. version-suffixed interpreters — `/usr/bin/python3.13` must match like
+/// 3. version-suffixed interpreters - `/usr/bin/python3.13` must match like
 ///    `python3` did (observed live: a python3.13 wrapper identified as a
 ///    game exe because the bare-literal list missed it).
 ///
 /// Deliberately OFF the list, both load-bearing:
-/// - `wine64-preloader` / `wine-preloader` / `wine64` — Wine games are only
+/// - `wine64-preloader` / `wine-preloader` / `wine64` - Wine games are only
 ///   identifiable through the cmdline layer, which `classify_member`
 ///   restricts for listed wrappers;
-/// - `sleep` — the integration fixtures register real `sleep` processes and
+/// - `sleep` - the integration fixtures register real `sleep` processes and
 ///   assert their stem publishes.
 fn wrapper_basename(executable: &str) -> Option<String> {
     let base = executable.rsplit(['/', '\\']).next()?;
@@ -339,7 +339,7 @@ pub(crate) fn is_wrapper_executable(executable: &str) -> bool {
         "umu-shim",
         "gamemoderun",
         "lutris-wrapper",
-        // Wine service processes — prefix-shaped like games, never the game.
+        // Wine service processes - prefix-shaped like games, never the game.
         "wineserver",
         "services.exe",
         "winedevice.exe",
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(db.steam_appid_for_title("Elden Ring"), Some("1245620"));
         assert_eq!(db.steam_appid_for_title("elden ring"), Some("1245620"));
         assert_eq!(db.steam_appid_for_title("Overwatch"), Some("2357570"));
-        // No sku, no appid — and no fuzzy matching.
+        // No sku, no appid - and no fuzzy matching.
         assert_eq!(db.steam_appid_for_title("No Exe Game"), None);
         assert_eq!(db.steam_appid_for_title("Elden"), None);
     }
@@ -543,7 +543,7 @@ mod tests {
             None
         );
         // Even the listing game's own install must not resolve through the
-        // helper — the real game exe is the one that identifies it.
+        // helper - the real game exe is the one that identifies it.
         assert_eq!(
             db.lookup_by_executable("some game/unitycrashhandler64.exe"),
             None

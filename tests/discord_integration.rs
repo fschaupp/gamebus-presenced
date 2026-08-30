@@ -8,7 +8,7 @@
 //!
 //! Runs entirely on a private session bus and a private runtime directory, so a
 //! real Discord client and a real gamebus-presenced can both be running without
-//! affecting it — or being affected by it.
+//! affecting it - or being affected by it.
 
 use discord_rich_presence::activity::{
     Activity as ClientActivity, ActivityType, Assets, Party, Timestamps,

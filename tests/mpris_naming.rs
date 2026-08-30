@@ -4,7 +4,7 @@
 //! real `Identity` property, answered over the real wire) from this test
 //! process on the private session bus, then registers the same pid with the
 //! bus's own gamemoded. The daemon must name the record after the player's
-//! Identity — and must NOT list MPRIS as a source: hints are naming evidence,
+//! Identity - and must NOT list MPRIS as a source: hints are naming evidence,
 //! not a source.
 //!
 //! Private session bus and runtime directory throughout (tests/common).
@@ -58,7 +58,7 @@ async fn mpris_identity_names_an_unidentified_record() {
     }
 
     // The player exists BEFORE the daemon starts, so the seed pass picks it
-    // up and the hint is in place when the game registers — no reliance on
+    // up and the hint is in place when the game registers - no reliance on
     // the 15s reseed tick.
     let player_conn = env.connect().await.expect("player connection failed");
     player_conn
@@ -76,7 +76,7 @@ async fn mpris_identity_names_an_unidentified_record() {
     let manager = ManagerProxy::new(&conn).await.unwrap();
 
     // Register this test process as a "game". Its executable is the test
-    // binary — nothing detectable.json could ever name, so without the hint
+    // binary - nothing detectable.json could ever name, so without the hint
     // the record's name would be the executable stem.
     let test_pid = std::process::id();
     assert!(

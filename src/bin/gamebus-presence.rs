@@ -1,8 +1,8 @@
-//! gamebus-presence — CLI for gamebus-presenced.
+//! gamebus-presence - CLI for gamebus-presenced.
 //!
 //! Subcommands:
-//! - `monitor` — pretty-prints the current bus state (activities, sources, names)
-//! - `fetch-detectable` — downloads Discord's detectable.json to $XDG_CACHE_HOME
+//! - `monitor` - pretty-prints the current bus state (activities, sources, names)
+//! - `fetch-detectable` - downloads Discord's detectable.json to $XDG_CACHE_HOME
 
 use zbus::Connection;
 

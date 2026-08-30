@@ -52,7 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 rsrpc = { git = "https://github.com/SpikeHD/rsRPC", rev = "062e0fd9fe34a475640a822facfee68296ba22e3" }
 ureq = { version = "2", features = ["json"] }
-# Tooling only — never linked into the daemon binary (src/main.rs does not use
+# Tooling only - never linked into the daemon binary (src/main.rs does not use
 # it). crossterm comes via `ratatui::crossterm` rather than a direct dependency,
 # so the two can never disagree on a version. default-features = false drops
 # all-widgets (which pulls `time`) and the macros crate.

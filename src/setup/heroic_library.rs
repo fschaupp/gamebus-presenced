@@ -1,4 +1,4 @@
-//! Heroic's store_cache libraries — the second zero-network candidate
+//! Heroic's store_cache libraries - the second zero-network candidate
 //! source for the misses pane's `p`: the user's own libraries map titles to
 //! the store identities Heroic launches with.
 //!
@@ -11,7 +11,7 @@
 //! (flatpak, 2026-08-08).
 //!
 //! Everything parses defensively: a missing, empty, or malformed cache is an
-//! empty library, never an error — `p` must behave identically on a machine
+//! empty library, never an error - `p` must behave identically on a machine
 //! without Heroic.
 
 use std::path::PathBuf;
@@ -26,12 +26,12 @@ pub struct LibraryGame {
     /// umu-database store id (`egs` / `gog`).
     pub store: String,
     /// What `HEROIC_APP_NAME` carries at launch: the EGS Builds App Name or
-    /// the numeric GOG product id — NOT the (lowercase) EGS namespace.
+    /// the numeric GOG product id - NOT the (lowercase) EGS namespace.
     pub codename: String,
 }
 
 /// Library candidates for a title, both stores, ranked and capped per store
-/// by [`search`]. Local files only — never the network.
+/// by [`search`]. Local files only - never the network.
 pub(crate) fn candidates(query: &str) -> Vec<LibraryGame> {
     let mut out = search(&load("legendary_library.json", parse_legendary), query);
     out.extend(search(&load("gog_library.json", parse_gog), query));
@@ -39,7 +39,7 @@ pub(crate) fn candidates(query: &str) -> Vec<LibraryGame> {
 }
 
 /// The first cache file that reads wins for its store; whatever it fails to
-/// yield is an empty library, not a fallthrough — a present-but-broken
+/// yield is an empty library, not a fallthrough - a present-but-broken
 /// flatpak cache must not be shadowed by a stale plain-config one.
 fn load(file: &str, parse: fn(&str) -> Vec<LibraryGame>) -> Vec<LibraryGame> {
     cache_paths(file)
@@ -112,7 +112,7 @@ fn parse_gog(raw: &str) -> Vec<LibraryGame> {
 
 /// Same matching spirit as `UmuDb::search_title`: case-insensitive substring
 /// in both directions, ranked exact match, then title-starts-with-query,
-/// then the rest; deduped by (store, codename) and capped at 10 — this runs
+/// then the rest; deduped by (store, codename) and capped at 10 - this runs
 /// per store, so the cap is per store too.
 pub(crate) fn search(games: &[LibraryGame], query: &str) -> Vec<LibraryGame> {
     let q = query.trim().to_lowercase();
@@ -150,7 +150,7 @@ mod tests {
     use super::*;
 
     /// Captured shape of the flatpak's legendary cache (2026-08-08): the
-    /// `library` array under a top-level object, extra fields and all — note
+    /// `library` array under a top-level object, extra fields and all - note
     /// the lowercase `namespace` beside the `app_name` the database wants.
     const LEGENDARY: &str = r#"{
         "library": [
@@ -166,7 +166,7 @@ mod tests {
     }"#;
 
     /// Captured shape of the GOG cache: a `games` array, numeric product ids
-    /// as `app_name` — plus Heroic's own non-game redist entry.
+    /// as `app_name` - plus Heroic's own non-game redist entry.
     const GOG: &str = r#"{
         "games": [
             {"app_name":"gog-redist","title":"Galaxy Common Redistributables","runner":"gog","is_installed":true},
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(egs.len(), 3);
         assert_eq!(egs[0].title, "Control");
         assert_eq!(egs[0].store, "egs");
-        // The Builds App Name, capitalized — never the lowercase namespace.
+        // The Builds App Name, capitalized - never the lowercase namespace.
         assert_eq!(egs[0].codename, "Calluna");
 
         let gog = parse_gog(GOG);

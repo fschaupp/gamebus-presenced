@@ -1,7 +1,7 @@
 //! Integration test for S7 publish-once-named, end to end.
 //!
 //! A keyless process whose executable is a blacklisted wrapper (`sh`) is
-//! registered with the private bus's gamemoded: the bus must stay silent —
+//! registered with the private bus's gamemoded: the bus must stay silent -
 //! no ActivityAdded, and on unregister no ActivityRemoved either (it was
 //! never published). A plain `sleep` registered in the same session is the
 //! positive control: its stem is a truthful name and publishes as always.
@@ -60,7 +60,7 @@ async fn nameless_wrapper_never_reaches_the_bus() {
     );
 
     // Positive control in the same session: a plain sleep, stem "sleep",
-    // publishes as always — proving the daemon is alive and the gate
+    // publishes as always - proving the daemon is alive and the gate
     // is selective, not silent.
     let control = env
         .command("sleep")
@@ -99,7 +99,7 @@ async fn nameless_wrapper_never_reaches_the_bus() {
         "nameless wrapper was published"
     );
 
-    // Unregister the wrapper: total silence for its pid — it was never on
+    // Unregister the wrapper: total silence for its pid - it was never on
     // the bus, so there is nothing to remove. Drain signals for a window and
     // reject anything concerning the wrapper.
     env.gamemoded_call("UnregisterGameByPID", wrapper_pid);
@@ -134,7 +134,7 @@ async fn nameless_wrapper_never_reaches_the_bus() {
         }
     }
 
-    // The control still lives and dies normally — one clean removal.
+    // The control still lives and dies normally - one clean removal.
     env.gamemoded_call("UnregisterGameByPID", control_pid);
     let list = common::wait_for_activities(&manager, WAIT, |list| {
         !list.iter().any(|p| p.as_str() == control_path)

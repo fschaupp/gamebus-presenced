@@ -17,7 +17,7 @@
 //! Steam has no watcher and no removal signal. The Enricher tracks which
 //! non-Steam sources are active per pid (`{pid: Set<Source>}`). When the
 //! last non-Steam source removes its record for a pid, the Enricher emits
-//! `SourceEvent::Removed` for Steam — preventing stale Steam data from
+//! `SourceEvent::Removed` for Steam - preventing stale Steam data from
 //! surviving a pid reuse.
 
 use crate::cache;
@@ -55,10 +55,10 @@ enum IdentitySource {
     /// The walk resolved the actual game process (cmdline, descendant tree,
     /// sandbox family).
     Walk,
-    /// The `lutris-wrapper` ancestor's argv named it (layer 4) — Lutris
+    /// The `lutris-wrapper` ancestor's argv named it (layer 4) - Lutris
     /// telling us what it launched, one rung below a walk hit.
     LutrisArgv,
-    /// Steam's own appmanifest named it — the official title of the
+    /// Steam's own appmanifest named it - the official title of the
     /// installed appid, curated-grade but distinct so downstream labels
     /// never claim detectable.json knew a game it did not.
     SteamManifest,
@@ -83,7 +83,7 @@ pub struct Enricher {
     ///
     /// One published record per key: `steam:<appid>` for Steam games,
     /// `lutris:<uuid>` for Lutris games, `umu:<id>` for umu games. The group
-    /// tracks every member pid and decides which one — the representative —
+    /// tracks every member pid and decides which one - the representative -
     /// carries the record; everyone else is absorbed silently.
     groups: HashMap<String, GameGroup>,
     /// member pid → its group's merge key (S4f reverse index).
@@ -94,10 +94,10 @@ pub struct Enricher {
     /// the flag.
     steam_only_groups: HashSet<String>,
     /// Wrapper pids whose game identity hasn't been resolved yet (S4e).
-    /// Retried periodically — the game may launch minutes after the wrapper.
+    /// Retried periodically - the game may launch minutes after the wrapper.
     unresolved_wrappers: HashSet<u32>,
     /// Naming database for detectable.json lookups (S4b).
-    /// `None` if no database file was found — naming enrichment is disabled.
+    /// `None` if no database file was found - naming enrichment is disabled.
     naming: Option<NamingDb>,
     /// umu-database misses and their resolutions (S9): raw material for a
     /// user-reviewed submission upstream. In-memory no-op until
@@ -113,10 +113,10 @@ pub struct Enricher {
     /// lockstep with [`GameGroup::set_identity`]'s monotone rule: recorded
     /// only when the offered identity was actually adopted, so the tag
     /// always describes the identity the group holds. Never consulted for
-    /// election — only for the stash's `title_source` label.
+    /// election - only for the stash's `title_source` label.
     identity_sources: HashMap<String, IdentitySource>,
     /// Ungrouped GameMode records withheld from the bus because nothing has
-    /// named them yet (S7). The monitor would show "(unknown)" — instead the
+    /// named them yet (S7). The monitor would show "(unknown)" - instead the
     /// bus sees nothing until any evidence names the record, which also makes
     /// the µs-lived keyless-helper corpses fully silent. Stored whole so the
     /// authoritative `since` survives until publication.
@@ -202,7 +202,7 @@ impl Enricher {
     /// Store an MPRIS naming hint (S6) and, when it improves an already
     /// published group record, refresh that record in place.
     ///
-    /// Swallows the event — hints never reach the correlator. Records that
+    /// Swallows the event - hints never reach the correlator. Records that
     /// are not refreshed here pick the hint up on their next `Updated`, at
     /// the latest via the 15s ListGames reseed.
     fn on_name_hint(&mut self, pid: u32, name: String) -> Vec<SourceEvent> {
@@ -211,7 +211,7 @@ impl Enricher {
         }
         self.name_hints.insert(pid, name.clone());
 
-        // S7: a withheld record publishes the moment a hint names it — with
+        // S7: a withheld record publishes the moment a hint names it - with
         // its original, authoritative `since`.
         if let Some(mut w) = self.withheld.remove(&pid) {
             w.name = name;
@@ -244,7 +244,7 @@ impl Enricher {
 
         // Rebuild the representative's activity the same way the reseed
         // would; apply_naming leaves the name empty (no identity, no
-        // detectable hit — that is why we are here), then the hint fills it.
+        // detectable hit - that is why we are here), then the hint fills it.
         let executable = std::fs::read_link(format!("/proc/{rep}/exe"))
             .map(|p| p.display().to_string())
             .unwrap_or_default();
@@ -281,7 +281,7 @@ impl Enricher {
         }
 
         // S4d instrumentation: log when a Discord pid has no GameMode
-        // registration — a join-miss that the ancestor-walk would fix.
+        // registration - a join-miss that the ancestor-walk would fix.
         if source == Source::Discord && pid > 0 {
             if let Some(sources) = self.active_sources.get(&pid) {
                 if !sources.contains(&Source::GameMode) {
@@ -295,7 +295,7 @@ impl Enricher {
         }
 
         // S4f: capture the raw `/proc/<pid>/exe` BEFORE the descendant walk
-        // rewrites `activity.executable` — member classification (helper
+        // rewrites `activity.executable` - member classification (helper
         // detection) must judge the process itself, not the identified game.
         let raw_exe = if pid > 0 {
             std::fs::read_link(format!("/proc/{pid}/exe"))
@@ -306,13 +306,13 @@ impl Enricher {
             activity.executable.clone()
         };
 
-        // S4e: descendant-walk — if the executable is a wrapper, look for
+        // S4e: descendant-walk - if the executable is a wrapper, look for
         // the actual game process in the wrapper tree and use its
         // name/executable instead.
         let mut activity = activity;
         let identified = self.apply_descendant_walk(&mut activity);
 
-        // S4b: naming enrichment — modify the activity's name from
+        // S4b: naming enrichment - modify the activity's name from
         // detectable.json before forwarding. Enrichment-only: never
         // overrides a non-empty name from a more authoritative source.
         self.apply_naming(&mut activity);
@@ -338,14 +338,14 @@ impl Enricher {
             if let Some(key) = merge_key_from_environ(&environ) {
                 // S9/S9c: a launch that went through umu without a database
                 // entry, or that a launcher handed us without an
-                // authoritative store identity, is a gap worth recording —
+                // authoritative store identity, is a gap worth recording -
                 // together with whatever this daemon later works out about
                 // it.
                 self.maybe_stash_launch(&key, &environ, &raw_exe);
                 let (class, mut identity) =
                     self.classify_member(pid, &raw_exe, &key, identified.as_ref());
                 // S8: a Heroic group whose members prove nothing themselves
-                // is still nameable — the launcher's own install records map
+                // is still nameable - the launcher's own install records map
                 // the store codename to the display title. Launcher-curated,
                 // Wrapper class: a detectable.json hit on the real game
                 // process still upgrades it.
@@ -390,12 +390,12 @@ impl Enricher {
         }
 
         // S7: publish-once-named. An ungrouped GameMode record whose name is
-        // empty after all enrichment — a known wrapper whose stem was
-        // cleared, or an unreadable exe — is withheld rather than published
+        // empty after all enrichment - a known wrapper whose stem was
+        // cleared, or an unreadable exe - is withheld rather than published
         // as "(unknown)". It publishes the moment anything names it (hint,
         // late identification, Discord, or the 15s reseed after the naming
         // DB resolves). Grouped records are never withheld: a merge key is
-        // game evidence in itself. Stem names still publish — pid+executable
+        // game evidence in itself. Stem names still publish - pid+executable
         // presence is the S1 contract.
         if source == Source::GameMode
             && pid > 0
@@ -414,14 +414,14 @@ impl Enricher {
         let mut events = Vec::with_capacity(3);
         // A withheld GameMode record flushes FIRST when evidence arrives for
         // its pid: Discord names the merge, so the bus sees one
-        // PublishNew(pid_<pid>) followed by the joining update — never an
+        // PublishNew(pid_<pid>) followed by the joining update - never an
         // absorb pair, and never a silently dropped record.
         if let Some(w) = self.withheld.remove(&pid) {
             if source != Source::GameMode {
                 events.push(SourceEvent::Updated(Box::new(w)));
             }
             // A GameMode event for the pid IS the withheld record's
-            // successor — superseded, not flushed.
+            // successor - superseded, not flushed.
         }
         events.push(SourceEvent::Updated(Box::new(activity)));
         if let Some(sa) = steam_activity {
@@ -437,7 +437,7 @@ impl Enricher {
     /// S9c: decide whether this launch belongs in the identity-miss stash
     /// and record it with everything the launcher said about it. Recorded:
     /// launches umu ran without a database entry (the `umu-0`/`umu-default`
-    /// marker), and launcher-keyed launches (`lutris:`/`heroic:`) — a
+    /// marker), and launcher-keyed launches (`lutris:`/`heroic:`) - a
     /// launcher handing us a process without an authoritative store
     /// identity. Never `steam:` keys and never curated `umu:<id>` launches
     /// without the marker: their identity is authoritative.
@@ -507,7 +507,7 @@ impl Enricher {
 
         // Stable stash key when no codename exists: the GAME_NAME slug for
         // Lutris (the merge key's uuid is per-launch and would fragment the
-        // stash), the merge key itself otherwise. Never an exe basename —
+        // stash), the merge key itself otherwise. Never an exe basename -
         // every Wine launch would collapse onto wine64-preloader.
         let fallback = if is_lutris {
             match game_name.as_deref().map(slug).filter(|s| !s.is_empty()) {
@@ -569,7 +569,7 @@ impl Enricher {
             // so the cmdline layer would inflate the helper to GameProcess
             // and block the real game's dethrone (§1.1: helpers are judged
             // on the raw exe). Wrappers only count an exe-link match; Wine
-            // games are unaffected — their exe is wine64-preloader, which
+            // games are unaffected - their exe is wine64-preloader, which
             // is not in the wrapper list, so they keep the cmdline layer.
             let hit = if is_wrapper_executable(raw_exe) {
                 identify_process_exe(pid, db)
@@ -626,7 +626,7 @@ impl Enricher {
         } else {
             // Steam names its own installs: for a steam-keyed member whose
             // exe runs out of a steamapps library, the appmanifest beside it
-            // carries the official title — authoritative even when
+            // carries the official title - authoritative even when
             // detectable.json has never heard of the game (observed live
             // 2026-08-30: Danger Scavenger, a real Steam app absent from
             // detectable, published nothing at all). The member stays Plain;
@@ -648,8 +648,8 @@ impl Enricher {
                     )),
                 );
             }
-            // A game binary Lutris launched directly — a native Linux game,
-            // `gamemoderun ./Game.x86_64` — registers with GameMode itself,
+            // A game binary Lutris launched directly - a native Linux game,
+            // `gamemoderun ./Game.x86_64` - registers with GameMode itself,
             // so no wrapper pid ever runs the ancestor layer on its behalf
             // (`apply_descendant_walk` is wrappers-only) and the record kept
             // the executable stem. Ask the lutris-wrapper ancestor here. The
@@ -756,7 +756,7 @@ impl Enricher {
         let effect = group.upsert(pid, member, rep_pinned);
         // S9: the stash mirrors the group's ELECTED identity, never a
         // member's raw claim. A claim that loses the election must not reach
-        // the stash — the Unity crash handler resolved to another game and
+        // the stash - the Unity crash handler resolved to another game and
         // overwrote a correct same-confidence title, while the published
         // record stayed right because set_identity is monotone. Noting the
         // group identity after routing hands that monotonicity to the stash.
@@ -784,7 +784,7 @@ impl Enricher {
                 // record adopted before sources spawned. Adoption publishes
                 // without creating correlator partials, so when the reseed
                 // then absorbs that pid into a group, the stale record would
-                // linger beside the representative's — two records for one
+                // linger beside the representative's - two records for one
                 // game (observed live, Ubisoft Connect, 2026-08-06). The
                 // removal is a no-op for the common case: a pid the
                 // correlator never published produces no effect.
@@ -827,7 +827,7 @@ impl Enricher {
 
     /// Emit the publish-first migration sequence: `Updated(new rep)`,
     /// `Updated(new Steam partial)`, `Removed(old Steam id, Steam)`,
-    /// `Removed(pid_<old>, GameMode)` — the bus never dips empty. Steam-only
+    /// `Removed(pid_<old>, GameMode)` - the bus never dips empty. Steam-only
     /// groups have no GameMode partial: their sequence is the Steam pair.
     ///
     /// Deliberate deviation from §1.2's literal removal order (GameMode
@@ -867,7 +867,7 @@ impl Enricher {
             });
         }
         self.steam_appids.remove(&old);
-        // The dethroned rep is an absorbed member now — nothing may leak.
+        // The dethroned rep is an absorbed member now - nothing may leak.
         self.active_sources.remove(&old);
         events
     }
@@ -878,22 +878,22 @@ impl Enricher {
     /// etc.), the record's real identity comes from the actual game. Three
     /// layers, cheapest first:
     ///
-    /// 1. **Wrapper cmdline** — the wrapper's own `/proc/<pid>/cmdline`
+    /// 1. **Wrapper cmdline** - the wrapper's own `/proc/<pid>/cmdline`
     ///    usually names the game at the end
     ///    (`... proton waitforexitandrun /path/Game.exe`).
-    /// 2. **Descendant walk** — connected process trees (native Steam,
+    /// 2. **Descendant walk** - connected process trees (native Steam,
     ///    non-portal spawns): walk `/proc/*/task/*/children`, matching
     ///    exe links and Wine cmdlines.
-    /// 3. **Sandbox-family scan** — Flatpak-portal spawns sever the tree
+    /// 3. **Sandbox-family scan** - Flatpak-portal spawns sever the tree
     ///    (Lutris-Flatpak + umu): all sandbox members share the umu
     ///    `var/tmp-XXXXXX` token in their cmdlines; scan `/proc` for it.
     ///
     /// If nothing is found, the pid is remembered in
     /// [`Self::unresolved_wrappers`] and retried periodically by
-    /// [`Self::retry_unresolved`] — the game may launch minutes after the
+    /// [`Self::retry_unresolved`] - the game may launch minutes after the
     /// wrapper (Battle.net launcher → actual game).
     /// Returns the `(name, exe)` identification when the walk resolved the
-    /// game through this pid — the group model records it as the member's
+    /// game through this pid - the group model records it as the member's
     /// [`IdentifiedWrapper`](MemberClass::IdentifiedWrapper) proof.
     fn apply_descendant_walk(
         &mut self,
@@ -956,7 +956,7 @@ impl Enricher {
     /// Called periodically from the main loop. Returns update events for
     /// wrappers that just became identifiable. For a **grouped** pid the
     /// identity belongs to the group: set it and re-emit the current rep's
-    /// activity in place — never construct a fresh activity for the wrapper
+    /// activity in place - never construct a fresh activity for the wrapper
     /// pid, which would publish a duplicate record (spec §1.3).
     pub fn retry_unresolved(&mut self) -> Vec<SourceEvent> {
         let pids: Vec<u32> = self.unresolved_wrappers.iter().copied().collect();
@@ -1017,7 +1017,7 @@ impl Enricher {
 
     /// S9: write the group's elected identity through to the umu-miss stash.
     /// GameProcess identities are curated-database hits; wrapper layers are
-    /// launcher/human titles — a Lutris-argv title is labelled with its own
+    /// launcher/human titles - a Lutris-argv title is labelled with its own
     /// source (`lutris-wrapper`, S9c) so downstream knows the name came off
     /// the launcher's command line. note_title never downgrades, so the
     /// heroic-config High note (recorded at its creation site) survives the
@@ -1112,7 +1112,7 @@ impl Enricher {
         events
     }
 
-    /// §1.4 item 2 — liveness refresh: a member is alive iff `/proc/<pid>`
+    /// §1.4 item 2 - liveness refresh: a member is alive iff `/proc/<pid>`
     /// still resolves to the group's key and is still the same process
     /// (start-time pid-reuse guard). Dead non-rep members are pruned; a dead
     /// rep is kept for the sweep to migrate away from.
@@ -1137,9 +1137,9 @@ impl Enricher {
         }
     }
 
-    /// §1.4 item 3 — one `/proc` pass. Members refresh their scan evidence;
+    /// §1.4 item 3 - one `/proc` pass. Members refresh their scan evidence;
     /// pids matching an existing group are adopted with no gate (failover
-    /// memory — though a strictly better class still dethrones, §1.2 case a);
+    /// memory - though a strictly better class still dethrones, §1.2 case a);
     /// a NEW group needs `identify_process` or a `/steamapps/` exe with a
     /// resolvable appid, so `Brotato.x86_64` is recoverable while a stray
     /// `SteamAppId` on `/usr/bin/sleep` stays unpublishable.
@@ -1164,7 +1164,7 @@ impl Enricher {
             // actual game process carries LUTRIS_GAME_UUID (and typically
             // `SteamAppId=default`, which is rejected by design). Gating the
             // whole scan on a Steam appid made lutris/umu-keyed processes
-            // invisible — observed live 2026-08-06: Far Cry Primal running
+            // invisible - observed live 2026-08-06: Far Cry Primal running
             // under Ubisoft Connect stayed unadopted, so the record kept the
             // launcher's name. The Steam appid is still required further
             // down, but only where it belongs: creating a NEW group.
@@ -1173,7 +1173,7 @@ impl Enricher {
             };
             seen.insert(pid);
 
-            // Known member: nothing to do — the liveness pass owns its
+            // Known member: nothing to do - the liveness pass owns its
             // refresh, and scan evidence is only ever ADOPTED (§1.4 item 3):
             // a member that unregisters while its process lives is dropped
             // and re-adopted here next tick, as failover memory. Stamping
@@ -1215,7 +1215,7 @@ impl Enricher {
                 continue;
             }
 
-            // New group: widened gate (§1.4 item 3) — still Steam-only. A
+            // New group: widened gate (§1.4 item 3) - still Steam-only. A
             // lutris/umu key with no Steam appid never creates a group from
             // the scan alone; those groups are born from GameMode evidence.
             let Some(appid) = find_steam_appid(&environ) else {
@@ -1264,7 +1264,7 @@ impl Enricher {
 
         // Reconcile: tracked Steam pids that vanished (process died or pid
         // reused by a non-Steam process). Only remove pids with no other
-        // active source — GameMode-tracked pids are managed by the
+        // active source - GameMode-tracked pids are managed by the
         // source-removal path, grouped pids by the group lifecycle.
         let tracked: Vec<u32> = self.steam_appids.keys().copied().collect();
         for pid in tracked {
@@ -1300,13 +1300,13 @@ impl Enricher {
         }
         // Steam's own appmanifest is the third authority, and the only one
         // that needs no database: a game absent from detectable.json is
-        // still a real install with an official name (R5 holds — nothing
+        // still a real install with an official name (R5 holds - nothing
         // outside a steamapps library, and no appid without a manifest,
         // gets a record).
         exe.contains("/steamapps/") && steam_manifest_name(exe, appid).is_some()
     }
 
-    /// §1.4 item 4 — the sweep: evidence-less groups are removed;
+    /// §1.4 item 4 - the sweep: evidence-less groups are removed;
     /// dead/unregistered reps migrate to an eligible survivor (deferred
     /// migration case b); unidentified reps get an identification retry.
     fn sweep_groups(&mut self) -> Vec<SourceEvent> {
@@ -1417,7 +1417,7 @@ impl Enricher {
             }
         }
         // Layer 4 (S6b): a `lutris-wrapper` ancestor announces the human
-        // title in its own argv — Lutris telling us what it launched. The
+        // title in its own argv - Lutris telling us what it launched. The
         // authoritative fallback for games detectable.json does not know
         // (UbisoftConnect.exe was the live case), and the only layer that
         // works without a naming database.
@@ -1434,7 +1434,7 @@ impl Enricher {
     /// Their names are cleared so the record shows "(unknown)" or gets a
     /// name from detectable.json.
     fn apply_naming(&self, activity: &mut Activity) {
-        // Clear wrapper executable names — "env", "bash", etc. are never
+        // Clear wrapper executable names - "env", "bash", etc. are never
         // useful game names. This runs even without a naming database.
         if !activity.executable.is_empty() && is_wrapper_executable(&activity.executable) {
             // Only clear if the name is the executable stem (not a
@@ -1447,13 +1447,13 @@ impl Enricher {
             }
         }
 
-        // Discord activities already have a human-curated name — don't touch.
+        // Discord activities already have a human-curated name - don't touch.
         if activity.sources.contains(&Source::Discord) && !activity.name.is_empty() {
             return;
         }
 
         // Try appid lookup first (stronger signal), then executable. No early
-        // return without a database: the hint fallback below must still run —
+        // return without a database: the hint fallback below must still run -
         // a machine with no detectable.json is exactly where hints matter.
         if let Some(ref db) = self.naming {
             let name = activity
@@ -1473,13 +1473,13 @@ impl Enricher {
             }
         }
 
-        // S6: the weakest rung — an MPRIS hint for this exact pid fills a
+        // S6: the weakest rung - an MPRIS hint for this exact pid fills a
         // name that everything above left empty.
         self.apply_name_hint(activity);
     }
 
     /// S6: fill a *default* name from an MPRIS hint for this pid. A default
-    /// name is empty or the executable stem — what `from_gamemode` sets when
+    /// name is empty or the executable stem - what `from_gamemode` sets when
     /// nothing curated exists. A curated name (Discord, group identity,
     /// detectable.json) is never touched: the hint is one rung above the
     /// stem and below everything else.
@@ -1504,14 +1504,14 @@ impl Enricher {
             None
         };
 
-        // S4f: grouped GameMode removals are the group's business (§1.2) —
+        // S4f: grouped GameMode removals are the group's business (§1.2) -
         // deferred migration holds the record through the exit cascade.
         if source == Source::GameMode {
             if let Some(pid) = pid {
                 if let Some(key) = self.pid_to_group.get(&pid).cloned() {
                     return self.grouped_removal(&key, pid);
                 }
-                // S7: a withheld record was never on the bus — its death is
+                // S7: a withheld record was never on the bus - its death is
                 // fully silent. Neither the GameMode Removed nor the
                 // Steam-partial removal below may fire for it. This is what
                 // makes the µs-lived keyless helpers produce zero traffic.
@@ -1529,7 +1529,7 @@ impl Enricher {
         }
 
         // If this is a non-Steam source removal, check if the pid has any
-        // remaining non-Steam sources. If not, remove the Steam partial —
+        // remaining non-Steam sources. If not, remove the Steam partial -
         // BEFORE the triggering removal (deviation from §1.2's literal
         // order, per §3's exactly-one-ActivityRemoved: Steam-first degrades
         // the record in place instead of flashing a transient steam_<pid>
@@ -1542,7 +1542,7 @@ impl Enricher {
                 if sources.is_empty() {
                     self.active_sources.remove(&pid);
                     // A grouped pid's Steam partial is owned by the group
-                    // lifecycle (remove_group_records / emit_migration) —
+                    // lifecycle (remove_group_records / emit_migration) -
                     // same guard as on_source_lost and the scan reconcile.
                     // A detaching Discord partial must not kill a
                     // scan-backed group's record.
@@ -1566,7 +1566,7 @@ impl Enricher {
     ///
     /// Non-rep members were never on the bus: bookkeeping only, zero events.
     /// The rep's departure is swallowed while any member still holds evidence
-    /// (deferred migration — the tick sweep elects a successor); only when
+    /// (deferred migration - the tick sweep elects a successor); only when
     /// the last evidence is gone do the group's records leave the bus.
     fn grouped_removal(&mut self, key: &str, pid: u32) -> Vec<SourceEvent> {
         self.unresolved_wrappers.remove(&pid);
@@ -1596,7 +1596,7 @@ impl Enricher {
                     );
                 } else if !group.has_evidence() {
                     // A non-rep departure stripped the LAST evidence (the rep
-                    // unregistered earlier and was held): the game is over —
+                    // unregistered earlier and was held): the game is over -
                     // remove now instead of waiting for the sweep (§4: the
                     // exit cascade ends in exactly one prompt ActivityRemoved).
                     tracing::info!(
@@ -1620,7 +1620,7 @@ impl Enricher {
     /// partial gone first, the surviving Steam partial would re-merge and
     /// flash a transient `steam_<rep>` Added+Removed pair at every exit.
     /// Steam-first degrades the record in place; it dies with its last
-    /// source — one removal.
+    /// source - one removal.
     fn remove_group_records(&mut self, key: &str) -> Vec<SourceEvent> {
         let Some(group) = self.groups.remove(key) else {
             return Vec::new();
@@ -1655,7 +1655,7 @@ impl Enricher {
         let mut events = vec![SourceEvent::SourceLost { source }];
 
         // S4f group bookkeeping (spec §1.2): every gamemode flag is void.
-        // Groups with scan evidence survive — the correlator degrades their
+        // Groups with scan evidence survive - the correlator degrades their
         // records to Steam-only on SourceLost; the rest are dropped here
         // (bookkeeping) and their Steam partials reaped by the loop below.
         if source == Source::GameMode {
@@ -1695,7 +1695,7 @@ impl Enricher {
                     if sources.is_empty() {
                         self.active_sources.remove(&pid);
                         // Surviving scan-backed groups keep their Steam
-                        // partial — the group lifecycle owns it.
+                        // partial - the group lifecycle owns it.
                         if self.pid_to_group.contains_key(&pid) {
                             continue;
                         }
@@ -1727,7 +1727,7 @@ fn extract_pid(id: &str) -> Option<u32> {
 ///
 /// Priority: `SteamAppId` (numeric) > `LUTRIS_GAME_UUID` > `UMU_ID`
 /// (non-default). The merge key is used for ancestor-walk deduplication
-/// across wrapper trees — two processes sharing a key and a process tree
+/// across wrapper trees - two processes sharing a key and a process tree
 /// are the same game.
 fn probe_merge_key(pid: u32) -> Option<String> {
     let environ = std::fs::read_to_string(format!("/proc/{pid}/environ")).ok()?;
@@ -1738,7 +1738,7 @@ fn probe_merge_key(pid: u32) -> Option<String> {
 /// [`probe_merge_key`]). Split out so the scan's single environ read serves
 /// both the appid and the key probe.
 /// A usable Steam appid: numeric, non-empty, and not the `0` Steam sets for
-/// non-Steam titles. The single definition of validity — `find_steam_appid`
+/// non-Steam titles. The single definition of validity - `find_steam_appid`
 /// and `merge_key_from_environ` both use it, because the last time they had
 /// separate checks they diverged: the merge key accepted `SteamAppId=0` and
 /// pooled every non-Steam game into one shared `steam:0` group whose members
@@ -1749,7 +1749,7 @@ fn valid_steam_appid(v: &str) -> bool {
 
 /// The umu id of a launch that went through umu WITHOUT a database entry:
 /// `GAMEID=umu-0` (Heroic's shape) or `UMU_ID=umu-default`/`umu-0` (Lutris).
-/// A real entry would have produced a usable id — and a merge key.
+/// A real entry would have produced a usable id - and a merge key.
 fn umu_miss_id(environ: &str) -> Option<&'static str> {
     for entry in environ.split('\0') {
         match entry {
@@ -1764,7 +1764,7 @@ fn umu_miss_id(environ: &str) -> Option<&'static str> {
 /// The name Steam's own appmanifest records for an appid: the exe runs out
 /// of `<library>/steamapps/common/<game>/`, and the manifest sits at
 /// `<library>/steamapps/appmanifest_<appid>.acf`. A shallow line parse is
-/// enough — the `"name"` key is one quoted pair — and any miss (no
+/// enough - the `"name"` key is one quoted pair - and any miss (no
 /// steamapps segment, no file, no name line) is a silent None.
 fn steam_manifest_name(exe: &str, appid: &str) -> Option<String> {
     let end = exe.find("/steamapps/")? + "/steamapps/".len();
@@ -1794,7 +1794,7 @@ fn env_value(environ: &str, var: &str) -> Option<String> {
 /// The store codename Lutris wrote beside the game (S9c): read
 /// `<dir>/.lutrisgame.json` and take its `appid`. Only itch.io installs
 /// carry the file on a measured machine; a missing or malformed file is a
-/// silent `None` — same precedent as [`heroic_title`].
+/// silent `None` - same precedent as [`heroic_title`].
 fn lutris_marker_appid(dir: &str) -> Option<String> {
     let raw = std::fs::read_to_string(std::path::Path::new(dir).join(".lutrisgame.json")).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -1838,7 +1838,7 @@ fn runner_of(umu_marker: bool, raw_exe: &str) -> &'static str {
     }
 }
 
-/// Is this exe a Wine/Proton process — the runtime, or a Windows binary?
+/// Is this exe a Wine/Proton process - the runtime, or a Windows binary?
 fn is_wine_binary(raw_exe: &str) -> bool {
     let lower = raw_exe.to_ascii_lowercase();
     let base = std::path::Path::new(&lower)
@@ -1875,8 +1875,8 @@ fn merge_key_from_environ(environ: &str) -> Option<String> {
             }
         } else if let Some(v) = entry.strip_prefix("HEROIC_APP_NAME=") {
             // Heroic (Epic/GOG/Amazon) launches carry no usable Steam or
-            // Lutris identity — SteamAppId=0 and GAMEID=umu-0, both rejected
-            // above — but the store codename is present in every process of
+            // Lutris identity - SteamAppId=0 and GAMEID=umu-0, both rejected
+            // above - but the store codename is present in every process of
             // the tree (observed live: Control ran as HEROIC_APP_NAME=Calluna
             // with nothing else to key on, 2026-08-06).
             if !v.is_empty() {
@@ -1915,9 +1915,9 @@ fn member_alive(pid: u32, key: &str, recorded_start: Option<u64>) -> bool {
 /// Probe `/proc/<pid>/environ` for Steam appid variables.
 ///
 /// Checks in order:
-/// 1. `UMU_ID=umu-<N>` — umu-launcher convention; numeric N implies steam appid N
-/// 2. `SteamAppId` — native Steam
-/// 3. `SteamGameId` — native Steam (alternative variable)
+/// 1. `UMU_ID=umu-<N>` - umu-launcher convention; numeric N implies steam appid N
+/// 2. `SteamAppId` - native Steam
+/// 3. `SteamGameId` - native Steam (alternative variable)
 ///
 /// Returns `Some(Activity)` with `Source::Steam` if any appid is found.
 pub fn probe_steam(pid: u32) -> Option<Activity> {
@@ -1932,7 +1932,7 @@ pub fn probe_steam(pid: u32) -> Option<Activity> {
 ///
 /// The environ file is NUL-separated `KEY=VALUE` pairs. We check for
 /// `UMU_ID=umu-<N>` first (umu-launcher), then `SteamAppId`, then
-/// `SteamGameId`. Only non-zero numeric values are accepted — Steam sets
+/// `SteamGameId`. Only non-zero numeric values are accepted - Steam sets
 /// `SteamAppId=default` for its own client processes and `SteamAppId=0`
 /// for non-Steam games, neither of which is a game appid.
 fn find_steam_appid(environ: &str) -> Option<String> {
@@ -1979,7 +1979,7 @@ fn identify_process(pid: u32, db: &NamingDb) -> Option<(String, String)> {
 }
 
 /// The exe-link layer of [`identify_process`] alone. Used for known wrapper
-/// executables, whose cmdlines name the game they merely launch — only the
+/// executables, whose cmdlines name the game they merely launch - only the
 /// process's own binary may prove it IS the game.
 fn identify_process_exe(pid: u32, db: &NamingDb) -> Option<(String, String)> {
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
@@ -1989,10 +1989,10 @@ fn identify_process_exe(pid: u32, db: &NamingDb) -> Option<(String, String)> {
 }
 
 /// Layer 4 (S6b): find a `lutris-wrapper` ancestor and take the title from
-/// its argv. Evidence-based: same bounded ppid chain as every other walk —
+/// its argv. Evidence-based: same bounded ppid chain as every other walk -
 /// never a guess across trees.
 /// S8: resolve a Heroic store codename to its display title from the
-/// launcher's own install records — `installed.json` written by legendary
+/// launcher's own install records - `installed.json` written by legendary
 /// (Epic). Local files the user's launcher maintains; no network, no
 /// guessing. Both the Flatpak and native config locations are tried.
 fn heroic_title(app_name: &str) -> Option<String> {
@@ -2047,7 +2047,7 @@ fn identify_via_lutris_ancestor(pid: u32) -> Option<(String, String)> {
 
 /// Extract the game title from a lutris-wrapper command line.
 ///
-/// Shape: `… lutris-wrapper <title…> <children> <watched> <command…>` — the
+/// Shape: `… lutris-wrapper <title…> <children> <watched> <command…>` - the
 /// title is every token between the wrapper and the two counters. Titles may
 /// themselves end in digits ("Left 4 Dead 2"), so the counters are found from
 /// the right: the last adjacent integer pair followed by a non-integer
@@ -2084,7 +2084,7 @@ fn identify_via_cmdline(pid: u32, db: &NamingDb) -> Option<(String, String)> {
     let mut result = None;
     for token in cmdline.split('\0').filter(|t| !t.is_empty()) {
         if let Some(name) = db.lookup_by_executable(token) {
-            // Keep scanning: the LAST match wins — the game exe is at the
+            // Keep scanning: the LAST match wins - the game exe is at the
             // end of the wrapper's cmdline (after proton/umu-shim paths).
             result = Some((name.to_string(), token.to_string()));
         }
@@ -2095,7 +2095,7 @@ fn identify_via_cmdline(pid: u32, db: &NamingDb) -> Option<(String, String)> {
 /// Layer 3: find the game inside a Flatpak-portal-spawned sandbox (S4e).
 ///
 /// When Lutris runs as a Flatpak, steam-runtime-launch-client asks
-/// `org.freedesktop.portal.Flatpak` to spawn the bwrap sandbox — the
+/// `org.freedesktop.portal.Flatpak` to spawn the bwrap sandbox - the
 /// process tree is severed (the sandbox's parent is the portal, not the
 /// wrapper). All sandbox members share the umu `var/tmp-XXXXXX` token in
 /// their cmdlines; scan `/proc` for it, then identify among family members
@@ -2118,7 +2118,7 @@ fn find_game_in_sandbox_family(pid: u32, db: &NamingDb) -> Option<(String, Strin
             }
         }
         // Also walk the family member's descendants (connected within the
-        // sandbox — the game is a child of pv-adverb).
+        // sandbox - the game is a child of pv-adverb).
         if let Some((name, exe)) = find_game_descendant(family_pid, db) {
             if !is_wrapper_executable(&exe) {
                 return Some((name, exe));
@@ -2195,7 +2195,7 @@ fn find_game_descendant_inner(
         return Some(found);
     }
 
-    // Not a game — check children.
+    // Not a game - check children.
     let children = read_children(pid);
     for child in children {
         if let Some(found) = find_game_descendant_inner(child, db, depth + 1, visited) {
@@ -2215,7 +2215,7 @@ fn read_children(pid: u32) -> Vec<u32> {
         .collect()
 }
 
-/// Whether an activity's name is a default (empty, or the executable stem) —
+/// Whether an activity's name is a default (empty, or the executable stem) -
 /// i.e. nothing curated has named it yet. The stem comparison mirrors the
 /// wrapper-clearing logic in `apply_naming`.
 fn name_is_default(activity: &Activity) -> bool {
@@ -2383,7 +2383,7 @@ mod tests {
         let out = e.process(SourceEvent::Updated(Box::new(discord)));
 
         // GameMode record first (PublishNew pid_4242), then the Discord
-        // update that joins it — never an absorb pair, never a drop.
+        // update that joins it - never an absorb pair, never a drop.
         assert_eq!(out.len(), 2, "{out:?}");
         let SourceEvent::Updated(first) = &out[0] else {
             panic!("expected Updated");
@@ -2398,7 +2398,7 @@ mod tests {
 
     #[test]
     fn heroic_app_name_is_a_merge_key_of_last_resort() {
-        // The live Control shape: zero Steam id, zero umu id, no Lutris —
+        // The live Control shape: zero Steam id, zero umu id, no Lutris -
         // only the Heroic codename identifies the tree.
         assert_eq!(
             merge_key_from_environ("SteamAppId=0\0GAMEID=umu-0\0HEROIC_APP_NAME=Calluna\0")
@@ -2428,7 +2428,7 @@ mod tests {
             heroic_title_from_json(raw, "Calluna").as_deref(),
             Some("Control")
         );
-        // Empty titles and unknown apps resolve to nothing — the group then
+        // Empty titles and unknown apps resolve to nothing - the group then
         // stays unidentified rather than being named after a codename.
         assert_eq!(heroic_title_from_json(raw, "Fortnite"), None);
         assert_eq!(heroic_title_from_json(raw, "Unknown"), None);
@@ -2478,7 +2478,7 @@ mod tests {
         assert_eq!(find_steam_appid(env), None);
 
         // Non-numeric values are ignored (Steam sets SteamAppId=default for
-        // its own client processes — not a game appid).
+        // its own client processes - not a game appid).
         let env = "SteamAppId=default\0";
         assert_eq!(find_steam_appid(env), None);
 
@@ -2513,7 +2513,7 @@ mod tests {
             .insert(Source::Discord);
         e.steam_ids.insert(42, "steam_42".to_string());
 
-        // GameMode removes its record — Discord still active
+        // GameMode removes its record - Discord still active
         let events = e.process(SourceEvent::Removed {
             id: "pid_42".to_string(),
             source: Source::GameMode,
@@ -2521,7 +2521,7 @@ mod tests {
         assert_eq!(events.len(), 1); // Only the original removal
         assert!(e.steam_ids.contains_key(&42));
 
-        // Discord removes its record — last non-Steam source gone. The Steam
+        // Discord removes its record - last non-Steam source gone. The Steam
         // removal precedes the triggering removal so the record degrades in
         // place and dies with its last source (one ActivityRemoved, §3).
         let events = e.process(SourceEvent::Removed {
@@ -2622,7 +2622,7 @@ mod tests {
             .or_default()
             .insert(Source::GameMode);
 
-        // A new pid arrives — no Steam probe (no appid in /proc), no merge
+        // A new pid arrives - no Steam probe (no appid in /proc), no merge
         let activity = gamemode_activity(201);
         let events = e.process(SourceEvent::Updated(Box::new(activity)));
         assert!(!events
@@ -2684,7 +2684,7 @@ mod tests {
     fn scan_adopts_lutris_keyed_processes_into_existing_groups() {
         // The Far Cry Primal shape: a group exists under a lutris key (born
         // from GameMode evidence), and the actual game process carries only
-        // LUTRIS_GAME_UUID — SteamAppId=default. The scan must adopt it.
+        // LUTRIS_GAME_UUID - SteamAppId=default. The scan must adopt it.
         let uuid = format!("test-{}", std::process::id());
         let key = format!("lutris:{uuid}");
 
@@ -2858,7 +2858,7 @@ mod tests {
         e.apply_naming(&mut empty);
         assert_eq!(empty.name, "Cool Game");
 
-        // The executable stem is a *default* name, not a curated one — this
+        // The executable stem is a *default* name, not a curated one - this
         // is the Brotato.x86_64 case, and the hint must beat it.
         let mut stem = Activity::new("pid_42");
         stem.process_id = 42;
@@ -2976,7 +2976,7 @@ mod tests {
     fn the_stash_mirrors_the_elected_identity_not_the_last_claim() {
         // The Project Hospital incident: the real game's identity is elected
         // first; the crash handler's same-confidence claim for another game
-        // arrives later. The group refuses the sideways overwrite — and the
+        // arrives later. The group refuses the sideways overwrite - and the
         // stash must agree with the group, not with whichever claim came
         // last. (Before the fix the stash flipped to "Spellcraft".)
         use crate::group::MemberClass;
@@ -3085,7 +3085,7 @@ mod tests {
         assert_eq!(sa.id, "steam_101");
         assert_eq!(sa.app_ids.get("steam").unwrap(), "480");
         // Steam removal before GameMode removal (§3: the old record degrades
-        // in place and dies once — no transient steam_<old> flash).
+        // in place and dies once - no transient steam_<old> flash).
         assert_eq!(
             events[2],
             SourceEvent::Removed {
@@ -3128,7 +3128,7 @@ mod tests {
             None,
         );
         // The only event is the defensive cleanup for a cache-adopted
-        // record under this pid (no-op on the bus when none exists) — the
+        // record under this pid (no-op on the bus when none exists) - the
         // member itself is never published.
         assert_eq!(events.len(), 1);
         assert!(
@@ -3188,7 +3188,7 @@ mod tests {
     #[test]
     fn retry_unresolved_grouped_updates_rep_in_place_no_duplicate() {
         // Spec test 11: late identify_wrapper success for a grouped pid sets
-        // the GROUP identity and refreshes the current rep in place — it
+        // the GROUP identity and refreshes the current rep in place - it
         // never constructs a fresh activity for the wrapper pid (the latent
         // duplicate-record bug at the old enricher.rs:319-332).
         let own = std::process::id();
@@ -3217,7 +3217,7 @@ mod tests {
             None,
         );
         // Absorb emits exactly the defensive removal for a possible
-        // cache-adopted record — bus-invisible when nothing was published.
+        // cache-adopted record - bus-invisible when nothing was published.
         assert_eq!(events.len(), 1);
         assert!(
             matches!(&events[0], SourceEvent::Removed { id, source: Source::GameMode } if *id == format!("pid_{own}")),
@@ -3243,7 +3243,7 @@ mod tests {
         // A Steam wrapper's cmdline carries the full launch command, game
         // binary included (`reaper SteamLaunch ... /steamapps/.../Brotato`).
         // The cmdline identification layer must not inflate the helper to
-        // GameProcess — a rep pinned at that class would block the real
+        // GameProcess - a rep pinned at that class would block the real
         // game's strictly-greater dethrone (§1.1: helpers are judged on the
         // raw exe; §4 Brotato trace).
         let json = r#"[{"name": "Brotato", "executables": [{"name": "brotato.x86_64"}], "third_party_skus": []}]"#;
@@ -3468,7 +3468,7 @@ mod tests {
     fn group_teardown_removes_steam_before_gamemode() {
         // §3's exactly-one-ActivityRemoved: the Steam partial goes first so
         // the correlator degrades the record in place and it dies with its
-        // last source — no transient steam_<rep> Added+Removed flash.
+        // last source - no transient steam_<rep> Added+Removed flash.
         let mut e = Enricher::with_naming(None);
         e.grouped_update(
             "steam:480",
@@ -3533,7 +3533,7 @@ mod tests {
     #[test]
     fn scan_created_group_adopts_first_gamemode_since() {
         // A scan-created group is born blind (since 0); the first GameMode
-        // evidence supplies the authoritative timestamp, set-once — a later
+        // evidence supplies the authoritative timestamp, set-once - a later
         // event can never move it (Since never jumps).
         let mut e = Enricher::with_naming(None);
         let mut group = GameGroup::new("steam:480", 0);
@@ -3587,7 +3587,7 @@ mod tests {
 
     #[test]
     fn liveness_start_time_mismatch_is_dead() {
-        // Spec test 12: the pid-reuse guard — same pid, same key, different
+        // Spec test 12: the pid-reuse guard - same pid, same key, different
         // start time means a recycled pid, and the member is dead.
         let mut child = std::process::Command::new("sleep")
             .arg("30")
@@ -3636,7 +3636,7 @@ mod tests {
     fn a_native_lutris_launch_records_launcher_facts_and_marker_codename() {
         // The live Danger Scavenger shape (itch.io via Lutris, 2026-08-23):
         // no umu marker, but Lutris hands us the store, the name, the
-        // directory — and wrote the codename beside the game.
+        // directory - and wrote the codename beside the game.
         let mut e = with_scratch_stash("ds-facts");
         let dir = std::env::temp_dir().join(format!("gamebus-ds-marker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3693,7 +3693,7 @@ mod tests {
     #[test]
     fn a_heroic_umu_miss_records_the_same_entry_plus_launcher_facts() {
         // The pre-S9c Heroic umu-0 shape must produce the entry it always
-        // did — same key, same store guess, same codename, same umu id —
+        // did - same key, same store guess, same codename, same umu id -
         // with the launcher facts added beside it.
         let mut e = with_scratch_stash("heroic-facts");
         let environ =
@@ -3731,7 +3731,7 @@ mod tests {
     fn repeated_lutris_umu_launches_collapse_onto_the_game_name_slug() {
         // A Lutris Wine launch (Control through umu-default): the merge key
         // carries a fresh uuid every launch, but the stash must keep ONE
-        // entry — keyed by the GAME_NAME slug when no codename exists.
+        // entry - keyed by the GAME_NAME slug when no codename exists.
         let mut e = with_scratch_stash("control-collapse");
         let exe = "/usr/bin/wine64-preloader";
         for uuid in ["uuid-1", "uuid-2"] {

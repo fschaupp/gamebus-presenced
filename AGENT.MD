@@ -3,7 +3,7 @@
 ## Purpose
 
 Rules and context for AI agents working in this repository. Read this, then
-[`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md) — that
+[`docs/design/gamebus-presence.md`](docs/design/gamebus-presence.md) - that
 design doc is the single source of truth for what this project is and why.
 
 ## What this is
@@ -14,7 +14,7 @@ each hold a fragment (Feral GameMode has the pid, Steam has the appid, Discord
 Rich Presence has the title and chapter text) and correlating them by pid.
 
 - Bus name: `org.gamebus.Presence.v1` (see the versioning section of the design
-  doc before changing this — the `.v1` spelling is deliberate)
+  doc before changing this - the `.v1` spelling is deliberate)
 - Consumer number one is `epaper-hubd` in `/media/Data/Projekte/ardu_rs/epaper_rs`,
   but **this project is not desk-pet-shaped and must stay that way** for anyone
   else to adopt it.
@@ -33,7 +33,7 @@ These carry over from the sibling `epaper_rs` project, where they were promoted
 after recurring three or more times. They apply here unchanged.
 
 1. **Plan before implementing.** A slice gets a spec and a sign-off before code.
-   Never pick an undecided design point unilaterally — surface it.
+   Never pick an undecided design point unilaterally - surface it.
 2. **Verify against the real system; mark unverified work STAGED.** For this
    project the "real system" is a real session bus, a real `gamemoded`, and a
    real RPC client on the socket. A green `cargo test` proves the pure
@@ -42,7 +42,7 @@ after recurring three or more times. They apply here unchanged.
    `busctl --user introspect`, not from memory. D-Bus APIs change and this repo
    integrates four of them.
 4. **Check the instrument before believing the reading.** An empty
-   `ListActivities`, a missing signal, a socket that accepted — all are claims.
+   `ListActivities`, a missing signal, a socket that accepted - all are claims.
    Prefer positive proof: the object appeared on the bus, the frame round-tripped.
 5. **Evidence-first debugging.** Make the failing path show what it saw. For
    wire protocols that means dumping the actual bytes before theorising.
@@ -61,7 +61,7 @@ after recurring three or more times. They apply here unchanged.
   *daemon*: `gamebus-setup` adds `ratatui` behind a default-on `setup` feature
   and is never linked into `gamebus-presenced`; `--no-default-features` builds
   the daemon without it. Note that
-  [pog5/rsrpc](https://github.com/pog5/rsrpc) is **GPLv3** — learn from it, do
+  [pog5/rsrpc](https://github.com/pog5/rsrpc) is **GPLv3** - learn from it, do
   not vendor it. [rsRPC](https://github.com/SpikeHD/rsRPC) is MIT and is the
   reasonable base for the Discord listener.
 
@@ -72,7 +72,7 @@ Once code exists, the gates are:
 ```bash
 cargo test                  # pure functions, plus integration tests that run
                             # the daemon on a private session bus and a private
-                            # XDG_RUNTIME_DIR (tests/common/mod.rs) — safe to
+                            # XDG_RUNTIME_DIR (tests/common/mod.rs) - safe to
                             # run with a real gamebus-presenced installed and
                             # a real Discord client connected
 cargo clippy -- -D warnings
@@ -80,14 +80,14 @@ busctl --user introspect org.gamebus.Presence.v1 /org/gamebus/Presence/v1   # li
 gamemoderun sleep 30        # registers a real game with the real gamemoded
 ```
 
-The `discord-rich-presence` crate as a dev-dependency is a genuine RPC *client* —
+The `discord-rich-presence` crate as a dev-dependency is a genuine RPC *client* -
 point it at our socket in an integration test and assert the resulting D-Bus
 objects. That exercises the real wire format rather than a fixture.
 
 ## Knowledge base
 
 Long-form session knowledge lives in the local second brain vault at
-`.second-brain/` — a dedicated vault for this project following the
+`.second-brain/` - a dedicated vault for this project following the
 obsidian-second-brain pattern. See `_CLAUDE.md` for operating instructions.
 
 The vault uses **wiki-style** folder structure:

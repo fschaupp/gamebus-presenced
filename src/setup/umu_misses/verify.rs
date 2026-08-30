@@ -49,7 +49,7 @@ struct Verdict {
     drafted: Option<DraftedId>,
 }
 
-/// The umu id a submission for this entry would carry — the database's own
+/// The umu id a submission for this entry would carry - the database's own
 /// (verified or cross-store) or the drafted one. Without an id there is
 /// nothing to look a protonfix up under.
 fn scope_id(verdict: &Verdict) -> Option<String> {
@@ -82,11 +82,11 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
         )),
     }
     if db.is_none() {
-        lines.push("No local database (--db / GAMEBUS_UMU_DB / --fetch cache) — every entry goes to the API, and id drafting is skipped: collisions cannot be checked without the full database.".to_string());
+        lines.push("No local database (--db / GAMEBUS_UMU_DB / --fetch cache) - every entry goes to the API, and id drafting is skipped: collisions cannot be checked without the full database.".to_string());
     }
 
     // Only umu misses are checked: a launcher launch (empty umu id) is a
-    // gamedb identity record, never a umu-database gap — it is not looked
+    // gamedb identity record, never a umu-database gap - it is not looked
     // up, not drafted an id, and not fix-checked.
     let mut keys: Vec<String> = report
         .entries()
@@ -138,7 +138,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
                 }
             }
         }
-        // The local copy settled nothing — ask the live API, once per entry,
+        // The local copy settled nothing - ask the live API, once per entry,
         // until the first transport failure (no hammering a dead endpoint).
         if api_down.is_none() {
             match api_check(&api, m) {
@@ -162,7 +162,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
             }
         }
         // API unreachable. With a local copy the verdict stands on that copy
-        // alone — said so honestly. Without one there is nothing to verify
+        // alone - said so honestly. Without one there is nothing to verify
         // against: error out with the stash untouched.
         match db {
             Some(_) => verdicts.push((
@@ -183,7 +183,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
         }
     }
 
-    // Draft ids for the confirmed-missing entries. Needs the full database —
+    // Draft ids for the confirmed-missing entries. Needs the full database -
     // the collision check is mandatory, so no database means no drafts.
     if let Some(db) = db {
         for (key, verdict) in &mut verdicts {
@@ -227,7 +227,7 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
     // Does the game need umu at all? The database takes entries for games
     // that require a fix in Proton and says so in its opening paragraph, so
     // an entry without a fix upstream is one the maintainers do not want.
-    // Unreachable list: say so and leave every earlier verdict standing —
+    // Unreachable list: say so and leave every earlier verdict standing -
     // "unchecked" and "runs fine" are not the same claim.
     let fix_list = match fixes::load_for_verify() {
         Ok(list) => {
@@ -282,15 +282,15 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
         let title = m.effective_title().unwrap_or("(unresolved)");
         let line = match (&verdict.state, &verdict.drafted) {
             (VerificationState::AlreadyInDatabase, _) => format!(
-                "already in the database as {} — the launcher missed, not the database",
+                "already in the database as {} - the launcher missed, not the database",
                 verdict.umu_id.as_deref().unwrap_or("?")
             ),
             (VerificationState::CrossStoreId, _) => format!(
-                "known under another store as {} — likely the id to submit",
+                "known under another store as {} - likely the id to submit",
                 verdict.umu_id.as_deref().unwrap_or("?")
             ),
             (VerificationState::ConfirmedMissing, Some(d)) => format!(
-                "missing from the database — drafted {} ({}, collision-checked)",
+                "missing from the database - drafted {} ({}, collision-checked)",
                 d.id,
                 basis_label(d.basis)
             ),
@@ -316,7 +316,7 @@ pub(super) fn check_assignment(
 ) -> Result<String, String> {
     let Some(suffix) = id.strip_prefix("umu-").filter(|s| !s.is_empty()) else {
         return Err(format!(
-            "'{id}' is not a umu id — the database wants umu-<something>."
+            "'{id}' is not a umu id - the database wants umu-<something>."
         ));
     };
     if !suffix
@@ -330,7 +330,7 @@ pub(super) fn check_assignment(
     let holders = db.find_umu_id(id);
     if holders.is_empty() {
         let steam_note = if suffix.chars().all(|c| c.is_ascii_digit()) {
-            " — numeric, so Proton will treat it as the Steam appid; make sure it is one"
+            " - numeric, so Proton will treat it as the Steam appid; make sure it is one"
         } else {
             ""
         };
@@ -339,19 +339,19 @@ pub(super) fn check_assignment(
         ))
     } else if title.is_some_and(|t| holders.iter().any(|e| e.title.eq_ignore_ascii_case(t))) {
         Ok(format!(
-            "already names this very game ({}) — the cross-store id.",
+            "already names this very game ({}) - the cross-store id.",
             holders[0].title
         ))
     } else {
         Err(format!(
-            "{id} already names '{}' in the database — not saved.",
+            "{id} already names '{}' in the database - not saved.",
             holders[0].title
         ))
     }
 }
 
 /// The API's two lookups for one entry. Only the store+codename lookup is
-/// authoritative — verified live 2026-08-07, it matches exactly. The title
+/// authoritative - verified live 2026-08-07, it matches exactly. The title
 /// lookup does substring matching (`?title=Control` returns Ground
 /// Control's ids) and its rows carry no title to compare against, so a hit
 /// there is advisory only: it lands in the note for the human, never in the
@@ -413,7 +413,7 @@ fn api_umu_ids(url: &str) -> Result<Vec<String>, String> {
 }
 
 /// `--check-prs`: scan open upstream merge requests for rows that look like
-/// our entries. Substring evidence only — a hit demotes the entry from the
+/// our entries. Substring evidence only - a hit demotes the entry from the
 /// exports and names the PR, nothing more.
 pub(super) fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
     #[derive(Deserialize)]
@@ -459,7 +459,7 @@ pub(super) fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
         let diff = match diff {
             Ok(diff) => diff.to_lowercase(),
             Err(e) => {
-                eprintln!("  PR #{}: diff unavailable ({e}) — skipped", pr.number);
+                eprintln!("  PR #{}: diff unavailable ({e}) - skipped", pr.number);
                 continue;
             }
         };
@@ -473,7 +473,7 @@ pub(super) fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
                 continue;
             }
             if diff_mentions(&diff, m) {
-                hits.push((key.clone(), format!("PR #{} — {}", pr.number, pr.title)));
+                hits.push((key.clone(), format!("PR #{} - {}", pr.number, pr.title)));
             }
         }
     }
@@ -500,7 +500,7 @@ pub(super) fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
 }
 
 /// Does this (lowercased) PR diff add a CSV row that looks like this miss?
-/// Cells, not free text — titles are ordinary words and a bare substring
+/// Cells, not free text - titles are ordinary words and a bare substring
 /// match would flag half the tracker. Titles match both the plain and the
 /// quoted form: the upstream CSV quotes comma-carrying titles
 /// (`"Warhammer 40,000: Space Marine",gog,…`).
@@ -509,7 +509,7 @@ fn diff_mentions(diff_lower: &str, m: &Miss) -> bool {
         .effective_codename()
         .filter(|c| c.len() >= 4 && !c.eq_ignore_ascii_case("none"))
         .is_some_and(|c| diff_lower.contains(&format!(",{},", c.to_lowercase())));
-    // The effective title is what a submission would carry — the resolver's
+    // The effective title is what a submission would carry - the resolver's
     // guess matters to nobody once the user corrected it.
     let title_hit = m.effective_title().is_some_and(|t| {
         let plain = format!("\n+{},", t.to_lowercase());
@@ -616,7 +616,7 @@ mod tests {
             m.title = Some("Witchery".into());
             m.codename_override = Some("1423049311".into());
         });
-        // The overridden codename hits locally — the API is never reached
+        // The overridden codename hits locally - the API is never reached
         // (there is nothing serving it here, so a request would error out).
         let lines = verify(&mut report, Some(&db)).expect("local verify");
         assert!(
@@ -637,7 +637,7 @@ mod tests {
         .unwrap();
         // One umu miss that settles locally, plus one launcher launch
         // (empty umu id). The latter must never be verified, drafted, or
-        // fix-checked — and must never send verify to the API (nothing
+        // fix-checked - and must never send verify to the API (nothing
         // serves it here, so a request would error the whole run out).
         let (mut report, key) = pick_report("egs", "Catnip");
         report.note_launch("itchio", Some("926077"), "", "itchio:926077");
@@ -676,7 +676,7 @@ mod tests {
         .unwrap();
         let (mut report, key) = pick_report("gog", "someothercode");
         // The resolver's title is wrong (the Spellcraft incident); the
-        // user's correction is what must reach the title lookup — a hit
+        // user's correction is what must reach the title lookup - a hit
         // here keeps the API out of the picture entirely.
         report.update(&key, |m| {
             m.title = Some("Spellcraft".into());

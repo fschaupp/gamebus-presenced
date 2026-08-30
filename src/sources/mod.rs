@@ -21,7 +21,7 @@ pub enum SourceEvent {
     /// A source disappeared; all records backed by it must be removed.
     SourceLost { source: Source },
     /// A naming hint for a pid (S6, MPRIS). Consumed entirely by the
-    /// enricher — it never reaches the correlator, creates no record, and
+    /// enricher - it never reaches the correlator, creates no record, and
     /// appears in no `Sources` list.
     NameHint { pid: u32, name: String },
 }

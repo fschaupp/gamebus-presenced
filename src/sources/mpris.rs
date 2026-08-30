@@ -2,7 +2,7 @@
 //!
 //! Not a source: MPRIS players never create, keep alive, or remove activity
 //! records, and never appear in `Sources`. This watcher only harvests the one
-//! thing MPRIS is authoritative about — a human-readable application name —
+//! thing MPRIS is authoritative about - a human-readable application name -
 //! and hands it to the enricher as a [`SourceEvent::NameHint`].
 //!
 //! The join is evidence-based, never fabricated: a hint carries the player's
@@ -10,12 +10,12 @@
 //! Discord listener's `SO_PEERCRED`), and the enricher applies it only to a
 //! record that pid belongs to. Precedence is the naming anti-goal's: a hint
 //! replaces only a *default* name (empty, or the executable stem) that
-//! Discord, the group identity, and detectable.json all failed to improve —
+//! Discord, the group identity, and detectable.json all failed to improve -
 //! one rung above the stem, below everything curated.
 //!
 //! Documented miss: for sandboxed players (Flatpak browsers and the like)
 //! `GetConnectionUnixProcessID` returns the `xdg-dbus-proxy` pid, not the
-//! application's — the hint then joins nothing, by design. Observed live
+//! application's - the hint then joins nothing, by design. Observed live
 //! 2026-08-06 with a Flatpak zen browser. Same category as the wrapper-tree
 //! Discord join miss: we do not fabricate joins across sandbox boundaries.
 

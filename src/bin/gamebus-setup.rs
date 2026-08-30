@@ -1,8 +1,8 @@
-//! gamebus-setup — install and status tool for gamebus-presenced.
+//! gamebus-setup - install and status tool for gamebus-presenced.
 //!
 //! Run with no arguments on a terminal for the TUI. The non-interactive
 //! subcommands exist so the tool can be scripted, tested, and re-executed under
-//! `pkexec` for a system-wide install — a privileged process must never be the
+//! `pkexec` for a system-wide install - a privileged process must never be the
 //! one holding the terminal in raw mode.
 
 use std::io::IsTerminal;
@@ -15,7 +15,7 @@ mod client;
 #[path = "../endpoints.rs"]
 mod endpoints;
 // The daemon's naming database, compiled into this tool for the S9b umu-id
-// drafting (title → Steam appid). Only that direction is live here — the
+// drafting (title → Steam appid). Only that direction is live here - the
 // rest of the shared module is the daemon's, hence the module-wide allow.
 #[allow(dead_code)]
 #[path = "../naming.rs"]
@@ -53,7 +53,7 @@ fn usage() {
     eprintln!("Options:");
     eprintln!("  --target user|system      Install target (default: user)");
     eprintln!("  --privileged-only         Run only the steps that need root");
-    eprintln!("  --confirm                 Required by 'apply' — it writes to disk");
+    eprintln!("  --confirm                 Required by 'apply' - it writes to disk");
     eprintln!();
     eprintln!("umu-misses options:");
     eprintln!("  --verify                  Check every miss against the umu database");
@@ -69,7 +69,7 @@ fn usage() {
     eprintln!("                            others (GAMEBUS_UMU_PROTONFIXES points the");
     eprintln!("                            check at a local umu-protonfixes checkout)");
     eprintln!("  --export-md [file]        Ready-to-paste merge-request text, written");
-    eprintln!("                            to <file> — without one, printed to stdout");
+    eprintln!("                            to <file> - without one, printed to stdout");
     eprintln!("  --check-prs               Also scan open upstream merge requests for");
     eprintln!("                            already-submitted entries (best-effort)");
     eprintln!();
@@ -88,7 +88,7 @@ fn usage() {
     eprintln!("Every remote endpoint the tools talk to is configured in endpoints.toml,");
     eprintln!("and shared-helpers.txt lists helper executables that never name a game");
     eprintln!("(~/.config/gamebus-presenced/ overrides the installed copies in the data");
-    eprintln!("directory — endpoint keys replace, helper entries add on top; see each");
+    eprintln!("directory - endpoint keys replace, helper entries add on top; see each");
     eprintln!("file for the full order and the defaults).");
 }
 
@@ -145,7 +145,7 @@ fn dirs_or_exit() -> Dirs {
     match Dirs::from_env() {
         Some(d) => d,
         None => {
-            eprintln!("HOME is not set — cannot work out where anything belongs.");
+            eprintln!("HOME is not set - cannot work out where anything belongs.");
             std::process::exit(1);
         }
     }
@@ -162,7 +162,7 @@ async fn cmd_status() -> ExitCode {
 
 fn print_status(s: &Status) {
     let (health, summary) = status::overall(s);
-    println!("gamebus-presenced — {} {summary}", health.marker());
+    println!("gamebus-presenced - {} {summary}", health.marker());
     println!();
     for row in status::rows(s) {
         println!("  {} {:<11} {}", row.health.marker(), row.label, row.value);
@@ -188,7 +188,7 @@ enum Msg {
     /// A umu flow (verify / assign / pick / store cycle) finished: its log
     /// lines and whether it completed. Clears `busy` and refreshes the pane.
     UmuOutcome(Vec<String>, bool),
-    /// A candidate search answered — the local pick (`p`) or an online
+    /// A candidate search answered - the local pick (`p`) or an online
     /// lookup (`o`), kind-tagged either way. Clears `busy` and opens pick
     /// mode (or logs that nothing matched). `stale` warns when candidates
     /// came from an aging fetch cache (or an absent one).
@@ -287,7 +287,7 @@ async fn cmd_tui() -> ExitCode {
                 } else {
                     // The stash is a small local file, but the convention
                     // holds: nothing on the render path does I/O, so it too
-                    // arrives as a message. Refreshed while watched — the
+                    // arrives as a message. Refreshed while watched - the
                     // daemon appends on its own schedule.
                     spawn_misses(&tx);
                 }
@@ -313,8 +313,8 @@ fn spawn_probe(tx: &tokio::sync::mpsc::Sender<Msg>, dirs: &Dirs) {
 
 /// Refresh the monitor view.
 ///
-/// Bounded like every other bus call — a wedged daemon must not accumulate one
-/// hung task per second — and reusing one connection rather than opening a
+/// Bounded like every other bus call - a wedged daemon must not accumulate one
+/// hung task per second - and reusing one connection rather than opening a
 /// fresh one each tick.
 fn spawn_activities(tx: &tokio::sync::mpsc::Sender<Msg>, conn: Option<zbus::Connection>) {
     let tx = tx.clone();
@@ -333,7 +333,7 @@ fn spawn_activities(tx: &tokio::sync::mpsc::Sender<Msg>, conn: Option<zbus::Conn
 
 /// Refresh the umu-miss pane from the stash file. Rows carry their stash
 /// key so the UI can keep the selection on the same game across reorders,
-/// and the key is the final sort tie-break — same-day unresolved entries
+/// and the key is the final sort tie-break - same-day unresolved entries
 /// would otherwise land in HashMap iteration order, which reshuffles on
 /// every load.
 fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
@@ -411,12 +411,12 @@ fn spawn_action(tx: &tokio::sync::mpsc::Sender<Msg>, action: Action, dirs: &Dirs
 ///
 /// Deliberately synchronous: the TUI has left the alternate screen, so there is
 /// nothing to render, and pkexec's authentication takes as long as the user
-/// takes. Sleeping a fixed interval and hoping — which is what this used to do
-/// — draws the interface on top of the password prompt.
+/// takes. Sleeping a fixed interval and hoping - which is what this used to do
+/// - draws the interface on top of the password prompt.
 ///
 /// Ordering matters and differs from the unprivileged path only in where the
 /// escalation sits: `before` (stop and disable) must precede the file removals,
-/// and `after` (daemon-reload) must follow the writes — and must not run at all
+/// and `after` (daemon-reload) must follow the writes - and must not run at all
 /// if the user dismissed the dialog, or a cancelled uninstall would still have
 /// stopped their daemon.
 async fn run_escalated(
@@ -489,7 +489,7 @@ async fn run_escalated(
 
     match escalation {
         None => app.log_styled(
-            "Stopped before asking for privileges — a step failed.",
+            "Stopped before asking for privileges - a step failed.",
             Style::default().fg(Color::Red),
         ),
         Some(actions::Escalation::Ran { ok, output }) => {
@@ -501,7 +501,7 @@ async fn run_escalated(
             }
         }
         Some(actions::Escalation::Cancelled) => app.log_styled(
-            "Cancelled — nothing privileged was written.",
+            "Cancelled - nothing privileged was written.",
             Style::default().fg(Color::Yellow),
         ),
         Some(actions::Escalation::Unavailable { reason }) => {
@@ -531,7 +531,7 @@ async fn handle(
         Msg::Probed(status) => {
             app.set_status(*status);
             // Deliberately does NOT clear `busy`: that is the gate stopping a
-            // second mutating action, and probes land on their own schedule —
+            // second mutating action, and probes land on their own schedule -
             // including the one every finished action kicks off.
             app.probing = false;
         }
@@ -568,11 +568,11 @@ async fn handle(
             }
             if candidates.is_empty() {
                 app.log(
-                    "  No database or library title matches — v verifies against the live API too.",
+                    "  No database or library title matches - v verifies against the live API too.",
                 );
             } else if app.misses.iter().any(|(k, _)| k == &key) {
                 app.log(format!(
-                    "  {} candidate(s) — ↑↓ choose, Enter picks, Esc cancels.",
+                    "  {} candidate(s) - ↑↓ choose, Enter picks, Esc cancels.",
                     candidates.len()
                 ));
                 app.pick = Some(ui::Pick {
@@ -640,7 +640,7 @@ async fn handle(
                     if app.busy.is_some() {
                         return;
                     }
-                    // The query is the effective title — the user's
+                    // The query is the effective title - the user's
                     // correction when present; without any there is nothing
                     // to search for.
                     let title = app
@@ -656,7 +656,7 @@ async fn handle(
                         return;
                     };
                     app.busy = Some("searching the local database and libraries".into());
-                    // Local files only — `v` and `o` are the network keys.
+                    // Local files only - `v` and `o` are the network keys.
                     let tx = tx.clone();
                     tokio::task::spawn_blocking(move || {
                         let msg = match setup::umu_misses::tui_pick_candidates(&title) {
@@ -675,7 +675,7 @@ async fn handle(
                         return;
                     }
                     // The effective title and codename: the user's
-                    // corrections when present. The title may be absent —
+                    // corrections when present. The title may be absent -
                     // a gog entry with a numeric codename looks up by id
                     // and needs none; the flow refuses the rest honestly.
                     let entry = app.misses.iter().find(|(k, _)| *k == key).map(|(_, m)| {
@@ -863,7 +863,7 @@ async fn handle(
                         match (confirm.needs_root, action.target()) {
                             // Escalation is offered for the system target only.
                             // pkexec resets the environment, and only the system
-                            // layout is environment-free — escalating a *user*
+                            // layout is environment-free - escalating a *user*
                             // action would resolve $HOME to /root in the child
                             // and install somewhere the user never confirmed.
                             (true, Some(Target::System)) => {
@@ -945,7 +945,7 @@ fn cmd_plan(args: &[String], flags: &Flags) -> ExitCode {
             println!("  {}", actions::sudo_hint(action, Target::System));
         } else {
             println!("A path this would write to is not yours to write.");
-            println!("Root is only offered for the system target — check the ownership");
+            println!("Root is only offered for the system target - check the ownership");
             println!("of the directories listed above.");
         }
     }
@@ -1011,7 +1011,7 @@ fn cmd_apply(args: &[String], flags: &Flags) -> ExitCode {
             eprintln!("Run:  {}", actions::sudo_hint(action, Target::System));
             eprintln!("or use the TUI, which asks via pkexec.");
         } else {
-            eprintln!("Root is only offered for the system target — check the ownership");
+            eprintln!("Root is only offered for the system target - check the ownership");
             eprintln!("of the directories this would write to.");
         }
         return ExitCode::FAILURE;

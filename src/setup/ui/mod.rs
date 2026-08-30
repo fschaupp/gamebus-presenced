@@ -1,7 +1,7 @@
 //! The terminal interface: three views, a confirm modal, and an output log.
 //!
 //! Rendering is a pure function of [`App`]; nothing here does I/O beyond
-//! drawing. Everything slow — probing, subprocesses, the 12 MB download —
+//! drawing. Everything slow - probing, subprocesses, the 12 MB download -
 //! happens on other tasks and arrives as a [`Msg`].
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -33,10 +33,10 @@ use self::status::render_status;
 pub enum View {
     Status,
     Monitor,
-    /// The identity-miss stash (S9b): what the daemon collected — umu misses
-    /// and launcher launches without a store identity — and what
+    /// The identity-miss stash (S9b): what the daemon collected - umu misses
+    /// and launcher launches without a store identity - and what
     /// verification made of it. The pane drives the flows on explicit
-    /// keypresses — `v` fetches+verifies (network, and the footer says so),
+    /// keypresses - `v` fetches+verifies (network, and the footer says so),
     /// `o` looks the title up at its store (network, labelled likewise),
     /// `a` assigns an id (collision-checked before it saves), `p` picks the
     /// matching entry from the local database or the Heroic libraries,
@@ -121,17 +121,17 @@ impl Confirm {
 }
 
 /// The misses pane's pick mode: candidates for one miss, waiting for the
-/// user to choose (or Esc out). The candidates are kind-tagged — database
-/// rows, Heroic library identities, online hits — and Enter dispatches per
+/// user to choose (or Esc out). The candidates are kind-tagged - database
+/// rows, Heroic library identities, online hits - and Enter dispatches per
 /// kind; the list renders them in labelled sections.
 pub struct Pick {
-    /// The stash key the candidates were fetched for — the pick lands on
+    /// The stash key the candidates were fetched for - the pick lands on
     /// this entry, never on whatever the selection moved to since.
     pub key: String,
     /// Never empty: the binary logs "no matches" instead of opening the mode.
     pub candidates: Vec<PickCandidate>,
     pub selected: usize,
-    /// A warning when the candidates came from an aging fetch cache — the
+    /// A warning when the candidates came from an aging fetch cache - the
     /// footer then advertises `v` as the way out.
     pub stale: Option<String>,
 }
@@ -159,7 +159,7 @@ pub struct App {
     /// land here instead of the keymap. Committed with Enter (which checks
     /// the id before anything is saved), cancelled with Esc.
     pub id_input: Option<String>,
-    /// While `Some`, the misses pane is in title-entry mode (`t`) — same
+    /// While `Some`, the misses pane is in title-entry mode (`t`) - same
     /// keyboard ownership as `id_input`. Starts empty; the input line shows
     /// the current effective title beside it.
     pub title_input: Option<String>,
@@ -268,7 +268,7 @@ impl App {
     /// What pressing Enter would do right now.
     pub fn selected_action(&self) -> Option<Action> {
         match self.focus {
-            // On a check row, Enter runs that row's remedy — the shortest path
+            // On a check row, Enter runs that row's remedy - the shortest path
             // from "this is broken" to "fixed".
             Focus::Checks => self
                 .checks
@@ -314,8 +314,8 @@ impl App {
     }
 
     /// The stash entry a correction typed right now would land on: the
-    /// selected entry on the misses pane, and on the gamedb pane — whose
-    /// rows are games, not entries — that game's representative entry.
+    /// selected entry on the misses pane, and on the gamedb pane - whose
+    /// rows are games, not entries - that game's representative entry.
     pub fn edit_key(&self) -> Option<String> {
         match self.view {
             View::Gamedb => self
@@ -326,7 +326,7 @@ impl App {
         }
     }
 
-    /// Move the selection off the current entry onto its list neighbor —
+    /// Move the selection off the current entry onto its list neighbor -
     /// the one below, or the one above when the cursor sits on the last
     /// row. Used before an action that resorts the current entry away
     /// (dismiss), so the key-stable refresh follows the neighbor instead
@@ -343,8 +343,8 @@ impl App {
     }
 
     /// Replace the miss list, keeping the selection on the same entry (by
-    /// stash key): the once-a-second refresh may reorder rows — a bump of
-    /// `last_seen`, a new miss on top — and a bare index would silently
+    /// stash key): the once-a-second refresh may reorder rows - a bump of
+    /// `last_seen`, a new miss on top - and a bare index would silently
     /// switch the detail pane to a different game mid-review.
     pub fn set_misses(&mut self, misses: Vec<(String, Miss)>) {
         let selected_key = self
@@ -442,7 +442,7 @@ pub enum Intent {
     ConfirmYes,
     ConfirmNo,
     /// Misses pane `v`: fetch the database dump and verify the stash.
-    /// Network — the footer labels the key as such.
+    /// Network - the footer labels the key as such.
     UmuVerify,
     /// Misses pane, Enter in id-entry mode: collision-check `id` against
     /// the local database and save it on the entry when it survives.
@@ -452,12 +452,12 @@ pub enum Intent {
     },
     /// Misses pane `p`: search the local database and the Heroic libraries
     /// for candidates matching the selected entry's title. Local files
-    /// only — never the network.
+    /// only - never the network.
     UmuPick {
         key: String,
     },
     /// Misses pane `o`: one online lookup at the entry's effective store.
-    /// Network — the footer labels the key as such.
+    /// Network - the footer labels the key as such.
     UmuOnline {
         key: String,
     },
@@ -499,12 +499,12 @@ pub enum Intent {
         source: String,
     },
     /// Misses pane `d`: dismiss the selected entry (parked, out of the
-    /// exports) or restore it — a toggle, not a deletion.
+    /// exports) or restore it - a toggle, not a deletion.
     UmuDismiss {
         key: String,
     },
     /// Misses pane `u`: promote the selected umu miss into the umu-database
-    /// pipeline, or take the promotion back — a toggle, like dismiss.
+    /// pipeline, or take the promotion back - a toggle, like dismiss.
     /// Emitted only for umu misses: on a launcher launch the key answers in
     /// the status line instead (nothing to promote).
     UmuPromote {
@@ -845,7 +845,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                 // Dismissing resorts the entry to the bottom of the list; the
                 // key-stable selection would follow it there, stranding a
                 // triage run (d, navigate all the way back, d, …). Hop to the
-                // neighbor first — the refresh then keeps THAT entry selected
+                // neighbor first - the refresh then keeps THAT entry selected
                 // wherever the resort puts everything.
                 app.select_neighbor_miss();
                 Intent::UmuDismiss { key }
@@ -853,7 +853,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             None => Intent::None,
         },
         // Pane focus, install target, and Enter act on the Status pane's
-        // selections — which are invisible from the other views. Gated on
+        // selections - which are invisible from the other views. Gated on
         // the view, or Enter in the read-only misses pane would fire
         // whatever Status row happened to be highlighted underneath.
         KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
@@ -941,7 +941,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Where am I, and what else is there — the answer Tab cycles through.
+/// Where am I, and what else is there - the answer Tab cycles through.
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![Span::raw(" ")];
     for (i, view) in View::ALL.iter().enumerate() {
@@ -999,7 +999,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Greedy word wrap. Words longer than the width are left alone rather than
-/// broken — they are paths, and a broken path is worse than a long line.
+/// broken - they are paths, and a broken path is worse than a long line.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
@@ -1049,7 +1049,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             "↑↓ select · ←→ pane · ⏎ run · u/s target · tab next view · r refresh · q quit"
         }
         View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
-        // The export hint lives in the verify output and the empty state —
+        // The export hint lives in the verify output and the empty state -
         // this line carries the pane's own verbs.
         View::Misses if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
             "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
@@ -1141,7 +1141,7 @@ fn render_confirm(f: &mut Frame, app: &App) {
         )));
     }
 
-    // How far the change reaches — the question behind the dialog.
+    // How far the change reaches - the question behind the dialog.
     if !details {
         lines.push(Line::from(""));
         for line in wrap(&confirm.scope, inner) {
@@ -1155,7 +1155,7 @@ fn render_confirm(f: &mut Frame, app: &App) {
     if confirm.needs_root {
         lines.push(Line::from(""));
         for line in wrap(
-            "Some steps need root — you will be asked to authenticate. \
+            "Some steps need root - you will be asked to authenticate. \
              Only the file writes run privileged.",
             inner,
         ) {
@@ -1285,7 +1285,7 @@ mod tests {
         // Enter must NOT confirm: it is the same key that opened the dialog,
         // so accepting it would let one key repeat run the action unread.
         assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::ConfirmNo);
-        // Even quit does not escape the modal — it cancels it.
+        // Even quit does not escape the modal - it cancels it.
         assert_eq!(
             handle_key(&mut app, key(KeyCode::Char('q'))),
             Intent::ConfirmNo
@@ -1780,7 +1780,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Down)); // first ↓ lands on index 1
         handle_key(&mut app, key(KeyCode::Up)); // index 0: Control
 
-        // d dismisses Control, but the cursor must hop to Brotato — a triage
+        // d dismisses Control, but the cursor must hop to Brotato - a triage
         // run (d, d, d) works top-down without re-navigating.
         let intent = handle_key(&mut app, key(KeyCode::Char('d')));
         assert_eq!(
@@ -1813,7 +1813,7 @@ mod tests {
         app.view = View::Misses;
         app.set_misses(vec![sample_miss("Control")]);
         // Enter must NOT fire the hidden Status-pane action from the
-        // read-only misses pane — nor may ←→/u/s mutate invisible state.
+        // read-only misses pane - nor may ←→/u/s mutate invisible state.
         assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
         handle_key(&mut app, key(KeyCode::Char('s')));
         assert_eq!(
@@ -1905,7 +1905,7 @@ mod tests {
         // 'a' opens the input, prefilled with "umu-".
         handle_key(&mut app, key(KeyCode::Char('a')));
         assert_eq!(app.id_input.as_deref(), Some("umu-"));
-        // Printable keys type — including q and v, which must NOT quit or
+        // Printable keys type - including q and v, which must NOT quit or
         // verify while the field is open.
         for c in ['8', '7', 'q', 'v'] {
             assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
@@ -1932,7 +1932,7 @@ mod tests {
     }
 
     /// Follows the a-verb precedent exactly: the mode owns the keyboard,
-    /// Enter commits, Esc cancels — but the buffer starts EMPTY (the point
+    /// Enter commits, Esc cancels - but the buffer starts EMPTY (the point
     /// of the verb is that the resolver's title is wrong).
     #[test]
     fn title_entry_mode_owns_the_keyboard_and_commits_on_enter() {
@@ -1943,7 +1943,7 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Char('t')));
         assert_eq!(app.title_input.as_deref(), Some(""));
-        // Printable keys type — including q, v and t itself.
+        // Printable keys type - including q, v and t itself.
         for c in ['P', 'q', 'v', 't'] {
             assert_eq!(handle_key(&mut app, key(KeyCode::Char(c))), Intent::None);
         }
@@ -1990,7 +1990,7 @@ mod tests {
             key: "egs:Control".into(),
             candidates: vec![sample_candidate("egs", "Calluna", "umu-870780")],
             selected: 0,
-            stale: Some("Database cache is 9 days old — v refreshes it (net).".into()),
+            stale: Some("Database cache is 9 days old - v refreshes it (net).".into()),
         });
         // The one network key means the same thing inside the mode: leave
         // the stale candidate list and fetch fresh.
@@ -2035,7 +2035,7 @@ mod tests {
         );
     }
 
-    /// Enter must dispatch on the candidate's kind — a database row records
+    /// Enter must dispatch on the candidate's kind - a database row records
     /// a verdict, everything else an identity, and an egs offer without a
     /// Windows build fires the builds request instead of committing its
     /// (lowercase, wrong) namespace.
@@ -2085,7 +2085,7 @@ mod tests {
                 },
             ),
             (
-                // The by-id record corrects the TITLE — the codename it was
+                // The by-id record corrects the TITLE - the codename it was
                 // fetched by was already right.
                 PickCandidate::GogById {
                     id: "1660194629".into(),
@@ -2167,7 +2167,7 @@ mod tests {
             stale: None,
         });
         // q must NOT quit while the list is up (v is the deliberate
-        // exception — it abandons the pick to refresh, tested separately).
+        // exception - it abandons the pick to refresh, tested separately).
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::None);
         // ↓/j and ↑/k move, wrapping at both ends.
         handle_key(&mut app, key(KeyCode::Down));
@@ -2214,7 +2214,7 @@ mod tests {
         // A refresh that keeps the miss keeps the mode.
         app.set_misses(vec![sample_miss("Brotato"), sample_miss("Control")]);
         assert!(app.pick.is_some());
-        // One that drops it cancels — the pick has nothing to land on.
+        // One that drops it cancels - the pick has nothing to land on.
         app.set_misses(vec![sample_miss("Brotato")]);
         assert!(app.pick.is_none(), "pick mode outlived its miss");
     }
