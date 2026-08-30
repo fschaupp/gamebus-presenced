@@ -823,6 +823,82 @@ fn umu_misses_verify_without_any_database_fails_and_touches_nothing() {
     assert_eq!(before, std::fs::read(&stash_path).unwrap());
 }
 
+/// The owner policy (2026-08-24): umu candidacy is opt-in. A stash mixing a
+/// promoted umu miss, an unpromoted one with no fix, and a launcher launch
+/// (empty umu id) exports exactly the promoted one — and the review list
+/// still shows all three, each with its tag.
+#[test]
+fn umu_exports_take_candidates_and_the_list_shows_everything() {
+    let home = TempHome::new("umu-candidates");
+    let stash_dir = home.path().join(".local/share/gamebus-presenced");
+    std::fs::create_dir_all(&stash_dir).unwrap();
+    let stash = r#"{"egs:Promoted":{"title":"Promoted Quest","store":"egs","codename":"Promoted",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-24","last_seen":"2026-08-24",
+            "drafted_id":{"id":"umu-promotedquest","basis":"title-slug","collision_checked":"2026-08-24"},
+            "umu_promoted":"2026-08-24"},
+        "egs:Waiting":{"title":"Waiting Game","store":"egs","codename":"Waiting",
+            "umu_id":"umu-0","title_source":"heroic-config","confidence":"high",
+            "first_seen":"2026-08-24","last_seen":"2026-08-24",
+            "drafted_id":{"id":"umu-waitinggame","basis":"title-slug","collision_checked":"2026-08-24"},
+            "fix":{"umu_id":"umu-waitinggame","fixes":[],"checked":"2026-08-24"}},
+        "itchio:926077":{"title":"Danger Scavenger","store":"itchio","codename":"926077",
+            "umu_id":"","title_source":"lutris-wrapper","confidence":"medium",
+            "executable":"/media/Data/Spiele/itchio/danger-scavenger/Danger_Scavenger.x86_64",
+            "launcher":"lutris","launcher_name":"Danger Scavenger",
+            "launcher_dir":"/media/Data/Spiele/itchio/danger-scavenger",
+            "codename_source":"lutris-config","runner":"native",
+            "first_seen":"2026-08-23","last_seen":"2026-08-23"}}"#;
+    std::fs::write(stash_dir.join("umu-misses.json"), stash).unwrap();
+
+    // The CSV export carries exactly the promoted entry.
+    let export = run(&home, &["umu-misses", "--export"]);
+    assert!(export.status.success());
+    let text = stdout(&export);
+    assert!(
+        text.contains("Promoted Quest,egs,Promoted,umu-promotedquest,,,"),
+        "the promoted entry missed the export:\n{text}"
+    );
+    assert!(
+        !text.contains("Waiting Game,") && !text.contains("Danger Scavenger,"),
+        "a non-candidate reached the submission:\n{text}"
+    );
+    let err = String::from_utf8_lossy(&export.stderr);
+    assert!(
+        err.contains("Waiting Game") && err.contains("not promoted"),
+        "the hold-back must name the missing promotion:\n{err}"
+    );
+    assert!(
+        err.contains("Danger Scavenger") && err.contains("launcher launch"),
+        "the launcher launch's hold-back reason is missing:\n{err}"
+    );
+
+    // The merge-request text: one game, and it says why the row is there.
+    let md = run(&home, &["umu-misses", "--export-md"]);
+    assert!(md.status.success());
+    let text = stdout(&md);
+    assert!(text.contains("# Add 1 game: Promoted Quest"), "{text}");
+    assert!(
+        text.contains("promoted for submission by the reviewing user 2026-08-24"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Waiting Game,egs") && !text.contains("Danger Scavenger,itchio"),
+        "a non-candidate row leaked into the merge request:\n{text}"
+    );
+
+    // The review list shows all three, each with its candidacy tag.
+    let list = run(&home, &["umu-misses"]);
+    assert!(list.status.success());
+    let text = stdout(&list);
+    for expected in ["Promoted Quest", "Waiting Game", "Danger Scavenger"] {
+        assert!(text.contains(expected), "list missing {expected}:\n{text}");
+    }
+    assert!(text.contains("promoted by you 2026-08-24"), "{text}");
+    assert!(text.contains("not a umu candidate"), "{text}");
+    assert!(text.contains("launcher launch"), "{text}");
+}
+
 // ---- gamedb: the same stash, as pages for the gamebus-gamedb data set.
 
 /// A real build of the data set (`gamedb-build --data gamedb`), trimmed to

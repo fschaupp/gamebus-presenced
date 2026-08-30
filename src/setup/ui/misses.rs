@@ -1,4 +1,4 @@
-//! The umu-misses tab: the entry list, the detail pane, and pick mode.
+//! The identity-misses tab: the entry list, the detail pane, and pick mode.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -6,34 +6,42 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::super::umu_misses::{basis_label, confidence_label, scope_line, PickCandidate};
+use super::super::umu_misses::{
+    basis_label, candidacy_line, confidence_label, scope_line, umu_candidate, PickCandidate,
+};
 use super::{field, App};
 use crate::umu_report::{Miss, VerificationState};
 
-/// The umu-miss review pane: what the daemon collected, one entry per game,
-/// with the verification verdict and drafted id once verification ran.
+/// The identity-miss review pane: what the daemon collected, one entry per
+/// game, with the verification verdict and drafted id once verification ran.
 /// Its verbs act only on explicit keypresses the footer labels — `v` is the
 /// one that reaches the network, and says so. Exporting stays a CLI
 /// invocation: a submission wants a shell, not a raw-mode terminal.
 pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     if app.misses.is_empty() {
-        let text = "No umu-database misses recorded.\n\n\
+        let text = "No identity misses recorded.\n\n\
             The daemon writes one entry per game that umu launched without a\n\
             database entry (GAMEID=umu-0), together with the title it resolved.\n\
+            Launches Lutris or Heroic handed over without a store identity\n\
+            land here too — they feed gamebus-gamedb, never the umu database.\n\
             Review them here — v fetches the database and verifies, s corrects\n\
             a store guess, t corrects a title, a assigns an id by hand\n\
             (collision-checked), p picks a match from the local database or\n\
             your Heroic library, and o looks the title up at its store\n\
             (network).\n\
             Correcting an entry here is what the daemon reads; submitting is\n\
-            a separate, rarer thing: the umu database collects games that\n\
-            need a fix in Proton, so only those reach an export.\n\
+            a separate, rarer thing: umu candidacy is opt-in — an entry is\n\
+            exported when a protonfix or a cross-store match suggests it, or\n\
+            when you promote it yourself (u).\n\
             Export a submission from the shell (to stdout, or to a file if\n\
             you name one):\n\n\
             \u{20}   gamebus-setup umu-misses --export-md [file]";
         f.render_widget(
-            Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL).title(" umu misses ")),
+            Paragraph::new(text).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" identity misses "),
+            ),
             area,
         );
         return;
@@ -72,8 +80,17 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     if app.miss_list.selected().is_none() {
         app.miss_list.select(Some(0));
     }
+    // The count names candidates only: a launcher launch or an unpromoted,
+    // unsuggested umu miss is not on its way into the umu database, and a
+    // count pretending otherwise would promise an export that holds back.
+    let candidates = app.misses.iter().filter(|(_, m)| umu_candidate(m)).count();
+    let title = format!(
+        " identity misses - {candidates} umu candidate{} of {} ",
+        if candidates == 1 { "" } else { "s" },
+        app.misses.len()
+    );
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" umu misses "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, panes[0], &mut app.miss_list);
 
@@ -128,8 +145,29 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
     detail.extend([
         field("Store", &store_line),
         field("Codename", &codename_line),
-        field("Reported", &m.umu_id),
+        field(
+            "Reported",
+            if m.is_umu_miss() {
+                m.umu_id.as_str()
+            } else {
+                "- (launcher launch, never through umu)"
+            },
+        ),
     ]);
+    // Where the entry stands with the umu pipeline — the opt-in policy's
+    // verdict, mirrored from the CLI list.
+    {
+        let candidacy = candidacy_line(m);
+        let color = if umu_candidate(m) {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
+        detail.push(Line::from(vec![
+            Span::styled(format!("{:<11} ", "umu"), Style::default().fg(color)),
+            Span::styled(candidacy, Style::default().fg(color)),
+        ]));
+    }
     if let Some(source) = &m.title_source {
         detail.push(field(
             "Resolved by",
@@ -360,29 +398,48 @@ fn candidate_row(c: &PickCandidate) -> (String, String) {
 }
 
 /// One glyph summarizing where an entry stands, for the list column.
+/// Mirrors the candidacy policy: non-candidates render dim — the list must
+/// not promise a submission the export will hold back.
 fn miss_state(m: &Miss) -> (&'static str, Style) {
+    let dim = Style::default().fg(Color::DarkGray);
     if m.dismissed.is_some() {
-        return ("✗", Style::default().fg(Color::DarkGray));
+        return ("✗", dim);
+    }
+    // A launcher launch: a gamedb identity record, never a umu candidate.
+    if !m.is_umu_miss() {
+        return ("g", dim);
     }
     if m.possible_pr.is_some() {
         return ("↷", Style::default().fg(Color::Magenta));
     }
-    // A game that needs no protonfix is out of the database's scope whatever
-    // the verification says — the list should not promise a submission the
-    // export will hold back.
-    if m.fix.as_ref().is_some_and(|f| !f.has_fix()) {
-        return ("○", Style::default().fg(Color::DarkGray));
+    // The user's own opt-in outranks every suggestion.
+    if m.umu_promoted.is_some() {
+        return ("★", Style::default().fg(Color::Yellow));
     }
-    match &m.verification {
-        Some(v) => match v.state {
-            VerificationState::AlreadyInDatabase => ("✓", Style::default().fg(Color::Green)),
-            VerificationState::CrossStoreId => ("≈", Style::default().fg(Color::Cyan)),
-            VerificationState::ConfirmedMissing if m.drafted_id.is_some() => {
-                ("+", Style::default().fg(Color::Yellow))
+    if let Some(v) = &m.verification {
+        match v.state {
+            VerificationState::AlreadyInDatabase => {
+                return ("✓", Style::default().fg(Color::Green))
             }
-            VerificationState::ConfirmedMissing => ("∅", Style::default().fg(Color::Yellow)),
-        },
-        None => ("·", Style::default().fg(Color::DarkGray)),
+            VerificationState::CrossStoreId => return ("≈", Style::default().fg(Color::Cyan)),
+            VerificationState::ConfirmedMissing => {}
+        }
+    }
+    // The protonfix suggestion: the game needs umu, so the entry is a
+    // candidate — with or without a drafted id yet.
+    if m.fix.as_ref().is_some_and(|f| f.has_fix()) {
+        return if m.drafted_id.is_some() {
+            ("+", Style::default().fg(Color::Yellow))
+        } else {
+            ("∅", Style::default().fg(Color::Yellow))
+        };
+    }
+    // No suggestion and no promotion: not a umu candidate — dim, whether
+    // the fix check ran and found nothing (○) or never ran (·).
+    if m.fix.is_some() {
+        ("○", dim)
+    } else {
+        ("·", dim)
     }
 }
 
@@ -397,6 +454,63 @@ mod tests {
             codename: codename.into(),
             umu_id: umu_id.into(),
         })
+    }
+
+    fn glyph_miss(umu_id: &str) -> Miss {
+        Miss {
+            title: Some("Control".into()),
+            store: "egs".into(),
+            codename: Some("Calluna".into()),
+            umu_id: umu_id.into(),
+            title_source: Some("heroic-config".into()),
+            confidence: None,
+            executable: None,
+            first_seen: "2026-08-24".into(),
+            last_seen: "2026-08-24".into(),
+            launcher: None,
+            launcher_name: None,
+            launcher_dir: None,
+            codename_source: None,
+            runner: None,
+            verification: None,
+            drafted_id: None,
+            possible_pr: None,
+            fix: None,
+            store_override: None,
+            codename_override: None,
+            title_override: None,
+            dismissed: None,
+            umu_promoted: None,
+        }
+    }
+
+    /// The glyph column mirrors the candidacy policy: launcher launches and
+    /// unsuggested, unpromoted umu misses are dim; candidates carry color.
+    #[test]
+    fn the_glyph_column_tells_candidates_from_the_rest() {
+        use crate::umu_report::FixCheck;
+        let dim = Style::default().fg(Color::DarkGray);
+
+        // A launcher launch: its own glyph, dim.
+        assert_eq!(miss_state(&glyph_miss("")), ("g", dim));
+        // A plain umu miss: recorded, unverified, not a candidate — dim.
+        assert_eq!(miss_state(&glyph_miss("umu-0")), ("·", dim));
+        // Fix-checked and nothing found: still not a candidate — dim.
+        let mut m = glyph_miss("umu-0");
+        m.fix = Some(FixCheck {
+            umu_id: "umu-870780".into(),
+            fixes: vec![],
+            checked: "2026-08-24".into(),
+        });
+        assert_eq!(miss_state(&m).0, "○");
+        assert_eq!(miss_state(&m).1, dim);
+        // A protonfix: suggested — colored.
+        m.fix.as_mut().unwrap().fixes = vec!["gamefixes-steam/870780.py".into()];
+        assert_eq!(miss_state(&m).0, "∅");
+        assert_ne!(miss_state(&m).1, dim);
+        // Promoted by the user: the opt-in outranks the suggestions.
+        m.umu_promoted = Some("2026-08-24".into());
+        assert_eq!(miss_state(&m).0, "★");
     }
 
     #[test]

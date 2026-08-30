@@ -71,8 +71,23 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
         lines.push("No local database (--db / GAMEBUS_UMU_DB / --fetch cache) — every entry goes to the API, and id drafting is skipped: collisions cannot be checked without the full database.".to_string());
     }
 
-    let mut keys: Vec<String> = report.entries().keys().cloned().collect();
+    // Only umu misses are checked: a launcher launch (empty umu id) is a
+    // gamedb identity record, never a umu-database gap — it is not looked
+    // up, not drafted an id, and not fix-checked.
+    let mut keys: Vec<String> = report
+        .entries()
+        .iter()
+        .filter(|(_, m)| m.is_umu_miss())
+        .map(|(k, _)| k.clone())
+        .collect();
     keys.sort();
+    let skipped = report.entries().len() - keys.len();
+    if skipped > 0 {
+        lines.push(format!(
+            "Skipped {skipped} launcher launch{} (no umu id) - identity records for gamedb, never checked against the umu database.",
+            if skipped == 1 { "" } else { "es" }
+        ));
+    }
     let mut verdicts: Vec<(String, Verdict)> = Vec::new();
     let mut api_down: Option<String> = None;
 
@@ -438,6 +453,11 @@ pub(super) fn check_open_prs(report: &mut UmuReport) -> Result<(), String> {
             if hits.iter().any(|(k, _)| k == key) {
                 continue;
             }
+            // Only candidates can be in a submission of ours; matching the
+            // rest would annotate entries the pipeline never exports.
+            if !super::umu_candidate(m) {
+                continue;
+            }
             if diff_mentions(&diff, m) {
                 hits.push((key.clone(), format!("PR #{} — {}", pr.number, pr.title)));
             }
@@ -591,6 +611,45 @@ mod tests {
         let v = report.entries()[&key].verification.as_ref().unwrap();
         assert_eq!(v.state, VerificationState::AlreadyInDatabase);
         assert_eq!(v.umu_id.as_deref(), Some("umu-witchery1"));
+    }
+
+    #[test]
+    fn verify_skips_launcher_launches_entirely() {
+        let db = UmuDb::parse(concat!(
+            "TITLE,STORE,CODENAME,UMU_ID,COMMON ACRONYM (Optional),NOTE (Optional),EXE_STRINGS (Optional)\n",
+            "Borderlands 3,egs,Catnip,umu-397540,bl3,,\n",
+        ))
+        .unwrap();
+        // One umu miss that settles locally, plus one launcher launch
+        // (empty umu id). The latter must never be verified, drafted, or
+        // fix-checked — and must never send verify to the API (nothing
+        // serves it here, so a request would error the whole run out).
+        let (mut report, key) = pick_report("egs", "Catnip");
+        report.note_launch("itchio", Some("926077"), "", "itchio:926077");
+        let lines = verify(&mut report, Some(&db)).expect("local verify");
+
+        let launcher = &report.entries()["itchio:926077"];
+        assert!(
+            launcher.verification.is_none(),
+            "a launcher launch was verified"
+        );
+        assert!(
+            launcher.drafted_id.is_none(),
+            "a launcher launch was drafted an id"
+        );
+        assert!(launcher.fix.is_none(), "a launcher launch was fix-checked");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Skipped 1 launcher launch")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Verified 1 entry")),
+            "the count includes the skipped entry: {lines:?}"
+        );
+        // The umu miss itself was verified as before.
+        assert!(report.entries()[&key].verification.is_some());
     }
 
     #[test]

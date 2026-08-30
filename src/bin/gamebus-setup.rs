@@ -793,6 +793,13 @@ async fn handle(
                     app.busy = Some("updating the entry".into());
                     spawn_umu_flow(tx, move || setup::umu_misses::tui_toggle_dismiss(&key));
                 }
+                ui::Intent::UmuPromote { key } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("updating the entry".into());
+                    spawn_umu_flow(tx, move || setup::umu_misses::tui_toggle_promote(&key));
+                }
                 ui::Intent::GamedbFetch => {
                     if app.busy.is_some() {
                         return;

@@ -23,13 +23,20 @@ struct SubmissionRow<'a> {
     /// file had no entry — NOT that the game is absent from Steam.
     steam_rule_certain: bool,
     /// The protonfixes this row's id is served by — why the entry belongs in
-    /// the database at all. Never empty: a game that runs out of the box is
-    /// held back before it becomes a row.
+    /// the database at all. Empty only for a candidate that earned its place
+    /// another way: promoted by the user, or already active in the database
+    /// under another store; every other fix-less entry is held back before
+    /// it becomes a row.
     fixes: &'a [String],
 }
 
 /// Split the stash into rows worth submitting and entries listed after the
 /// block with the reason they were held back.
+///
+/// Only [`super::umu_candidate`] entries can become rows (owner policy
+/// 2026-08-24): a launcher launch never went through umu, and a umu miss
+/// without a promotion, a cross-store match, or a protonfix stays a
+/// gamedb-only identity record until the user promotes it in the TUI.
 fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)>) {
     let mut rows = Vec::new();
     let mut held = Vec::new();
@@ -37,6 +44,16 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
     entries.sort_by(|a, b| a.last_seen.cmp(&b.last_seen).reverse());
 
     for m in entries {
+        // The outermost gate: a launch that never went through umu cannot
+        // be a umu-database gap, whatever its annotations say.
+        if !m.is_umu_miss() {
+            held.push((
+                m,
+                "a launcher launch (no umu id) - a gamedb identity record, nothing for the umu database"
+                    .to_string(),
+            ));
+            continue;
+        }
         if m.dismissed.is_some() {
             held.push((m, "dismissed by you (d in the TUI restores it)".to_string()));
             continue;
@@ -101,34 +118,47 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             ));
             continue;
         }
-        let Some(scope) = m
+        // The candidacy gate (owner policy 2026-08-24): a row needs a
+        // promotion, a cross-store match, or a protonfix under this very id
+        // (a fix checked under a stale id proves nothing about this row).
+        // Promotion and the cross-store match carry an entry even without a
+        // fix — the user said the database should have it, or the database
+        // already actively serves the game under another store.
+        let scope = m
             .fix
             .as_ref()
-            .filter(|f| f.umu_id.eq_ignore_ascii_case(&umu_id))
-        else {
+            .filter(|f| f.umu_id.eq_ignore_ascii_case(&umu_id));
+        let cross_store = m
+            .verification
+            .as_ref()
+            .is_some_and(|v| v.state == VerificationState::CrossStoreId);
+        if m.umu_promoted.is_none() && !cross_store && !scope.is_some_and(|f| f.has_fix()) {
             held.push((
                 m,
-                format!("whether {umu_id} needs a protonfix is unchecked - run --verify (network)"),
-            ));
-            continue;
-        };
-        if !scope.has_fix() {
-            // Same distinction the review list draws: a firm id proves the
-            // game runs without umu's help, a guessed one only means we
-            // could not show that it needs any.
-            held.push((
-                m,
-                match super::id_is_firm(m) {
-                    true => format!(
-                        "no protonfix for {umu_id} - the game runs out of the box, and the \
-                         database only wants games that need a fix (checked {})",
-                        scope.checked
+                match scope {
+                    None => format!(
+                        "whether {umu_id} needs a protonfix is unchecked - run --verify \
+                         (network), or promote it in the TUI (u)"
                     ),
-                    false => format!(
-                        "no protonfix for {umu_id}, and that id is our own guess - nothing \
-                         shows this game needs umu (checked {})",
-                        scope.checked
-                    ),
+                    // Same distinction the review list draws: a firm id
+                    // proves the game runs without umu's help, a guessed one
+                    // only means we could not show that it needs any.
+                    Some(scope) => match super::id_is_firm(m) {
+                        true => format!(
+                            "no protonfix for {umu_id} - the game runs out of the box, and the \
+                             database only wants games that need a fix (checked {}); not \
+                             promoted and no cross-store match - u in the TUI promotes it if \
+                             the database should carry it anyway",
+                            scope.checked
+                        ),
+                        false => format!(
+                            "no protonfix for {umu_id}, and that id is our own guess - nothing \
+                             shows this game needs umu (checked {}); not promoted and no \
+                             cross-store match - u in the TUI promotes it if the database \
+                             should carry it anyway",
+                            scope.checked
+                        ),
+                    },
                 },
             ));
             continue;
@@ -162,7 +192,7 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             id_provenance,
             codename,
             steam_rule_certain,
-            fixes: &scope.fixes,
+            fixes: scope.map(|s| s.fixes.as_slice()).unwrap_or(&[]),
         });
     }
     (rows, held)
@@ -205,7 +235,7 @@ pub(super) fn export_csv(report: &UmuReport) {
     println!("# umu-database submission draft - review before submitting!");
     println!("# Rules: {}#readme", endpoints().umu_repository);
     println!(
-        "# Only games with an upstream protonfix are listed - the database takes games that need a fix."
+        "# Only umu candidates are listed: an upstream protonfix, an active cross-store entry, or your own promotion."
     );
     println!("{CSV_HEADER}");
     for row in &rows {
@@ -255,14 +285,30 @@ pub(super) fn export_markdown(
         if rows.len() == 1 { "" } else { "s" },
         titles.join(", ")
     ));
-    md.push_str(&format!(
-        "Each game below already has a protonfix, and these store copies launch \
-         through umu with `GAMEID=umu-0`, so the fix never reaches them. The rows \
-         map each copy onto the id its fix is filed under. \
-         [gamebus-presenced]({}) resolved the titles on a live system from the \
-         launchers' own install records; per-entry evidence, fix included, below.\n\n",
-        "https://github.com/fschaupp/gamebus-presenced"
-    ));
+    // The honest paragraph: when every row rests on a protonfix, say
+    // exactly that; when a promoted or cross-store row carries none, the
+    // blanket fix claim would be a lie.
+    let all_fixed = rows.iter().all(|r| !r.fixes.is_empty());
+    if all_fixed {
+        md.push_str(&format!(
+            "Each game below already has a protonfix, and these store copies launch \
+             through umu with `GAMEID=umu-0`, so the fix never reaches them. The rows \
+             map each copy onto the id its fix is filed under. \
+             [gamebus-presenced]({}) resolved the titles on a live system from the \
+             launchers' own install records; per-entry evidence, fix included, below.\n\n",
+            "https://github.com/fschaupp/gamebus-presenced"
+        ));
+    } else {
+        md.push_str(&format!(
+            "These store copies launch through umu with `GAMEID=umu-0`. Rows with a \
+             protonfix map the copy onto the id the fix is filed under; the rest map \
+             a copy onto an id the database already serves for another store, or were \
+             reviewed and submitted deliberately. \
+             [gamebus-presenced]({}) resolved the titles on a live system from the \
+             launchers' own install records; per-entry evidence below.\n\n",
+            "https://github.com/fschaupp/gamebus-presenced"
+        ));
+    }
     md.push_str("Rows for `umu-database.csv`:\n\n```csv\n");
     md.push_str(CSV_HEADER);
     md.push('\n');
@@ -292,17 +338,31 @@ pub(super) fn export_markdown(
             .and_then(|v| v.note.as_deref())
             .map(|n| format!("; {n}"))
             .unwrap_or_default();
-        // The fix is the reason the row exists, so it is stated per entry
-        // and linked: a reviewer can see in one click that this game needs
-        // umu and that the id is the one its fix is filed under.
-        let fix_refs = row
-            .fixes
-            .iter()
-            .map(|p| format!("[`{p}`]({})", super::fixes::fix_url(p)))
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Why the row exists, stated per entry: the fix, linked so a
+        // reviewer sees in one click that this game needs umu — or, for a
+        // fix-less candidate, the promotion or cross-store entry that
+        // earned it the place instead.
+        let why = if row.fixes.is_empty() {
+            match &m.umu_promoted {
+                Some(date) => format!(
+                    "no protonfix found; promoted for submission by the reviewing user {date}"
+                ),
+                None => "no protonfix found; the database already serves this game under \
+                         another store's entry"
+                    .to_string(),
+            }
+        } else {
+            format!(
+                "fix: {}",
+                row.fixes
+                    .iter()
+                    .map(|p| format!("[`{p}`]({})", super::fixes::fix_url(p)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         md.push_str(&format!(
-            "- **{}** - store `{store}`, codename `{}`{codename_ref}{}; {}; {}{advisory}; fix: {fix_refs}.\n",
+            "- **{}** - store `{store}`, codename `{}`{codename_ref}{}; {}; {}{advisory}; {why}.\n",
             row.title,
             row.codename,
             m.executable
@@ -570,6 +630,96 @@ mod tests {
         assert_eq!(
             title_provenance(&report.entries()[&key]),
             "title set by you"
+        );
+    }
+
+    // ---- The candidacy gate (owner policy 2026-08-24): the exports take
+    // umu candidates, not every umu miss.
+
+    #[test]
+    fn a_promoted_entry_exports_without_a_protonfix() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
+        report.update(&key, |m| {
+            m.fix.as_mut().expect("set above").fixes.clear();
+        });
+        // No fix, no cross-store match, not promoted: held, and the reason
+        // names the way in.
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty());
+        assert!(held[0].1.contains("not promoted"), "{}", held[0].1);
+        assert!(held[0].1.contains("u in the TUI"), "{}", held[0].1);
+        // The promotion is the opt-in: the very same entry exports.
+        report.update(&key, |m| m.umu_promoted = Some("2026-08-24".into()));
+        let (rows, held) = partition(&report);
+        assert!(held.is_empty(), "{:?}", held.first().map(|(_, r)| r));
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].fixes.is_empty());
+    }
+
+    #[test]
+    fn a_cross_store_match_is_a_candidate_without_a_fix() {
+        // The game already has an active umu entry via another store: this
+        // store's copy is the gap, fix or no fix.
+        let (mut report, key) = pick_report("egs", "Catnip");
+        report.update(&key, |m| {
+            m.verification = Some(crate::umu_report::Verification {
+                state: VerificationState::CrossStoreId,
+                umu_id: Some("umu-397540".into()),
+                checked: "2026-08-24".into(),
+                note: None,
+            });
+        });
+        let (rows, held) = partition(&report);
+        assert!(held.is_empty(), "{:?}", held.first().map(|(_, r)| r));
+        assert_eq!(rows[0].umu_id, "umu-397540");
+        assert!(rows[0].fixes.is_empty());
+    }
+
+    #[test]
+    fn a_launcher_launch_never_reaches_the_umu_exports() {
+        let mut report = UmuReport::default();
+        report.note_launch("itchio", Some("926077"), "", "itchio:926077");
+        report.note_title(
+            "itchio",
+            Some("926077"),
+            "itchio:926077",
+            "Danger Scavenger",
+            "lutris-wrapper",
+            Confidence::Medium,
+            None,
+        );
+        // Not even a (stray) promotion smuggles it in: it never went
+        // through umu, so there is no umu gap to fill.
+        report.update("itchio:926077", |m| {
+            m.umu_promoted = Some("2026-08-24".into())
+        });
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty());
+        assert!(held[0].1.contains("launcher launch"), "{}", held[0].1);
+    }
+
+    #[test]
+    fn the_merge_request_says_why_a_fixless_candidate_is_there() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
+        report.update(&key, |m| {
+            m.fix.as_mut().expect("set above").fixes.clear();
+            m.umu_promoted = Some("2026-08-24".into());
+        });
+        let dir = std::env::temp_dir().join(format!("gamebus-md-promoted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("mr.md");
+        export_markdown(&report, Some(&file)).expect("one promoted row");
+        let md = std::fs::read_to_string(&file).expect("written");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            md.contains("promoted for submission by the reviewing user 2026-08-24"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("Each game below already has a protonfix"),
+            "the intro claims a fix the row does not have:\n{md}"
         );
     }
 

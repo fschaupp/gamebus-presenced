@@ -33,14 +33,16 @@ use self::status::render_status;
 pub enum View {
     Status,
     Monitor,
-    /// The umu-database miss stash (S9b): what the daemon collected, what
+    /// The identity-miss stash (S9b): what the daemon collected — umu misses
+    /// and launcher launches without a store identity — and what
     /// verification made of it. The pane drives the flows on explicit
     /// keypresses — `v` fetches+verifies (network, and the footer says so),
     /// `o` looks the title up at its store (network, labelled likewise),
     /// `a` assigns an id (collision-checked before it saves), `p` picks the
     /// matching entry from the local database or the Heroic libraries,
     /// `s` corrects the store guess, `t` corrects the title,
-    /// `d` dismisses/restores an entry.
+    /// `d` dismisses/restores an entry, `u` promotes a umu miss into the
+    /// umu-database pipeline (or takes the promotion back).
     Misses,
     /// The same stash, folded into gamebus-gamedb pages: one row per GAME
     /// rather than per launch identity, checked against what the data set
@@ -69,7 +71,7 @@ impl View {
         match self {
             View::Status => "status",
             View::Monitor => "monitor",
-            View::Misses => "umu misses",
+            View::Misses => "identity misses",
             View::Gamedb => "gamedb",
         }
     }
@@ -473,6 +475,13 @@ pub enum Intent {
     UmuDismiss {
         key: String,
     },
+    /// Misses pane `u`: promote the selected umu miss into the umu-database
+    /// pipeline, or take the promotion back — a toggle, like dismiss.
+    /// Emitted only for umu misses: on a launcher launch the key answers in
+    /// the status line instead (nothing to promote).
+    UmuPromote {
+        key: String,
+    },
     /// gamedb pane `r`: fetch the published identity index. Network - the
     /// footer labels the key as such.
     GamedbFetch,
@@ -772,6 +781,32 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             Some(key) => Intent::UmuStore { key },
             None => Intent::None,
         },
+        // Promotion is a umu-pipeline verb, so it only means something on a
+        // umu miss; on a launcher launch the key refuses in the status line
+        // rather than silently doing nothing.
+        KeyCode::Char('u') if app.view == View::Misses => {
+            let selected = app
+                .miss_list
+                .selected()
+                .and_then(|i| app.misses.get(i))
+                .map(|(k, m)| {
+                    (
+                        k.clone(),
+                        m.is_umu_miss(),
+                        m.effective_title().unwrap_or("(unresolved)").to_string(),
+                    )
+                });
+            match selected {
+                Some((key, true, _)) => Intent::UmuPromote { key },
+                Some((_, false, title)) => {
+                    app.log(format!(
+                        "{title} never went through umu - a launcher launch has nothing to promote into the umu database."
+                    ));
+                    Intent::None
+                }
+                None => Intent::None,
+            }
+        }
         KeyCode::Char('d') if app.view == View::Misses => match app.selected_miss_key() {
             Some(key) => {
                 // Dismissing resorts the entry to the bottom of the list; the
@@ -990,7 +1025,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
         View::Misses if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
         View::Misses => {
-            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · d dismiss · q quit"
+            "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · u promote (umu) · d dismiss · q quit"
         }
         View::Gamedb if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
             "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
@@ -1712,6 +1747,41 @@ mod tests {
         assert_eq!(
             handle_key(&mut app, key(KeyCode::Char('d'))),
             Intent::UmuDismiss {
+                key: "egs:Control".into()
+            }
+        );
+    }
+
+    /// `u` promotes only what can be promoted: a umu miss toggles, a
+    /// launcher launch (empty umu id) gets a status line and no intent.
+    #[test]
+    fn u_promotes_a_umu_miss_and_refuses_a_launcher_launch() {
+        let mut app = app_with_rows();
+        // Inert outside the misses view (on Status it pins the target).
+        app.view = View::Gamedb;
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('u'))), Intent::None);
+
+        app.view = View::Misses;
+        let mut launcher = sample_miss("Danger Scavenger");
+        launcher.1.umu_id = String::new();
+        app.set_misses(vec![sample_miss("Control"), launcher]);
+
+        // First ↓ lands on index 1: the launcher launch. Refused, with a
+        // status line saying why.
+        handle_key(&mut app, key(KeyCode::Down));
+        let logged = app.output.len();
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('u'))), Intent::None);
+        assert_eq!(
+            app.output.len(),
+            logged + 1,
+            "no status line for the refusal"
+        );
+
+        // On the umu miss the toggle fires.
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('u'))),
+            Intent::UmuPromote {
                 key: "egs:Control".into()
             }
         );

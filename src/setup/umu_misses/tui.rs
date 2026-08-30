@@ -29,7 +29,7 @@ pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
         return (lines, false);
     }
     if report.entries().is_empty() {
-        lines.push("No umu-database misses recorded yet.".to_string());
+        lines.push("No identity misses recorded yet.".to_string());
         return (lines, true);
     }
     let db = match load_db(&Opts::none()) {
@@ -472,6 +472,52 @@ pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
     (vec![line], true)
 }
 
+/// The TUI's `u`: promote the selected entry into the umu-database pipeline,
+/// or take the promotion back. Same annotation write path as
+/// [`tui_toggle_dismiss`]; the decision lives in [`toggle_promote`].
+pub(crate) fn tui_toggle_promote(key: &str) -> (Vec<String>, bool) {
+    let mut report = UmuReport::load_for_annotations();
+    if let Some(e) = report.load_error() {
+        return (vec![e.to_string()], false);
+    }
+    let (lines, ok) = toggle_promote(&mut report, key);
+    if ok {
+        report.save();
+    }
+    (lines, ok)
+}
+
+/// Toggle `umu_promoted` (today's date / None) on a umu miss. Promotion is
+/// the opt-in of the owner policy: it makes the entry a umu candidate even
+/// without a protonfix or cross-store match. A launcher launch (empty umu
+/// id) never went through umu, so there is nothing to promote — refused
+/// with a line saying so.
+fn toggle_promote(report: &mut UmuReport, key: &str) -> (Vec<String>, bool) {
+    let Some(m) = report.entries().get(key) else {
+        return (
+            vec![format!("No stash entry under '{key}' anymore.")],
+            false,
+        );
+    };
+    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
+    if !m.is_umu_miss() {
+        return (
+            vec![format!(
+                "{title} never went through umu - a launcher launch has nothing to promote into the umu database."
+            )],
+            false,
+        );
+    }
+    let line = if m.umu_promoted.is_some() {
+        report.update(key, |m| m.umu_promoted = None);
+        format!("{title} no longer promoted - a umu candidate only if a protonfix or cross-store match suggests it.")
+    } else {
+        report.update(key, |m| m.umu_promoted = Some(umu_report::today()));
+        format!("{title} promoted - in the umu exports even without a protonfix or cross-store match (u reverts).")
+    };
+    (vec![line], true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{pick_db, pick_report};
@@ -565,6 +611,45 @@ mod tests {
             report.entries()[&key].verification.as_ref().unwrap().state,
             VerificationState::AlreadyInDatabase
         );
+    }
+
+    // ---- Promotion (`u`): the opt-in of the owner policy.
+
+    #[test]
+    fn u_toggles_the_promotion_on_a_umu_miss() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        let (lines, ok) = toggle_promote(&mut report, &key);
+        assert!(ok, "{lines:?}");
+        assert!(
+            report.entries()[&key].umu_promoted.is_some(),
+            "promotion not recorded"
+        );
+        assert!(lines[0].contains("promoted"), "{lines:?}");
+        // The same key takes it back.
+        let (lines, ok) = toggle_promote(&mut report, &key);
+        assert!(ok, "{lines:?}");
+        assert!(
+            report.entries()[&key].umu_promoted.is_none(),
+            "promotion not cleared"
+        );
+        assert!(lines[0].contains("no longer promoted"), "{lines:?}");
+    }
+
+    #[test]
+    fn u_refuses_a_launcher_launch_and_a_vanished_entry() {
+        let (mut report, _) = pick_report("egs", "Catnip");
+        report.note_launch("itchio", Some("926077"), "", "itchio:926077");
+        let (lines, ok) = toggle_promote(&mut report, "itchio:926077");
+        assert!(!ok);
+        assert!(lines[0].contains("never went through umu"), "{lines:?}");
+        assert!(
+            report.entries()["itchio:926077"].umu_promoted.is_none(),
+            "a launcher launch got promoted"
+        );
+
+        let (lines, ok) = toggle_promote(&mut report, "gone:key");
+        assert!(!ok);
+        assert!(lines[0].contains("gone:key"), "{lines:?}");
     }
 
     // ---- Identity writes (library picks and online lookups).
