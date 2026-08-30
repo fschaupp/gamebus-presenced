@@ -142,6 +142,15 @@ pub struct Miss {
     /// both. Reversible with the same key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dismissed: Option<String>,
+
+    /// The date the user promoted this entry into the umu-database pipeline
+    /// (TUI key, annotation-half like `dismissed`). umu candidacy is opt-in:
+    /// an entry qualifies when promoted here, or when verification matched
+    /// an existing umu entry from another store (CrossStoreId), or when the
+    /// protonfix check says the game needs umu. Everything else stays a
+    /// gamedb-only identity record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub umu_promoted: Option<String>,
 }
 
 impl Miss {
@@ -402,6 +411,7 @@ impl UmuReport {
             codename_override: None,
             title_override: None,
             dismissed: None,
+            umu_promoted: None,
         });
         entry.last_seen = today;
         fill(&mut entry.launcher, facts.launcher);
@@ -555,6 +565,7 @@ impl UmuReport {
                     ours.codename_override = theirs.codename_override;
                     ours.title_override = theirs.title_override;
                     ours.dismissed = theirs.dismissed;
+                    ours.umu_promoted = theirs.umu_promoted;
                 }
             }
         }
@@ -1321,6 +1332,32 @@ mod tests {
         // A fact that DID arrive refreshes: the game runs native now.
         assert_eq!(e.runner.as_deref(), Some("native"));
         assert_eq!(e.first_seen, first_seen);
+    }
+
+    #[test]
+    fn a_promotion_survives_the_daemons_next_persist() {
+        let stash = TempStash::new("promotion");
+        let mut daemon = UmuReport::from_path(stash.0.clone());
+        daemon.note_launch("itchio", Some("926077"), "", "lutris:danger-scavenger");
+
+        let mut setup = UmuReport {
+            annotator: true,
+            ..UmuReport::from_path(stash.0.clone())
+        };
+        setup.update("itchio:926077", |m| {
+            m.umu_promoted = Some("2026-08-24".into());
+        });
+        setup.save();
+
+        // The daemon persists from its pre-promotion copy: the merge must
+        // adopt the flag like every other annotation.
+        daemon.note_launch("itchio", Some("926077"), "", "lutris:danger-scavenger");
+        let fresh = UmuReport::from_path(stash.0.clone());
+        assert_eq!(
+            fresh.entries()["itchio:926077"].umu_promoted.as_deref(),
+            Some("2026-08-24"),
+            "the promotion flag must survive the daemon's write"
+        );
     }
 
     #[test]
