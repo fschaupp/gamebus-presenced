@@ -67,6 +67,20 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
     let naming = NamingDb::load();
     let today = umu_report::today();
     let mut lines = Vec::new();
+    // The launchers' own records first: a codename the Lutris library knows
+    // saves every later step a guess. Local files only, never fatal.
+    match crate::setup::lutris_library::load() {
+        Ok(games) if !games.is_empty() => {
+            let filled = crate::setup::lutris_library::fill_codenames(report, &games);
+            for line in &filled {
+                lines.push(format!("Lutris library: {line}"));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => lines.push(format!(
+            "Lutris library unreadable ({e}) - codenames stay as they are."
+        )),
+    }
     if db.is_none() {
         lines.push("No local database (--db / GAMEBUS_UMU_DB / --fetch cache) — every entry goes to the API, and id drafting is skipped: collisions cannot be checked without the full database.".to_string());
     }
@@ -532,6 +546,7 @@ mod tests {
             fix: None,
             store_override: None,
             codename_override: None,
+            codename_override_source: None,
             title_override: None,
             dismissed: None,
             umu_promoted: None,

@@ -199,13 +199,30 @@ pub(crate) fn tui_view() -> GamedbView {
 
 /// The pane's `r`: one request for the published identity index. Blocking.
 pub(crate) fn tui_fetch() -> (Vec<String>, bool) {
+    // Refresh what the launchers know alongside what the data set knows: a
+    // codename the Lutris library carries fills in before candidates fold.
+    let mut extra = Vec::new();
+    match crate::setup::lutris_library::load() {
+        Ok(games) if !games.is_empty() => {
+            let mut report = crate::umu_report::UmuReport::load_for_annotations();
+            for line in crate::setup::lutris_library::fill_codenames(&mut report, &games) {
+                extra.push(format!("Lutris library: {line}"));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => extra.push(format!("Lutris library unreadable ({e}).")),
+    }
     match index::fetch(index::identities_url()) {
         Ok((idx, release)) => (
-            vec![format!(
-                "Fetched the gamebus-gamedb index: {} games, release {}.",
-                idx.len(),
-                release.as_deref().unwrap_or("unknown")
-            )],
+            {
+                let mut lines = extra;
+                lines.push(format!(
+                    "Fetched the gamebus-gamedb index: {} games, release {}.",
+                    idx.len(),
+                    release.as_deref().unwrap_or("unknown")
+                ));
+                lines
+            },
             true,
         ),
         // An unpublished data set is a state of the world, not a failure of

@@ -490,6 +490,11 @@ fn lutris_note(miss: &Miss) -> Option<String> {
 /// correction the user made outranks whatever the resolver reported: they
 /// are the source now, and `manual` is the honest word for it.
 fn source_of(miss: &Miss) -> &'static str {
+    // A codename the setup tool filled from the Lutris library carries its
+    // own provenance; a hand-typed override cleared it (see tui_set_identity).
+    if miss.codename_override_source.as_deref() == Some("lutris-library") {
+        return "lutris";
+    }
     if miss.store_override.is_some() || miss.codename_override.is_some() {
         return "manual";
     }
@@ -521,9 +526,12 @@ fn source_of(miss: &Miss) -> &'static str {
 /// An entry nothing resolved has no confidence to report, and `low` is the
 /// level that says exactly that.
 fn confidence_of(miss: &Miss) -> &'static str {
+    if miss.codename_override_source.as_deref() == Some("lutris-library") {
+        return "high";
+    }
     if matches!(
         miss.codename_source.as_deref(),
-        Some("lutris-config") | Some("heroic-env") | Some("lutris-library")
+        Some("lutris-config") | Some("heroic-env")
     ) {
         return "high";
     }
@@ -837,6 +845,7 @@ mod tests {
             fix: None,
             store_override: None,
             codename_override: None,
+            codename_override_source: None,
             title_override: None,
             dismissed: None,
             umu_promoted: None,
@@ -1674,14 +1683,26 @@ mod tests {
         );
 
         // The other codename and title sources, by the table.
-        for (codename_source, want) in [
-            ("heroic-env", "heroic-config"),
-            ("lutris-library", "lutris"),
-        ] {
+        {
             let mut m = miss.clone();
-            m.codename_source = Some(codename_source.into());
-            assert_eq!(source_of(&m), want, "{codename_source}");
-            assert_eq!(confidence_of(&m), "high", "{codename_source}");
+            m.codename_source = Some("heroic-env".into());
+            assert_eq!(source_of(&m), "heroic-config");
+            assert_eq!(confidence_of(&m), "high");
+        }
+        // A library-filled codename lives on the annotation half (the
+        // setup tool cannot persist the resolution half - see umu_report)
+        // and still reads as Lutris's knowledge, not the user's.
+        {
+            let mut m = miss.clone();
+            m.codename_source = None;
+            m.codename_override = Some("2049187585".into());
+            m.codename_override_source = Some("lutris-library".into());
+            assert_eq!(source_of(&m), "lutris");
+            assert_eq!(confidence_of(&m), "high");
+            // The user typing a codename clears the tool provenance and
+            // the entry honestly reads manual again.
+            m.codename_override_source = None;
+            assert_eq!(source_of(&m), "manual");
         }
         for (title_source, want) in [
             ("heroic-config", "heroic-config"),

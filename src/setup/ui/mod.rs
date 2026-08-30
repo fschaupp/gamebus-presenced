@@ -2243,6 +2243,7 @@ mod tests {
                 fix: None,
                 store_override: None,
                 codename_override: None,
+                codename_override_source: None,
                 title_override: None,
                 dismissed: None,
                 umu_promoted: None,
