@@ -9,10 +9,12 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Stores that can lend a page its canonical id, best first.
-///
-/// `steam` and `umu` are absent on purpose: those two come from `[ids]`,
-/// which outranks every store entry, and a page records a fact once.
+/// Stores whose STORE_PRECEDENCE position lends a page its canonical id,
+/// best first. `steam` and `umu` are handled separately in
+/// [`Page::candidates`], one rung above this list: `[ids]` outranks a store
+/// entry naming the same authority, but a `[[stores.steam]]` or
+/// `[[stores.umu]]` codename justifies the id just the same when `[ids]`
+/// never recorded it.
 pub const STORE_PRECEDENCE: [&str; 9] = [
     "gog",
     "egs",
@@ -153,7 +155,9 @@ impl Page {
 
     /// Every id this page's own data could justify, best first.
     ///
-    /// `[ids].steam` outranks `[ids].umu`, which outranks the stores in
+    /// `[ids].steam` outranks `[ids].umu`, which outranks a `stores.steam`
+    /// or `stores.umu` entry naming the same authority (a steam store
+    /// codename IS a steam appid), which outranks the stores in
     /// [`STORE_PRECEDENCE`] order.
     pub fn candidates(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -164,6 +168,26 @@ impl Page {
             out.push(umu.to_string());
         }
         let stores = self.stores();
+        for (store, entries) in &stores {
+            if *store != "steam" {
+                continue;
+            }
+            for entry in entries {
+                if let Some(codename) = entry.get("codename").and_then(toml::Value::as_str) {
+                    out.push(format!("steam-{codename}"));
+                }
+            }
+        }
+        for (store, entries) in &stores {
+            if *store != "umu" {
+                continue;
+            }
+            for entry in entries {
+                if let Some(codename) = entry.get("codename").and_then(toml::Value::as_str) {
+                    out.push(codename.to_string());
+                }
+            }
+        }
         for wanted in STORE_PRECEDENCE {
             for (store, entries) in &stores {
                 if *store != wanted {

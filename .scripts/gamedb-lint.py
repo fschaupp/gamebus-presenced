@@ -71,12 +71,21 @@ check(hs, hs, tomllib.loads((base/"helpers.toml").read_text()), "helpers.toml", 
 STORE_PRECEDENCE = ["gog", "egs", "ubisoft", "ea", "battlenet", "amazon", "humble", "itchio", "zoomplatform"]
 
 def candidates(d):
-    """Every id this page's own data could justify, best first."""
+    """Every id this page's own data could justify, best first.
+
+    [ids] outranks a store entry naming the same authority: a steam or umu
+    store entry's codename IS a steam appid or umu id, so it justifies one
+    exactly like [ids] would, just one rung lower - the page recorded the
+    fact through a store rather than through [ids], nothing more."""
     out, ids = [], d.get("ids", {})
     if "steam" in ids:
         out.append(f"steam-{ids['steam']}")
     if "umu" in ids:
         out.append(ids["umu"])
+    for e in d.get("stores", {}).get("steam", []):
+        out.append(f"steam-{e['codename']}")
+    for e in d.get("stores", {}).get("umu", []):
+        out.append(e["codename"])
     for store in STORE_PRECEDENCE:
         for e in d.get("stores", {}).get(store, []):
             out.append(f"{store}-{e['codename']}")
@@ -88,6 +97,10 @@ def derive(d):
         return f"steam-{ids['steam']}"
     if "umu" in ids:
         return ids["umu"]
+    for e in d.get("stores", {}).get("steam", []):
+        return f"steam-{e['codename']}"
+    for e in d.get("stores", {}).get("umu", []):
+        return e["codename"]
     for store in STORE_PRECEDENCE:
         for e in d.get("stores", {}).get(store, []):
             return f"{store}-{e['codename']}"
