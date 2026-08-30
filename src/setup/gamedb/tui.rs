@@ -131,7 +131,8 @@ pub struct GamedbView {
 }
 
 /// Load the pane's state: the stash, the cached index, the configured
-/// directory. Local files only - `r` is the pane's one network key.
+/// directory. Local files only - the pane's network keys are `r` (this
+/// index) and `v` (the umu database, shared with the misses pane).
 pub(crate) fn tui_view() -> GamedbView {
     let report = UmuReport::load();
     let loaded = index::load();
@@ -276,9 +277,9 @@ pub(crate) fn tui_export(force: bool) -> (Vec<String>, bool) {
         Err(e) => return (vec![e], false),
     };
 
-    // Never `--fetch-pages` from here: `r` is this pane's one network key,
-    // and the directory it writes to should be a checkout that has the page
-    // already.
+    // Never `--fetch-pages` from here: neither of the pane's network keys
+    // (`r`, `v`) fetches pages, and the directory it writes to should be a
+    // checkout that has the page already.
     match export::export(&report, &loaded, &out_dir, false) {
         Ok(summary) => {
             lines.extend(summary.lines);

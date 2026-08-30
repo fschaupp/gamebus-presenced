@@ -441,8 +441,9 @@ pub enum Intent {
     Run(Action),
     ConfirmYes,
     ConfirmNo,
-    /// Misses pane `v`: fetch the database dump and verify the stash.
-    /// Network - the footer labels the key as such.
+    /// The stash panes' `v` (misses and gamedb alike): fetch the database
+    /// dump and verify the stash. Network - the footer labels the key as
+    /// such.
     UmuVerify,
     /// Misses pane, Enter in id-entry mode: collision-check `id` against
     /// the local database and save it on the entry when it survives.
@@ -776,8 +777,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             app.view = View::ALL[(idx + 1) % View::ALL.len()];
             Intent::None
         }
+        // Both stash tabs share `v`: the flows reachable from the gamedb
+        // tab too (the assign refusal, the pick's stale note, the store
+        // cycle's re-verify line) all say "press v", so the key has to
+        // work wherever the sentence was read from.
+        KeyCode::Char('v') if app.view.edits_misses() => Intent::UmuVerify,
         // The misses pane's own verbs.
-        KeyCode::Char('v') if app.view == View::Misses => Intent::UmuVerify,
         KeyCode::Char('a') if app.view.edits_misses() => {
             if let Some(key) = app.edit_key() {
                 // Prefill with the existing draft so a small correction is
@@ -1044,43 +1049,67 @@ fn render_output(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let keys = match app.view {
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            footer_keys(app),
+            Style::default().fg(Color::DarkGray),
+        )),
+        area,
+    );
+}
+
+/// The footer's key list, as the app's CURRENT state makes each key true.
+/// A hint for a key that would do nothing right now - no row to act on, no
+/// candidates to pick through - trains nobody to read the footer, so the
+/// entry modes come first and the list states drop their entry verbs.
+fn footer_keys(app: &App) -> &'static str {
+    // The entry modes edit the stash, so both stash tabs open them and both
+    // draw the same line while one is up.
+    if app.view.edits_misses() {
+        if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) {
+            return "↑↓ choose · Enter pick · Esc cancel · v refresh (net)";
+        }
+        if app.pick.is_some() {
+            return "↑↓ choose · Enter pick · Esc cancel";
+        }
+        if app.id_input.is_some() {
+            return "type the id · ⏎ check+save · esc cancel";
+        }
+        if app.title_input.is_some() {
+            return "type the title · ⏎ save · esc cancel";
+        }
+        if app.dir_input.is_some() {
+            return "type the export directory · ⏎ save · esc cancel";
+        }
+    }
+    match app.view {
         View::Status => {
             "↑↓ select · ←→ pane · ⏎ run · u/s target · tab next view · r refresh · q quit"
         }
         View::Monitor => "↑↓ select · tab next view · r refresh · q quit",
-        // The export hint lives in the verify output and the empty state -
-        // this line carries the pane's own verbs.
-        View::Misses if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
-            "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
-        }
-        View::Misses if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
-        View::Misses if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
-        View::Misses if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
+        // Nothing to act on: the matchup keys and the selection are inert,
+        // so none of them is advertised. `v` stays - it fetches and then
+        // honestly reports an empty stash.
+        View::Misses if app.misses.is_empty() => "tab view · v verify (net) · q quit",
         View::Misses => {
             "↑↓ · tab view · v verify (net) · o lookup (net) · a assign · t title · p pick · s store · u promote (umu) · d dismiss · q quit"
         }
-        View::Gamedb if app.pick.as_ref().is_some_and(|p| p.stale.is_some()) => {
-            "↑↓ choose · Enter pick · Esc cancel · v refresh (net)"
+        // The filter is hiding every row: the entry verbs have no row to
+        // act on, but `f` is the way back and must stay in the line.
+        View::Gamedb if app.gamedb.is_empty() && !app.gamedb_all.is_empty() => {
+            "tab view · f filter · r index (net) · v verify (net) · e export · d directory · q quit"
         }
-        View::Gamedb if app.pick.is_some() => "↑↓ choose · Enter pick · Esc cancel",
-        View::Gamedb if app.id_input.is_some() => "type the id · ⏎ check+save · esc cancel",
-        View::Gamedb if app.title_input.is_some() => "type the title · ⏎ save · esc cancel",
-        View::Gamedb if app.dir_input.is_some() => {
-            "type the export directory · ⏎ save · esc cancel"
+        View::Gamedb if app.gamedb.is_empty() => {
+            "tab view · r index (net) · v verify (net) · e export · d directory · q quit"
         }
         // The pane's own verbs, then the matchup verbs - which act on this
         // game's representative stash entry only.
         View::Gamedb => {
-            "↑↓ · tab view · ⏎ show entry · f filter (all/gaps/umu/weak) · r index (net) · \
+            "↑↓ · tab view · ⏎ show entry · f filter · r index (net) · v verify (net) · \
              e export · d directory · on the entry: o lookup (net) · a assign · t title · \
              p pick · s store · x dismiss · q quit"
         }
-    };
-    f.render_widget(
-        Paragraph::new(Span::styled(keys, Style::default().fg(Color::DarkGray))),
-        area,
-    );
+    }
 }
 
 fn render_confirm(f: &mut Frame, app: &App) {
@@ -1484,6 +1513,72 @@ mod tests {
             assert_eq!(handle_key(&mut app, key(KeyCode::Char('f'))), Intent::None);
             assert_eq!(app.gamedb_filter, GamedbFilter::All, "{view:?} cycled it");
         }
+    }
+
+    /// `v` means the same thing on both stash tabs: the flows reachable
+    /// from the gamedb tab too (the assign refusal, the pick's stale note,
+    /// the store cycle's re-verify line) all say "press v", so the key has
+    /// to fire there - and to stay inert on the read-only views.
+    #[test]
+    fn v_verifies_from_both_stash_tabs_and_is_inert_elsewhere() {
+        let mut app = app_with_rows();
+        app.set_gamedb(gamedb_view(true));
+        app.set_misses(vec![sample_miss("Control")]);
+        for view in [View::Misses, View::Gamedb] {
+            app.view = view;
+            assert_eq!(
+                handle_key(&mut app, key(KeyCode::Char('v'))),
+                Intent::UmuVerify,
+                "{view:?}"
+            );
+        }
+        for view in [View::Status, View::Monitor] {
+            app.view = view;
+            assert_eq!(
+                handle_key(&mut app, key(KeyCode::Char('v'))),
+                Intent::None,
+                "{view:?}"
+            );
+        }
+    }
+
+    /// A footer key that would do nothing right now is a lie: with no row
+    /// selected the entry verbs stay out of the line, and a filter hiding
+    /// every row keeps `f` (the way back) while dropping them.
+    #[test]
+    fn the_footer_advertises_only_keys_that_work_right_now() {
+        let mut app = app_with_rows();
+        app.view = View::Misses;
+        assert_eq!(footer_keys(&app), "tab view · v verify (net) · q quit");
+        app.set_misses(vec![sample_miss("Control")]);
+        let misses = footer_keys(&app);
+        assert!(misses.contains("v verify (net)"), "{misses}");
+        assert!(misses.contains("u promote (umu)"), "{misses}");
+
+        app.view = View::Gamedb;
+        assert_eq!(
+            footer_keys(&app),
+            "tab view · r index (net) · v verify (net) · e export · d directory · q quit"
+        );
+        // A filter that matches nothing: f is the way out, the entry verbs
+        // are not in the line.
+        app.gamedb_filter = GamedbFilter::Umu;
+        let mut view = gamedb_view(true);
+        view.rows = vec![sample_gamedb_row("Control", RowState::Ready)];
+        app.set_gamedb(view);
+        assert!(
+            app.gamedb.is_empty(),
+            "the fixture row should not match the umu filter"
+        );
+        let keys = footer_keys(&app);
+        assert!(keys.contains("f filter"), "{keys}");
+        assert!(!keys.contains("on the entry"), "{keys}");
+        // Unfiltered, the full verb set is back - v included.
+        app.gamedb_filter = GamedbFilter::All;
+        app.set_gamedb(gamedb_view(true));
+        let keys = footer_keys(&app);
+        assert!(keys.contains("v verify (net)"), "{keys}");
+        assert!(keys.contains("on the entry"), "{keys}");
     }
 
     /// Without an index nothing can say whether a page duplicates one the
