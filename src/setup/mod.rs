@@ -16,6 +16,7 @@ pub mod heroic_library;
 pub mod lutris_library;
 pub mod mcp;
 pub mod paths;
+pub mod specs;
 pub mod status;
 pub mod ui;
 pub mod umu_misses;

@@ -149,6 +149,15 @@ pub struct Observation {
     /// pointer, never a copy: this stash does not mirror trace data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
+    /// The run directory this observation came from, so machine specs can be
+    /// read at SUBMIT time rather than copied here at scan time.
+    ///
+    /// Deliberately a pointer. A CPU/GPU/RAM/kernel tuple is a decent machine
+    /// fingerprint, and the user's consent to publish one belongs at the
+    /// submit step in front of them, not pre-collected into a stash months
+    /// earlier. See `setup::specs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_dir: Option<String>,
     /// Layer split of who ate the frame (`kernel`, `driver`, `translation`,
     /// `wine`, `game`, `other`), when the source measured one.
     ///
@@ -352,6 +361,7 @@ impl CompatStash {
                 fill(&mut existing.gpu_vendor, obs.gpu_vendor);
                 fill(&mut existing.specs, obs.specs);
                 fill(&mut existing.log, obs.log);
+                fill(&mut existing.trace_dir, obs.trace_dir);
                 fill(&mut existing.record_mode, obs.record_mode);
                 if existing.layer_split.is_none() {
                     existing.layer_split = obs.layer_split;
@@ -457,6 +467,7 @@ mod tests {
             specs: None,
             signature: Some(signature.to_string()),
             log: None,
+            trace_dir: None,
             layer_split: None,
             attributed_pct: None,
             record_mode: None,

@@ -36,6 +36,7 @@
 //! version understands without losing it.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::ExitCode;
 
 use serde::Deserialize;
@@ -46,6 +47,7 @@ use serde_json::json;
 use crate::compat::{CompatStash, Incoming, Observation, WallKind};
 use crate::naming::NamingDb;
 use crate::setup::mcp::{Client, ServerSpec};
+use crate::setup::specs;
 use crate::umu_report::today;
 
 /// One finding as a source delivers it. Flat on purpose: the run facts and
@@ -78,6 +80,8 @@ struct Delivery {
     signature: Option<String>,
     #[serde(default)]
     log: Option<String>,
+    #[serde(default)]
+    trace_dir: Option<String>,
     #[serde(default)]
     layer_split: Option<BTreeMap<String, f64>>,
     #[serde(default)]
@@ -120,6 +124,7 @@ impl Delivery {
                 specs: self.specs,
                 signature: self.signature,
                 log: self.log,
+                trace_dir: self.trace_dir,
                 layer_split: self.layer_split,
                 attributed_pct: self.attributed_pct,
                 record_mode: self.record_mode,
@@ -279,6 +284,19 @@ fn scan(stash: &mut CompatStash, spec: ServerSpec, since: u64) -> Result<Scan, S
         ));
     }
 
+    // One extra call, for traces_root only: the run directory is where the
+    // machine specs live, and this side reads them itself at submit time
+    // rather than asking beisl to relay a machine fingerprint (that side's
+    // call, 2026-09-05, and the right one).
+    let traces_root = client
+        .call_json("list_traces", json!({}))
+        .ok()
+        .and_then(|v| {
+            v.get("traces_root")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+
     let events = client.call_json("list_events", json!({ "since_unix": since }))?;
     let truncated = events
         .get("truncated")
@@ -353,6 +371,9 @@ fn scan(stash: &mut CompatStash, spec: ServerSpec, since: u64) -> Result<Scan, S
                     // signal name alone would not survive review.
                     signature: event.detail.or(Some(signal)),
                     log: Some(format!("{source}:{}", event.run_id)),
+                    trace_dir: traces_root
+                        .as_ref()
+                        .map(|root| format!("{root}/{}", event.run_id)),
                     layer_split: (!layer_split.is_empty()).then_some(layer_split),
                     attributed_pct: artifact.attributed_pct,
                     record_mode: artifact.record_mode,
@@ -496,6 +517,15 @@ fn list(stash: &CompatStash) {
             println!("    latest: {wine} on {gpu} (via {})", o.source);
             if let Some(sig) = &o.signature {
                 println!("    signature: {sig}");
+            }
+            // Read late and never stored: see setup::specs. A pruned trace
+            // simply has none, which is an ordinary outcome.
+            match o.trace_dir.as_deref().map(Path::new).and_then(specs::read_from_dir) {
+                Some(s) => println!("    specs: {}", s.summary()),
+                None if o.trace_dir.is_some() => {
+                    println!("    specs: none logged for that run")
+                }
+                None => {}
             }
         }
         let pending: Vec<&str> = ["protondb", "awacy", "gamedb"]
