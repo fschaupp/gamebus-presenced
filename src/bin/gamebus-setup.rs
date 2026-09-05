@@ -80,6 +80,16 @@ fn usage() {
     eprintln!("  --reported <key> --target <name>");
     eprintln!("                            Mark a finding submitted to protondb, awacy or");
     eprintln!("                            gamedb, dated today.");
+    eprintln!("  --dismiss <key>           Stop offering a finding for submission. Keeps it");
+    eprintln!("                            and its evidence; --undismiss <key> puts it back.");
+    eprintln!("  --json                    Machine-readable output for the listing, --scan");
+    eprintln!("                            and --export. For another front-end over this");
+    eprintln!("                            flow; the text output is for people.");
+    eprintln!("  --dismiss <key>           Stop offering a finding for submission. Keeps it");
+    eprintln!("                            and its evidence; --undismiss <key> puts it back.");
+    eprintln!("  --json                    Machine-readable output for the listing, --scan");
+    eprintln!("                            and --export. For another front-end over this");
+    eprintln!("                            flow; the text output is for people.");
     eprintln!();
     eprintln!("umu-misses options:");
     eprintln!("  --verify                  Check every miss against the umu database");

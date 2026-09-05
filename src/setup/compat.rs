@@ -68,7 +68,7 @@ use serde_json::Value;
 
 use serde_json::json;
 
-use crate::compat::{CompatStash, Incoming, Observation, WallKind};
+use crate::compat::{CompatFinding, CompatStash, Incoming, Observation, WallKind};
 use crate::naming::NamingDb;
 use crate::setup::inbox;
 use crate::setup::mcp::{Client, ServerSpec};
@@ -533,6 +533,9 @@ pub fn run(args: &[String]) -> ExitCode {
     let target = flag_value(rest, "--target");
     let scanning = rest.iter().any(|a| a == "--scan");
     let export = flag_value(rest, "--export");
+    let as_json = rest.iter().any(|a| a == "--json");
+    let dismiss = flag_value(rest, "--dismiss");
+    let undismiss = flag_value(rest, "--undismiss");
     let since = flag_value(rest, "--since")
         .map(|v| v.parse::<u64>())
         .transpose();
@@ -599,6 +602,15 @@ pub fn run(args: &[String]) -> ExitCode {
         return match scan(&mut stash, ServerSpec::beisl(), since) {
             Ok(outcome) => {
                 stash.save();
+                if as_json {
+                    let out = json!({
+                        "recorded": outcome.recorded,
+                        "skipped": outcome.skipped,
+                        "truncated": outcome.truncated,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                    return ExitCode::SUCCESS;
+                }
                 for key in &outcome.recorded {
                     println!("Recorded {key}");
                 }
@@ -624,7 +636,30 @@ pub fn run(args: &[String]) -> ExitCode {
 
     if let Some(target) = export {
         let key = flag_value(rest, "--key");
-        return run_export(&stash, &target, key.as_deref());
+        return run_export(&stash, &target, key.as_deref(), as_json);
+    }
+
+    // Dismissing is the review flow's "not worth filing": the finding stays,
+    // with its evidence, and stops being offered. The stash has always had
+    // the field; only the CLI could not set it (beisl's request, it drives
+    // this from its window).
+    if let Some(key) = dismiss.as_ref().or(undismiss.as_ref()) {
+        if !stash.findings().contains_key(key) {
+            eprintln!("No finding under {key}.");
+            return ExitCode::FAILURE;
+        }
+        let clearing = undismiss.is_some();
+        let day = today();
+        stash.update(key, |f| {
+            f.dismissed = if clearing { None } else { Some(day) };
+        });
+        stash.save();
+        if clearing {
+            println!("Restored {key} to the review list.");
+        } else {
+            println!("Dismissed {key}.");
+        }
+        return ExitCode::SUCCESS;
     }
 
     if let Some(key) = reported {
@@ -642,13 +677,16 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if as_json {
+        return list_json(&stash, &drained);
+    }
     list(&stash);
     ExitCode::SUCCESS
 }
 
 /// Draft a submission for one finding, or for every finding a target still
 /// wants. Prints; never submits.
-fn run_export(stash: &CompatStash, target: &str, key: Option<&str>) -> ExitCode {
+fn run_export(stash: &CompatStash, target: &str, key: Option<&str>, as_json: bool) -> ExitCode {
     let endpoints = Endpoints::load();
     let mut keys: Vec<&String> = match key {
         Some(k) => match stash.findings().get_key_value(k) {
@@ -661,19 +699,22 @@ fn run_export(stash: &CompatStash, target: &str, key: Option<&str>) -> ExitCode 
         None => stash
             .findings()
             .iter()
-            .filter(|(_, f)| f.needs(target))
-            // AreWeAntiCheatYet collects anti-cheat behaviour; a Wine stub is
-            // a Wine bug and not theirs to carry.
-            .filter(|(_, f)| target != "awacy" || f.wall.is_anti_cheat())
+            .filter(|(k, _)| pending_targets(&stash.findings()[*k]).contains(&target))
             .map(|(k, _)| k)
             .collect(),
     };
     keys.sort();
 
     if keys.is_empty() {
-        println!("Nothing to submit to {target}.");
+        if as_json {
+            println!("{}", json!({"reports": []}));
+        } else {
+            println!("Nothing to submit to {target}.");
+        }
         return ExitCode::SUCCESS;
     }
+
+    let mut drafts = Vec::new();
 
     for k in keys {
         let f = &stash.findings()[k];
@@ -706,6 +747,19 @@ fn run_export(stash: &CompatStash, target: &str, key: Option<&str>) -> ExitCode 
             }
         };
 
+        if as_json {
+            drafts.push(json!({
+                "key": k,
+                "target": target,
+                "url": report.url,
+                "body": report.body,
+                // Never empty for a draft worth filing by hand: these are the
+                // fields no trace can supply (see reports::Report).
+                "missing": report.missing,
+            }));
+            continue;
+        }
+
         println!("=== {k} ===");
         println!("{}", report.body);
         println!("File it at: {}", report.url);
@@ -718,7 +772,79 @@ fn run_export(stash: &CompatStash, target: &str, key: Option<&str>) -> ExitCode 
         }
         println!();
     }
+
+    if as_json {
+        let out = json!({"reports": drafts});
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        return ExitCode::SUCCESS;
+    }
     println!("Nothing was submitted. Review, complete, and file it yourself.");
+    ExitCode::SUCCESS
+}
+
+/// Targets that still want this finding.
+///
+/// The AreWeAntiCheatYet rule lives here rather than in each caller:
+/// AWACY collects anti-cheat behaviour, and a Wine stub is a Wine bug, not
+/// theirs to carry. beisl's window reads this off `--json` instead of
+/// reimplementing it (its request, 2026-09-05).
+fn pending_targets(f: &CompatFinding) -> Vec<&'static str> {
+    ["protondb", "awacy", "gamedb"]
+        .into_iter()
+        .filter(|t| f.needs(t))
+        .filter(|t| *t != "awacy" || f.wall.is_anti_cheat())
+        .collect()
+}
+
+/// The stash as one JSON object.
+///
+/// An object rather than a bare array so `--json` has the same shape here, on
+/// `--scan` and on `--export`, and so it can gain a field without breaking a
+/// reader. `key` and `needs` are computed onto each finding; everything else
+/// is the stored record, unknown fields included.
+fn list_json(stash: &CompatStash, drained: &Drained) -> ExitCode {
+    let mut keys: Vec<&String> = stash.findings().keys().collect();
+    keys.sort();
+
+    let findings: Vec<Value> = keys
+        .into_iter()
+        .map(|key| {
+            let f = &stash.findings()[key];
+            let mut value = serde_json::to_value(f).unwrap_or_else(|_| json!({}));
+            if let Some(map) = value.as_object_mut() {
+                map.insert("key".into(), json!(key));
+                map.insert("needs".into(), json!(pending_targets(f)));
+                // The stored record omits an empty field to keep the file
+                // small. A reader should not have to tell "absent" from
+                // "empty", so every documented key is present here even when
+                // the stash left it out.
+                for (field, empty) in [
+                    ("title", Value::Null),
+                    ("steam_appid", Value::Null),
+                    ("awacy_slug", Value::Null),
+                    ("dismissed", Value::Null),
+                    ("reported", json!({})),
+                ] {
+                    map.entry(field).or_insert(empty);
+                }
+            }
+            value
+        })
+        .collect();
+
+    let refused: Vec<Value> = drained
+        .rejected
+        .iter()
+        .map(|(path, why)| json!({"path": path.display().to_string(), "why": why}))
+        .collect();
+
+    let out = json!({
+        "findings": findings,
+        // What this very run took off the inbox, so a UI can say what
+        // arrived without diffing against its own last view.
+        "inbox": {"took": drained.recorded, "refused": refused},
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     ExitCode::SUCCESS
 }
 
@@ -759,13 +885,7 @@ fn list(stash: &CompatStash) {
                 }
             }
         }
-        let pending: Vec<&str> = ["protondb", "awacy", "gamedb"]
-            .into_iter()
-            .filter(|t| f.needs(t))
-            // AreWeAntiCheatYet collects anti-cheat behaviour; a Wine stub is
-            // a Wine bug and not theirs to carry.
-            .filter(|t| *t != "awacy" || f.wall.is_anti_cheat())
-            .collect();
+        let pending = pending_targets(f);
         if !pending.is_empty() {
             println!("    not yet reported to: {}", pending.join(", "));
         }
