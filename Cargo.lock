@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "gamebus-presenced"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "discord-rich-presence",
  "libc",
