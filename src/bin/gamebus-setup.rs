@@ -64,6 +64,10 @@ fn usage() {
     eprintln!();
     eprintln!();
     eprintln!("compat options:");
+    eprintln!("  --scan                    Pull findings from beisl over its MCP interface");
+    eprintln!("                            (structured output, no LLM). Idempotent: a rescan");
+    eprintln!("                            refreshes evidence rather than duplicating it.");
+    eprintln!("  --since <unix>            Only scan runs active since this timestamp");
     eprintln!("  --record <file|->         Take a compat finding beisl detected (JSON on");
     eprintln!("                            stdin or from a file; one object or an array).");
     eprintln!("                            beisl fires this; nothing here goes on the network.");

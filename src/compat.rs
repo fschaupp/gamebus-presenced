@@ -61,7 +61,10 @@ pub enum WallKind {
     KernelAntiCheat,
     /// `c00000cb` on a `\??\Volume{...}` path - the volume-GUID path bug.
     VolumeGuidPath,
-    /// An EAC or BattlEye game with no Proton runtime present.
+    /// An EAC or BattlEye game with no Proton runtime present. Reserved:
+    /// beisl does not emit this yet and deliberately will not until a real
+    /// log line is captured, because a guessed substring would wreck the
+    /// exactness the detection depends on (that side, 2026-09-05).
     MissingRuntime,
     /// A kind this build does not know. Preserved verbatim.
     Other(String),
@@ -123,11 +126,19 @@ pub struct Observation {
     /// load-bearing fact in a ProtonDB report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wine: Option<String>,
-    /// The GPU actually used in-game, which is not always the one a spec
-    /// sheet would name.
+    /// The GPU device name. beisl does NOT supply this - its artifacts carry
+    /// a vendor tag only (see `gpu_vendor`) - so this is filled from this
+    /// side or left empty rather than guessed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<String>,
-    /// System specs, as the source rendered them.
+    /// GPU vendor tag as beisl detected it: `intel`, `amd`, `nvidia`,
+    /// `qualcomm`. A vendor, never a device - kept separate from `gpu` so a
+    /// report generator cannot print "intel" where a device name belongs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_vendor: Option<String>,
+    /// System specs, as the source rendered them. Nothing supplies this yet:
+    /// beisl does not record specs at trace time (confirmed with that side,
+    /// 2026-09-05), so it stays empty until something does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub specs: Option<String>,
     /// What identifies this wall: the missing export, the `.sys` names, the
@@ -138,9 +149,24 @@ pub struct Observation {
     /// pointer, never a copy: this stash does not mirror trace data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
-    /// Layer split of who ate the frame, when the source measured one.
+    /// Layer split of who ate the frame (`kernel`, `driver`, `translation`,
+    /// `wine`, `game`, `other`), when the source measured one.
+    ///
+    /// Read it with `attributed_pct` and `record_mode` or it misleads: the
+    /// percentages are over ATTRIBUTED samples only, and a `degraded`
+    /// recording is userspace-only, so a missing `kernel` layer there is a
+    /// limit of the recording, not a quiet kernel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_split: Option<BTreeMap<String, f64>>,
+    /// What fraction of the trace `layer_split` actually covers. The
+    /// unattributed remainder is a measurement gap and is deliberately not
+    /// folded into any named layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributed_pct: Option<f64>,
+    /// How the trace was recorded (`degraded` means userspace-only). Carried
+    /// so nothing downstream reads a layer split without its caveat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_mode: Option<String>,
     /// Anything a newer source sent that this build has no field for.
     /// Round-tripped untouched so an older gamebus-setup cannot silently
     /// drop a newer beisl's facts.
@@ -323,10 +349,13 @@ impl CompatStash {
                 existing.observed = obs.observed;
                 // A repeat may carry facts the first sighting lacked.
                 fill(&mut existing.gpu, obs.gpu);
+                fill(&mut existing.gpu_vendor, obs.gpu_vendor);
                 fill(&mut existing.specs, obs.specs);
                 fill(&mut existing.log, obs.log);
+                fill(&mut existing.record_mode, obs.record_mode);
                 if existing.layer_split.is_none() {
                     existing.layer_split = obs.layer_split;
+                    existing.attributed_pct = obs.attributed_pct;
                 }
                 for (k, v) in obs.extra {
                     existing.extra.entry(k).or_insert(v);
@@ -424,10 +453,13 @@ mod tests {
             observed: today(),
             wine: wine.map(str::to_string),
             gpu: None,
+            gpu_vendor: None,
             specs: None,
             signature: Some(signature.to_string()),
             log: None,
             layer_split: None,
+            attributed_pct: None,
+            record_mode: None,
             extra: BTreeMap::new(),
         }
     }

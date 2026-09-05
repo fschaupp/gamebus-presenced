@@ -14,6 +14,7 @@ pub mod compat;
 pub mod gamedb;
 pub mod heroic_library;
 pub mod lutris_library;
+pub mod mcp;
 pub mod paths;
 pub mod status;
 pub mod ui;
