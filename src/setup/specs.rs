@@ -20,24 +20,55 @@
 //! Best effort by design: the CSV only exists when MangoHud logged the
 //! session. On this machine that was 3 of 12 runs, so "no specs" is an
 //! ordinary outcome, not an error.
+//!
+//! # Why the trace usually has none, for exactly our findings
+//!
+//! A game stopped by a compat wall never renders a frame, so MangoHud never
+//! writes a CSV (Florian, 2026-09-05, on the WARDOGS runs). Missing trace
+//! specs therefore correlate almost perfectly with the findings most worth
+//! filing - the correlation is structural, not luck. [`read_system`] is the
+//! answer to that: the machine can be asked directly, at the same late
+//! moment and with the same rule that nothing is stored.
+//!
+//! The two sources are NOT interchangeable and [`SpecSource`] keeps them
+//! apart. A trace names the GPU that actually ran the session; a probe can
+//! only list the GPUs present, and this machine has two. Reporting "the GPU"
+//! from a probe on a multi-GPU box would be a confident wrong answer.
 
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+/// Where a set of specs came from, and therefore what may be claimed of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpecSource {
+    /// The run's own MangoHud CSV: scoped to that session, so `gpu` is the
+    /// device that actually ran the game.
+    #[default]
+    Trace,
+    /// Probed from this machine now. Says nothing about which GPU ran a
+    /// game, or even whether the machine is the one that did.
+    System,
+}
+
 /// What the MangoHud header line carries. Every field is optional: the
 /// `driver` column is routinely empty, and a newer MangoHud may drop or
 /// reorder columns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Specs {
+    pub source: SpecSource,
     pub os: Option<String>,
     pub cpu: Option<String>,
     /// The GPU device string - the one that actually ran this session, which
     /// on a multi-GPU machine is the only correct answer and is why this is
     /// read per trace rather than probed from the running system.
     pub gpu: Option<String>,
-    /// RAM as MangoHud reports it, in KiB.
+    /// Every GPU present, filled by [`read_system`] only. None of them is
+    /// known to have run any particular game - that is the whole difference
+    /// between this and `gpu`.
+    pub gpus: Vec<String>,
+    /// RAM in KiB.
     pub ram_kib: Option<u64>,
     pub kernel: Option<String>,
     pub driver: Option<String>,
@@ -62,6 +93,9 @@ impl Specs {
         }
         if let Some(gpu) = &self.gpu {
             parts.push(gpu.clone());
+        }
+        if !self.gpus.is_empty() {
+            parts.push(self.gpus.join(" + "));
         }
         if let Some(gib) = self.ram_gib() {
             parts.push(format!("{gib:.0} GiB"));
@@ -201,5 +235,195 @@ Intel(R) Arc(tm) A770 Graphics (DG2),32210576,7.3.0-0.1-fls-upstream-upstream+,,
         let s = read_from_dir(&dir).expect("specs read");
         assert_eq!(s.gpu.as_deref(), Some("Intel(R) Arc(tm) A770 Graphics (DG2)"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Ask this machine for what a report needs, when the trace could not say.
+///
+/// Every source is a plain file this process can already read - no
+/// subprocess, no privilege. Read at review and submit time like the trace
+/// path, and stored nowhere for the same reason.
+///
+/// `gpu` is deliberately left empty: a probe can enumerate the GPUs present
+/// but cannot know which one ran a game, so they go in `gpus` and the caller
+/// is obliged to say so.
+pub fn read_system() -> Specs {
+    Specs {
+        source: SpecSource::System,
+        os: os_pretty_name(),
+        cpu: first_field("/proc/cpuinfo", "model name"),
+        gpu: None,
+        gpus: present_gpus(),
+        ram_kib: first_field("/proc/meminfo", "MemTotal")
+            .and_then(|v| v.split_whitespace().next().and_then(|n| n.parse().ok())),
+        kernel: read_trimmed("/proc/sys/kernel/osrelease"),
+        driver: None,
+        cpu_scheduler: None,
+    }
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// First `key: value` line in a `/proc` file.
+fn first_field(path: &str, key: &str) -> Option<String> {
+    std::fs::read_to_string(path).ok()?.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name.trim() == key).then(|| value.trim().to_string())
+    })
+}
+
+fn os_pretty_name() -> Option<String> {
+    let raw = std::fs::read_to_string("/etc/os-release").ok()?;
+    raw.lines()
+        .find_map(|l| l.strip_prefix("PRETTY_NAME="))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Every render node's device, named through the system's PCI id table when
+/// there is one. Falls back to `driver 1002:73df`, which is still more use in
+/// a bug report than nothing.
+fn present_gpus() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    let ids = PciIds::load();
+    let mut gpus = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // `card0` is a device; `card0-DP-5` is a connector on it.
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let Ok(uevent) = std::fs::read_to_string(entry.path().join("device/uevent")) else {
+            continue;
+        };
+        let field = |key: &str| {
+            uevent
+                .lines()
+                .find_map(|l| l.strip_prefix(key))
+                .map(str::to_ascii_lowercase)
+        };
+        let Some(pci) = field("PCI_ID=") else { continue };
+        let driver = field("DRIVER=").unwrap_or_default();
+        let Some((vendor, device)) = pci.split_once(':') else {
+            continue;
+        };
+        match ids.as_ref().and_then(|i| i.name(vendor, device)) {
+            Some(name) => gpus.push(name),
+            None if !driver.is_empty() => gpus.push(format!("{driver} {vendor}:{device}")),
+            None => gpus.push(format!("{vendor}:{device}")),
+        }
+    }
+    gpus.sort();
+    gpus
+}
+
+/// The system's `pci.ids` table, held as text and searched on demand - it is
+/// well over a megabyte and this looks up one or two devices.
+struct PciIds(String);
+
+impl PciIds {
+    fn load() -> Option<Self> {
+        ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"]
+            .into_iter()
+            .find_map(|p| std::fs::read_to_string(p).ok())
+            .map(Self)
+    }
+
+    /// Device name for a lowercase `vendor`/`device` id pair.
+    ///
+    /// The file lists vendors unindented and their devices one tab in, so a
+    /// device is only this vendor's while no new unindented line has been
+    /// passed. Without that guard a device id would match under the wrong
+    /// vendor, which is how a Radeon ends up labelled as somebody else's part.
+    fn name(&self, vendor: &str, device: &str) -> Option<String> {
+        let mut in_vendor = false;
+        for line in self.0.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if !line.starts_with('\t') {
+                if in_vendor {
+                    return None; // left our vendor without a hit
+                }
+                in_vendor = line
+                    .split_once("  ")
+                    .is_some_and(|(id, _)| id.eq_ignore_ascii_case(vendor));
+                continue;
+            }
+            if !in_vendor || line.starts_with("\t\t") {
+                continue;
+            }
+            let entry = line.trim_start_matches('\t');
+            if let Some((id, name)) = entry.split_once("  ") {
+                if id.eq_ignore_ascii_case(device) {
+                    return Some(name.trim().to_string());
+                }
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod system_tests {
+    use super::*;
+
+    const IDS: &str = "\
+# comment
+1002  Advanced Micro Devices, Inc. [AMD/ATI]
+\t73df  Navi 22 [Radeon RX 6700/6700 XT/6750 XT]
+\t\t1043 0000  Some subsystem
+8086  Intel Corporation
+\t56a0  DG2 [Arc A770]
+";
+
+    #[test]
+    fn a_device_resolves_under_its_own_vendor() {
+        let ids = PciIds(IDS.into());
+        assert_eq!(
+            ids.name("1002", "73df").as_deref(),
+            Some("Navi 22 [Radeon RX 6700/6700 XT/6750 XT]")
+        );
+        assert_eq!(ids.name("8086", "56a0").as_deref(), Some("DG2 [Arc A770]"));
+    }
+
+    #[test]
+    fn a_device_never_matches_under_the_wrong_vendor() {
+        let ids = PciIds(IDS.into());
+        // 56a0 exists, but not under AMD.
+        assert_eq!(ids.name("1002", "56a0"), None);
+        assert_eq!(ids.name("8086", "73df"), None);
+    }
+
+    #[test]
+    fn a_subsystem_line_is_not_mistaken_for_a_device() {
+        let ids = PciIds(IDS.into());
+        assert_eq!(ids.name("1002", "1043"), None, "two tabs deep is a subsystem");
+    }
+
+    #[test]
+    fn an_unknown_id_names_nothing() {
+        assert_eq!(PciIds(IDS.into()).name("dead", "beef"), None);
+    }
+
+    #[test]
+    fn the_probe_reads_this_machine() {
+        // Runs on the CI/dev box it is compiled on: /proc is always there.
+        let s = read_system();
+        assert_eq!(s.source, SpecSource::System);
+        assert!(s.kernel.is_some(), "kernel comes from /proc");
+        assert!(s.cpu.is_some(), "cpu comes from /proc/cpuinfo");
+        assert!(s.ram_kib.is_some_and(|k| k > 0), "ram comes from /proc");
+        assert!(
+            s.gpu.is_none(),
+            "a probe must never claim which GPU ran a game"
+        );
     }
 }

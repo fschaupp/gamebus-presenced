@@ -36,7 +36,7 @@
 //! version understands without losing it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde::Deserialize;
@@ -47,6 +47,7 @@ use serde_json::json;
 use crate::compat::{CompatStash, Incoming, Observation, WallKind};
 use crate::naming::NamingDb;
 use crate::setup::mcp::{Client, ServerSpec};
+use crate::setup::protonfix;
 use crate::setup::specs;
 use crate::umu_report::today;
 
@@ -227,26 +228,46 @@ struct Layer {
 /// Work out which game a wall belongs to.
 ///
 /// beisl names a run after its executable, and an executable is not an
-/// identity - that gap is the whole reason this integration exists. Two ways
-/// to close it, best first:
+/// identity - that gap is the whole reason this integration exists. Three
+/// ways to close it, strongest evidence first:
 ///
-/// 1. The appid beisl read off `org.gamebus.Presence.v1` at trace time. This
-///    is the authoritative answer and needs nothing from us.
-/// 2. Failing that, the naming database: executable to title to Steam appid.
-///    This is how a run traced before beisl learned to read presence still
-///    lands under the right key, and it is exactly the identity work this
-///    side owns.
+/// 1. The appid beisl read off `org.gamebus.Presence.v1` at trace time. The
+///    authoritative answer, and it needs nothing from us.
+/// 2. ProtonFixes' own announcement in the run's game log, which names the
+///    title and appid together. This is Proton's resolution of the actual
+///    launch, so it outranks inferring an identity from a filename.
+/// 3. The naming database: executable to title to Steam appid. Weakest of
+///    the three - it matches on a basename and falls back to the first entry
+///    in an ambiguous bucket - but it covers launches ProtonFixes was not
+///    involved in.
 ///
-/// Neither is a guess. A run that satisfies neither is reported and skipped
-/// rather than filed under an invented key, which would poison a key space
-/// the identity-miss stash shares.
-fn resolve_key(event: &WallEvent, naming: Option<&NamingDb>) -> Result<(String, Option<String>), String> {
+/// Rung 2 is not a nicety. The five analyzed WARDOGS runs carry no appid
+/// (they predate beisl reading presence), and neither the launcher
+/// executable nor the playtest appid is in detectable.json - so rung 3 fails
+/// on them and rung 2 is the only thing that keys the first payload we
+/// actually want to file.
+///
+/// None of the three is a guess. A run that satisfies none is reported and
+/// skipped rather than filed under an invented key, which would poison a key
+/// space the identity-miss stash shares.
+fn resolve_key(
+    event: &WallEvent,
+    naming: Option<&NamingDb>,
+    trace_dir: Option<&Path>,
+) -> Result<(String, Option<String>), String> {
     if let Some(appid) = event.steam_appid.as_deref().filter(|a| !a.is_empty()) {
         let title = naming
             .and_then(|db| db.lookup_by_steam_appid(appid))
             .map(str::to_string)
             .or_else(|| event.game.clone());
         return Ok((format!("steam:{appid}"), title));
+    }
+
+    if let Some(id) = trace_dir.and_then(protonfix::read_from_dir) {
+        return Ok((
+            format!("steam:{}", id.steam_appid),
+            Some(id.title),
+        ));
     }
 
     let exe = event
@@ -325,7 +346,10 @@ fn scan(stash: &mut CompatStash, spec: ServerSpec, since: u64) -> Result<Scan, S
                 continue;
             }
         };
-        let (key, title) = match resolve_key(&event, naming.as_ref()) {
+        let run_dir = traces_root
+            .as_ref()
+            .map(|root| PathBuf::from(root).join(&event.run_id));
+        let (key, title) = match resolve_key(&event, naming.as_ref(), run_dir.as_deref()) {
             Ok(pair) => pair,
             Err(why) => {
                 outcome.skipped.push(format!("{}: {why}", event.run_id));
@@ -371,9 +395,9 @@ fn scan(stash: &mut CompatStash, spec: ServerSpec, since: u64) -> Result<Scan, S
                     // signal name alone would not survive review.
                     signature: event.detail.or(Some(signal)),
                     log: Some(format!("{source}:{}", event.run_id)),
-                    trace_dir: traces_root
+                    trace_dir: run_dir
                         .as_ref()
-                        .map(|root| format!("{root}/{}", event.run_id)),
+                        .map(|p| p.display().to_string()),
                     layer_split: (!layer_split.is_empty()).then_some(layer_split),
                     attributed_pct: artifact.attributed_pct,
                     record_mode: artifact.record_mode,
@@ -518,14 +542,19 @@ fn list(stash: &CompatStash) {
             if let Some(sig) = &o.signature {
                 println!("    signature: {sig}");
             }
-            // Read late and never stored: see setup::specs. A pruned trace
-            // simply has none, which is an ordinary outcome.
+            // Read late and never stored: see setup::specs. A game stopped
+            // by a wall renders no frame, so MangoHud logs nothing and the
+            // trace usually cannot answer - which is exactly when the
+            // machine is asked instead, labelled so nobody reads a probe as
+            // a statement about the run.
             match o.trace_dir.as_deref().map(Path::new).and_then(specs::read_from_dir) {
-                Some(s) => println!("    specs: {}", s.summary()),
-                None if o.trace_dir.is_some() => {
-                    println!("    specs: none logged for that run")
+                Some(s) => println!("    specs (this run): {}", s.summary()),
+                None => {
+                    let s = specs::read_system();
+                    if !s.summary().is_empty() {
+                        println!("    specs (this machine now): {}", s.summary());
+                    }
                 }
-                None => {}
             }
         }
         let pending: Vec<&str> = ["protondb", "awacy", "gamedb"]
@@ -617,7 +646,7 @@ mod tests {
     #[test]
     fn the_appid_beisl_read_off_the_bus_wins() {
         let db = NamingDb::parse(NAMING).unwrap();
-        let (key, title) = resolve_key(&event("eldenring.exe", Some("1245620")), Some(&db)).unwrap();
+        let (key, title) = resolve_key(&event("eldenring.exe", Some("1245620")), Some(&db), None).unwrap();
         assert_eq!(key, "steam:1245620");
         assert_eq!(title.as_deref(), Some("Elden Ring"));
     }
@@ -625,7 +654,7 @@ mod tests {
     #[test]
     fn an_old_run_without_an_appid_is_resolved_through_the_naming_database() {
         let db = NamingDb::parse(NAMING).unwrap();
-        let (key, title) = resolve_key(&event("eldenring.exe", None), Some(&db)).unwrap();
+        let (key, title) = resolve_key(&event("eldenring.exe", None), Some(&db), None).unwrap();
         assert_eq!(key, "steam:1245620", "exe -> title -> appid");
         assert_eq!(title.as_deref(), Some("Elden Ring"));
     }
@@ -634,21 +663,70 @@ mod tests {
     fn an_unresolvable_run_is_skipped_rather_than_given_an_invented_key() {
         let db = NamingDb::parse(NAMING).unwrap();
         // Known exe, but no Steam sku to key on.
-        let e = resolve_key(&event("nosku.exe", None), Some(&db)).unwrap_err();
+        let e = resolve_key(&event("nosku.exe", None), Some(&db), None).unwrap_err();
         assert!(e.contains("no Steam appid"), "{e}");
         // Unknown exe entirely.
-        let e = resolve_key(&event("mystery.exe", None), Some(&db)).unwrap_err();
+        let e = resolve_key(&event("mystery.exe", None), Some(&db), None).unwrap_err();
         assert!(e.contains("no naming database entry"), "{e}");
         // No database at all.
-        let e = resolve_key(&event("eldenring.exe", None), None).unwrap_err();
+        let e = resolve_key(&event("eldenring.exe", None), None, None).unwrap_err();
         assert!(e.contains("no naming database"), "{e}");
     }
 
     #[test]
     fn an_empty_appid_is_treated_as_absent() {
         let db = NamingDb::parse(NAMING).unwrap();
-        let (key, _) = resolve_key(&event("eldenring.exe", Some("")), Some(&db)).unwrap();
+        let (key, _) = resolve_key(&event("eldenring.exe", Some("")), Some(&db), None).unwrap();
         assert_eq!(key, "steam:1245620", "fell through to the naming database");
+    }
+
+    /// A run dir holding a ProtonFixes announcement and nothing else.
+    fn wardogs_run_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pfix-key-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("game.log"),
+            "noise\nUsing early stage global defaults for \"WARDOGS Playtest\" (4809930)\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_game_log_keys_a_run_the_naming_database_cannot() {
+        let db = NamingDb::parse(NAMING).unwrap();
+        let dir = wardogs_run_dir("wins");
+        // The real case: launcher exe in no database, no appid on the event.
+        let (key, title) = resolve_key(
+            &event("WardogsLauncher-Shipping.exe", None),
+            Some(&db),
+            Some(&dir),
+        )
+        .expect("keyed off the game log");
+        assert_eq!(key, "steam:4809930");
+        assert_eq!(title.as_deref(), Some("WARDOGS Playtest"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_appid_from_the_bus_still_outranks_the_game_log() {
+        let db = NamingDb::parse(NAMING).unwrap();
+        let dir = wardogs_run_dir("outranked");
+        let (key, _) = resolve_key(&event("whatever.exe", Some("111")), Some(&db), Some(&dir))
+            .expect("keyed");
+        assert_eq!(key, "steam:111", "presence beats a log line");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_run_dir_with_no_announcement_falls_through_to_the_database() {
+        let db = NamingDb::parse(NAMING).unwrap();
+        let dir = std::env::temp_dir().join(format!("pfix-empty-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("game.log"), "just noise\n").unwrap();
+        let (key, _) = resolve_key(&event("eldenring.exe", None), Some(&db), Some(&dir)).unwrap();
+        assert_eq!(key, "steam:1245620");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
