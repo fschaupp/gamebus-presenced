@@ -100,10 +100,9 @@ mod tests {
 
     #[test]
     fn the_title_and_appid_come_back_together() {
-        let id = parse_line(
-            r#"Using early stage global defaults for "WARDOGS Playtest" (4809930)"#,
-        )
-        .unwrap();
+        let id =
+            parse_line(r#"Using early stage global defaults for "WARDOGS Playtest" (4809930)"#)
+                .unwrap();
         assert_eq!(id.title, "WARDOGS Playtest");
         assert_eq!(id.steam_appid, "4809930");
     }

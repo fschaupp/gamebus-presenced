@@ -69,10 +69,10 @@ use serde_json::Value;
 use serde_json::json;
 
 use crate::compat::{CompatFinding, CompatStash, Incoming, Observation, WallKind};
+use crate::endpoints::Endpoints;
 use crate::naming::NamingDb;
 use crate::setup::inbox;
 use crate::setup::mcp::{Client, ServerSpec};
-use crate::endpoints::Endpoints;
 use crate::setup::protonfix;
 use crate::setup::reports;
 use crate::setup::specs;
@@ -178,9 +178,11 @@ fn ingest(stash: &mut CompatStash, raw: &str) -> Result<Vec<String>, String> {
 
     let mut staged = Vec::new();
     for (i, item) in items.into_iter().enumerate() {
-        let delivery: Delivery = serde_json::from_value(item)
+        let delivery: Delivery =
+            serde_json::from_value(item).map_err(|e| format!("delivery {}: {e}", i + 1))?;
+        let key = delivery
+            .key()
             .map_err(|e| format!("delivery {}: {e}", i + 1))?;
-        let key = delivery.key().map_err(|e| format!("delivery {}: {e}", i + 1))?;
         staged.push((key, delivery.into_incoming()));
     }
 
@@ -354,19 +356,15 @@ fn resolve_key(
     }
 
     if let Some(id) = trace_dir.and_then(protonfix::read_from_dir) {
-        return Ok((
-            format!("steam:{}", id.steam_appid),
-            Some(id.title),
-        ));
+        return Ok((format!("steam:{}", id.steam_appid), Some(id.title)));
     }
 
     let exe = event
         .game
         .as_deref()
         .ok_or_else(|| "the run names no executable".to_string())?;
-    let db = naming.ok_or_else(|| {
-        format!("no appid on the run and no naming database to resolve {exe}")
-    })?;
+    let db = naming
+        .ok_or_else(|| format!("no appid on the run and no naming database to resolve {exe}"))?;
     let title = db
         .lookup_by_executable(exe)
         .ok_or_else(|| format!("{exe} is in no naming database entry"))?
@@ -485,9 +483,7 @@ fn scan(stash: &mut CompatStash, spec: ServerSpec, since: u64) -> Result<Scan, S
                     // signal name alone would not survive review.
                     signature: event.detail.or(Some(signal)),
                     log: Some(format!("{source}:{}", event.run_id)),
-                    trace_dir: run_dir
-                        .as_ref()
-                        .map(|p| p.display().to_string()),
+                    trace_dir: run_dir.as_ref().map(|p| p.display().to_string()),
                     layer_split: (!layer_split.is_empty()).then_some(layer_split),
                     attributed_pct: artifact.attributed_pct,
                     record_mode: artifact.record_mode,
@@ -862,7 +858,12 @@ fn list(stash: &CompatStash) {
         let title = f.title.as_deref().unwrap_or("(untitled)");
         let mark = if f.dismissed.is_some() { "-" } else { "*" };
         println!("{mark} {title}  [{key}]");
-        println!("    wall: {}  seen {} .. {}", f.wall.as_str(), f.first_seen, f.last_seen);
+        println!(
+            "    wall: {}  seen {} .. {}",
+            f.wall.as_str(),
+            f.first_seen,
+            f.last_seen
+        );
         if let Some(o) = f.latest() {
             let wine = o.wine.as_deref().unwrap_or("unknown wine");
             let gpu = o.gpu.as_deref().unwrap_or("unknown GPU");
@@ -875,7 +876,12 @@ fn list(stash: &CompatStash) {
             // trace usually cannot answer - which is exactly when the
             // machine is asked instead, labelled so nobody reads a probe as
             // a statement about the run.
-            match o.trace_dir.as_deref().map(Path::new).and_then(specs::read_from_dir) {
+            match o
+                .trace_dir
+                .as_deref()
+                .map(Path::new)
+                .and_then(specs::read_from_dir)
+            {
                 Some(s) => println!("    specs (this run): {}", s.summary()),
                 None => {
                     let s = specs::read_system();
@@ -968,7 +974,8 @@ mod tests {
     #[test]
     fn the_appid_beisl_read_off_the_bus_wins() {
         let db = NamingDb::parse(NAMING).unwrap();
-        let (key, title) = resolve_key(&event("eldenring.exe", Some("1245620")), Some(&db), None).unwrap();
+        let (key, title) =
+            resolve_key(&event("eldenring.exe", Some("1245620")), Some(&db), None).unwrap();
         assert_eq!(key, "steam:1245620");
         assert_eq!(title.as_deref(), Some("Elden Ring"));
     }
@@ -1034,8 +1041,8 @@ mod tests {
     fn the_appid_from_the_bus_still_outranks_the_game_log() {
         let db = NamingDb::parse(NAMING).unwrap();
         let dir = wardogs_run_dir("outranked");
-        let (key, _) = resolve_key(&event("whatever.exe", Some("111")), Some(&db), Some(&dir))
-            .expect("keyed");
+        let (key, _) =
+            resolve_key(&event("whatever.exe", Some("111")), Some(&db), Some(&dir)).expect("keyed");
         assert_eq!(key, "steam:111", "presence beats a log line");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1095,7 +1102,10 @@ mod tests {
         )
         .expect("accepted");
         let o = s.findings()["steam:1"].latest().expect("an observation");
-        assert_eq!(o.extra.get("shader_stalls").and_then(|v| v.as_i64()), Some(17));
+        assert_eq!(
+            o.extra.get("shader_stalls").and_then(|v| v.as_i64()),
+            Some(17)
+        );
     }
 
     #[test]
@@ -1120,10 +1130,7 @@ mod tests {
     }
 
     fn inbox_scratch(tag: &str) -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "gamebus-drain-{tag}-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("gamebus-drain-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let inbox = root.join("compat-inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -1153,9 +1160,15 @@ mod tests {
         assert_eq!(out.recorded, vec!["steam:4809930"]);
         assert!(!out.held);
         // beisl's own evidence name, translated on this side.
-        assert_eq!(stash.findings()["steam:4809930"].wall, WallKind::KernelAntiCheat);
+        assert_eq!(
+            stash.findings()["steam:4809930"].wall,
+            WallKind::KernelAntiCheat
+        );
         assert!(inbox::pending(&inbox).is_empty(), "the drop was taken");
-        assert!(root.join("compat-findings.json").exists(), "and it reached disk");
+        assert!(
+            root.join("compat-findings.json").exists(),
+            "and it reached disk"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1169,8 +1182,14 @@ mod tests {
         let out = drain_dir(&mut stash, &inbox);
 
         assert!(out.recorded.is_empty());
-        assert!(out.rejected.is_empty(), "a half-written file is not a refusal");
-        assert!(inbox.join("0001-run-42.json.tmp").exists(), "and it is left alone");
+        assert!(
+            out.rejected.is_empty(),
+            "a half-written file is not a refusal"
+        );
+        assert!(
+            inbox.join("0001-run-42.json.tmp").exists(),
+            "and it is left alone"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1217,7 +1236,11 @@ mod tests {
         let out = drain_dir(&mut stash, &inbox);
 
         assert!(out.held);
-        assert_eq!(inbox::pending(&inbox).len(), 1, "the finding is still spooled");
+        assert_eq!(
+            inbox::pending(&inbox).len(),
+            1,
+            "the finding is still spooled"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -13,10 +13,10 @@ use std::sync::Arc;
 // The compat-finding stash: beisl detects the wall, this tool houses it.
 // Setup-only by design - the daemon has no compat half at all, so its
 // hot path and its stash file cannot regress (see compat.rs).
-#[path = "../compat.rs"]
-mod compat;
 #[path = "../client.rs"]
 mod client;
+#[path = "../compat.rs"]
+mod compat;
 #[path = "../endpoints.rs"]
 mod endpoints;
 // The daemon's naming database, compiled into this tool for the umu-id

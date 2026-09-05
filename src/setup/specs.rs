@@ -166,9 +166,15 @@ Intel(R) Arc(tm) A770 Graphics (DG2),32210576,7.3.0-0.1-fls-upstream-upstream+,,
     fn a_real_mangohud_header_parses() {
         let s = Specs::parse(HEADER, VALUES).expect("parsed");
         assert_eq!(s.cpu.as_deref(), Some("AMD Ryzen 7 7700X 8-Core Processor"));
-        assert_eq!(s.gpu.as_deref(), Some("Intel(R) Arc(tm) A770 Graphics (DG2)"));
+        assert_eq!(
+            s.gpu.as_deref(),
+            Some("Intel(R) Arc(tm) A770 Graphics (DG2)")
+        );
         assert_eq!(s.ram_kib, Some(32210576));
-        assert_eq!(s.kernel.as_deref(), Some("7.3.0-0.1-fls-upstream-upstream+"));
+        assert_eq!(
+            s.kernel.as_deref(),
+            Some("7.3.0-0.1-fls-upstream-upstream+")
+        );
         assert_eq!(s.os.as_deref(), Some("Steam Runtime 4"));
     }
 
@@ -233,7 +239,10 @@ Intel(R) Arc(tm) A770 Graphics (DG2),32210576,7.3.0-0.1-fls-upstream-upstream+,,
         body.push_str(&"60,16.6\n".repeat(50_000));
         std::fs::write(dir.join("game_2026-08-22.csv"), body).unwrap();
         let s = read_from_dir(&dir).expect("specs read");
-        assert_eq!(s.gpu.as_deref(), Some("Intel(R) Arc(tm) A770 Graphics (DG2)"));
+        assert_eq!(
+            s.gpu.as_deref(),
+            Some("Intel(R) Arc(tm) A770 Graphics (DG2)")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -270,10 +279,13 @@ fn read_trimmed(path: &str) -> Option<String> {
 
 /// First `key: value` line in a `/proc` file.
 fn first_field(path: &str, key: &str) -> Option<String> {
-    std::fs::read_to_string(path).ok()?.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        (name.trim() == key).then(|| value.trim().to_string())
-    })
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            (name.trim() == key).then(|| value.trim().to_string())
+        })
 }
 
 fn os_pretty_name() -> Option<String> {
@@ -309,7 +321,9 @@ fn present_gpus() -> Vec<String> {
                 .find_map(|l| l.strip_prefix(key))
                 .map(str::to_ascii_lowercase)
         };
-        let Some(pci) = field("PCI_ID=") else { continue };
+        let Some(pci) = field("PCI_ID=") else {
+            continue;
+        };
         let driver = field("DRIVER=").unwrap_or_default();
         let Some((vendor, device)) = pci.split_once(':') else {
             continue;
@@ -405,7 +419,11 @@ mod system_tests {
     #[test]
     fn a_subsystem_line_is_not_mistaken_for_a_device() {
         let ids = PciIds(IDS.into());
-        assert_eq!(ids.name("1002", "1043"), None, "two tabs deep is a subsystem");
+        assert_eq!(
+            ids.name("1002", "1043"),
+            None,
+            "two tabs deep is a subsystem"
+        );
     }
 
     #[test]

@@ -575,11 +575,7 @@ mod tests {
         let mut s = stash();
         s.record("steam:4809930", wardogs());
         let mut newer = wardogs();
-        newer.observation = obs(
-            "beisl",
-            "lighthouse_driver.sys",
-            Some("spritzwine-10.1"),
-        );
+        newer.observation = obs("beisl", "lighthouse_driver.sys", Some("spritzwine-10.1"));
         s.record("steam:4809930", newer);
         let f = &s.findings["steam:4809930"];
         assert_eq!(f.observations.len(), 2);
@@ -650,7 +646,10 @@ mod tests {
         let parsed: HashMap<String, CompatFinding> = serde_json::from_str(raw).unwrap();
         let back = serde_json::to_string(&parsed).unwrap();
         assert!(back.contains("future_field"), "finding-level extra kept");
-        assert!(back.contains("shader_stalls"), "observation-level extra kept");
+        assert!(
+            back.contains("shader_stalls"),
+            "observation-level extra kept"
+        );
     }
 
     #[test]
@@ -754,7 +753,9 @@ mod tests {
         s.record("steam:4809930", incoming);
 
         assert_eq!(
-            s.findings["steam:4809930"].observations[0].signature.as_deref(),
+            s.findings["steam:4809930"].observations[0]
+                .signature
+                .as_deref(),
             Some(r"Services\elytra_tu7-ELBU27khJhcC"),
             "a pattern is not claimed from a single observation"
         );
@@ -767,7 +768,10 @@ mod tests {
             canonical_signature("elytraldrfs_driver.sys"),
             canonical_signature("elytraldrfs_shared.sys")
         );
-        assert_eq!(canonical_signature("elytraldrfs_driver.sys"), "elytraldrfs_driver.sys");
+        assert_eq!(
+            canonical_signature("elytraldrfs_driver.sys"),
+            "elytraldrfs_driver.sys"
+        );
     }
 
     #[test]
@@ -775,7 +779,10 @@ mod tests {
         // Long enough, and mixes all three classes.
         assert_eq!(canonical_signature("elytra_tu7-ELBU27khJhcC"), "elytra_*");
         // Too short.
-        assert_eq!(canonical_signature("EasyAntiCheat_x64"), "EasyAntiCheat_x64");
+        assert_eq!(
+            canonical_signature("EasyAntiCheat_x64"),
+            "EasyAntiCheat_x64"
+        );
         // No digit.
         assert_eq!(canonical_signature("wardogs_Shipping"), "wardogs_Shipping");
         // No uppercase.

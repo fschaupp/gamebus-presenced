@@ -132,11 +132,17 @@ pub fn awacy_issue(f: &CompatFinding, e: &Endpoints) -> Report {
          Tinkering steps:\n{tinkering}\
          Proof of mention: <REQUIRED - add a reputable source>\n\
          Additional comments:\n{comments}\n",
-        store_url.as_deref().unwrap_or("<REQUIRED - no Steam appid known>"),
+        store_url
+            .as_deref()
+            .unwrap_or("<REQUIRED - no Steam appid known>"),
         name.as_deref().unwrap_or(""),
     );
 
-    let mut url = format!("{}&title={}", e.awacy_new_game_issue, encode(&format!("Request: {title}")));
+    let mut url = format!(
+        "{}&title={}",
+        e.awacy_new_game_issue,
+        encode(&format!("Request: {title}"))
+    );
     url.push_str(&format!("&game={}", encode(title)));
     if let Some(store) = &store_url {
         url.push_str(&format!("&game-url={}", encode(store)));
@@ -269,7 +275,11 @@ mod tests {
 
     #[test]
     fn the_awacy_draft_fills_what_the_trace_knows() {
-        let f = finding(WallKind::KernelAntiCheat, "ZwLoadDriver foo.sys", Some("4809930"));
+        let f = finding(
+            WallKind::KernelAntiCheat,
+            "ZwLoadDriver foo.sys",
+            Some("4809930"),
+        );
         let r = awacy_issue(&f, &endpoints());
         assert!(r.body.contains("Game title: WARDOGS Playtest"));
         assert!(r.body.contains("store.steampowered.com/app/4809930/"));
@@ -305,7 +315,10 @@ mod tests {
 
     #[test]
     fn only_unmistakable_anticheats_are_named() {
-        assert_eq!(anticheat_for("EasyAntiCheat.sys loaded").0, "Easy Anti-Cheat (EAC)");
+        assert_eq!(
+            anticheat_for("EasyAntiCheat.sys loaded").0,
+            "Easy Anti-Cheat (EAC)"
+        );
         assert_eq!(anticheat_for("BEDaisy.sys loaded").0, "BattlEye");
         // A vendor driver a trace cannot attribute stays "Other".
         let (name, _) = anticheat_for("ZwLoadDriver lighthouse_driver.sys");
@@ -314,7 +327,11 @@ mod tests {
 
     #[test]
     fn an_unattributable_anticheat_asks_the_user_to_name_it() {
-        let f = finding(WallKind::KernelAntiCheat, "lighthouse_driver.sys", Some("1"));
+        let f = finding(
+            WallKind::KernelAntiCheat,
+            "lighthouse_driver.sys",
+            Some("1"),
+        );
         let r = awacy_issue(&f, &endpoints());
         assert!(r.missing.iter().any(|m| m.starts_with("Anti-cheat name")));
     }
@@ -323,14 +340,21 @@ mod tests {
     fn a_finding_with_no_appid_says_which_required_field_is_missing() {
         let f = finding(WallKind::KernelAntiCheat, "foo.sys", None);
         let awacy = awacy_issue(&f, &endpoints());
-        assert!(awacy.missing.iter().any(|m| m.starts_with("Game main page")));
+        assert!(awacy
+            .missing
+            .iter()
+            .any(|m| m.starts_with("Game main page")));
         let pdb = protondb_report(&f, None, &endpoints());
         assert!(pdb.missing.iter().any(|m| m.starts_with("Steam appid")));
     }
 
     #[test]
     fn the_protondb_draft_distinguishes_trace_specs_from_a_probe() {
-        let f = finding(WallKind::WineStub, "unimplemented function", Some("4809930"));
+        let f = finding(
+            WallKind::WineStub,
+            "unimplemented function",
+            Some("4809930"),
+        );
         let traced = Specs {
             source: SpecSource::Trace,
             gpu: Some("Intel Arc A770".into()),

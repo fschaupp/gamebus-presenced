@@ -176,10 +176,16 @@ impl Client {
             let line = match self.lines.recv_timeout(CALL_TIMEOUT) {
                 Ok(line) => line,
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!("{} did not answer {method} in time", self.spec.name))
+                    return Err(format!(
+                        "{} did not answer {method} in time",
+                        self.spec.name
+                    ))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(format!("{} exited before answering {method}", self.spec.name))
+                    return Err(format!(
+                        "{} exited before answering {method}",
+                        self.spec.name
+                    ))
                 }
             };
             match response_for(&line, id) {
@@ -190,7 +196,8 @@ impl Client {
     }
 
     fn send(&mut self, msg: &Value) -> Result<(), String> {
-        writeln!(self.stdin, "{msg}").map_err(|e| format!("cannot write to {}: {e}", self.spec.name))?;
+        writeln!(self.stdin, "{msg}")
+            .map_err(|e| format!("cannot write to {}: {e}", self.spec.name))?;
         self.stdin
             .flush()
             .map_err(|e| format!("cannot flush to {}: {e}", self.spec.name))
@@ -269,7 +276,8 @@ mod tests {
 
     #[test]
     fn a_server_error_is_reported_not_swallowed() {
-        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
+        let line =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
         let e = response_for(line, 1).unwrap().unwrap_err();
         assert!(e.contains("method not found"), "{e}");
     }
@@ -282,7 +290,8 @@ mod tests {
 
     #[test]
     fn an_is_error_result_becomes_our_error() {
-        let result = json!({"content":[{"type":"text","text":"unknown tool: nope"}],"isError":true});
+        let result =
+            json!({"content":[{"type":"text","text":"unknown tool: nope"}],"isError":true});
         let e = tool_text(&result).unwrap_err();
         assert!(e.contains("unknown tool"), "{e}");
     }
