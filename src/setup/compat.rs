@@ -1,17 +1,37 @@
 //! Review the compat findings beisl handed over, and mark what was submitted.
 //!
 //! beisl detects a wall and fires the trigger; this side houses the finding
-//! (owner policy, 2026-09-05). The intake is a push: beisl runs
+//! (owner policy, 2026-09-05). Two intakes, and which one can work depends on
+//! the wall.
+//!
+//! **Push**, the detector's own trigger:
 //!
 //! ```text
 //! gamebus-setup compat --record -   < finding.json
 //! ```
 //!
-//! which keeps gamebus free of any knowledge of beisl's on-disk layout, and
-//! keeps this tool the stash's only writer. A `--scan` backfill from beisl's
-//! existing artifacts is the other half of the agreed intake and is not
-//! built yet: it needs beisl's artifact layout pinned first, which is being
-//! settled in that repo.
+//! It keeps gamebus free of any knowledge of beisl's on-disk layout and keeps
+//! this tool the stash's only writer.
+//!
+//! **Pull**, `compat --scan`, reads beisl's structured output over MCP.
+//!
+//! Push is not the redundant one. Two of the four walls are transient by
+//! construction: a Wine stub and a volume-GUID failure exist only on the
+//! launch that broke, they vanish the moment the underlying bug is fixed, and
+//! Proton overwrites its log every run (established across the beisl and
+//! SpritzWine sides, 2026-09-05). A scan can only record what is still
+//! observable when the user happens to run it, so for those walls the push
+//! has to fire at detection time or the evidence is simply gone. The stash is
+//! the durable copy: once a finding is in, it survives the run that produced
+//! it.
+//!
+//! Neither intake is load-bearing yet, and the honest reason is worth
+//! carrying here: as of 2026-09-05 beisl cannot detect the anti-cheat wall
+//! this pipeline was built for. Its loader declines before calling any Wine
+//! primitive, so no rule over Wine channels reaches it, and the Wine log it
+//! would read exists only when someone has hand-added PROTON_LOG to a game's
+//! Steam launch options. That is beisl's problem to solve, not this module's,
+//! but a reader should not mistake a quiet stash for a quiet machine.
 //!
 //! The delivery is one JSON object, or an array of them:
 //!
@@ -22,8 +42,8 @@
 //!   "title": "WARDOGS Playtest",
 //!   "steam_appid": "4809930",
 //!   "source": "beisl",
-//!   "wine": "spritzwine-10.0",
-//!   "gpu": "AMD Radeon RX 7900 XT",
+//!   "wine": "SpritzWine-Prater",
+//!   "gpu_vendor": "amd",
 //!   "signature": "lighthouse_driver.sys, elytraldrfs_driver.sys",
 //!   "log": "beisl:run-42"
 //! }
