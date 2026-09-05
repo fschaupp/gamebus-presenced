@@ -71,6 +71,9 @@ fn usage() {
     eprintln!("  --record <file|->         Take a compat finding beisl detected (JSON on");
     eprintln!("                            stdin or from a file; one object or an array).");
     eprintln!("                            beisl fires this; nothing here goes on the network.");
+    eprintln!("  --export awacy|protondb [--key <key>]");
+    eprintln!("                            Draft a submission from a finding and print it,");
+    eprintln!("                            with what it still needs. Never submits.");
     eprintln!("  --reported <key> --target <name>");
     eprintln!("                            Mark a finding submitted to protondb, awacy or");
     eprintln!("                            gamedb, dated today.");

@@ -67,7 +67,9 @@ use serde_json::json;
 use crate::compat::{CompatStash, Incoming, Observation, WallKind};
 use crate::naming::NamingDb;
 use crate::setup::mcp::{Client, ServerSpec};
+use crate::endpoints::Endpoints;
 use crate::setup::protonfix;
+use crate::setup::reports;
 use crate::setup::specs;
 use crate::umu_report::today;
 
@@ -446,6 +448,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let reported = flag_value(rest, "--reported");
     let target = flag_value(rest, "--target");
     let scanning = rest.iter().any(|a| a == "--scan");
+    let export = flag_value(rest, "--export");
     let since = flag_value(rest, "--since")
         .map(|v| v.parse::<u64>())
         .transpose();
@@ -521,6 +524,11 @@ pub fn run(args: &[String]) -> ExitCode {
         };
     }
 
+    if let Some(target) = export {
+        let key = flag_value(rest, "--key");
+        return run_export(&stash, &target, key.as_deref());
+    }
+
     if let Some(key) = reported {
         let Some(target) = target else {
             eprintln!("--reported needs --target (protondb, awacy, gamedb).");
@@ -537,6 +545,82 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 
     list(&stash);
+    ExitCode::SUCCESS
+}
+
+/// Draft a submission for one finding, or for every finding a target still
+/// wants. Prints; never submits.
+fn run_export(stash: &CompatStash, target: &str, key: Option<&str>) -> ExitCode {
+    let endpoints = Endpoints::load();
+    let mut keys: Vec<&String> = match key {
+        Some(k) => match stash.findings().get_key_value(k) {
+            Some((k, _)) => vec![k],
+            None => {
+                eprintln!("No finding under {k}.");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => stash
+            .findings()
+            .iter()
+            .filter(|(_, f)| f.needs(target))
+            // AreWeAntiCheatYet collects anti-cheat behaviour; a Wine stub is
+            // a Wine bug and not theirs to carry.
+            .filter(|(_, f)| target != "awacy" || f.wall.is_anti_cheat())
+            .map(|(k, _)| k)
+            .collect(),
+    };
+    keys.sort();
+
+    if keys.is_empty() {
+        println!("Nothing to submit to {target}.");
+        return ExitCode::SUCCESS;
+    }
+
+    for k in keys {
+        let f = &stash.findings()[k];
+        let report = match target {
+            "awacy" => reports::awacy_issue(f, &endpoints),
+            "protondb" => {
+                // Specs are read HERE, at the moment of drafting a public
+                // report, and not before: see setup::specs.
+                let trace = f
+                    .latest()
+                    .and_then(|o| o.trace_dir.as_deref())
+                    .map(Path::new)
+                    .and_then(specs::read_from_dir);
+                let probed;
+                let specs = match trace {
+                    Some(s) => {
+                        probed = s;
+                        Some(&probed)
+                    }
+                    None => {
+                        probed = specs::read_system();
+                        Some(&probed)
+                    }
+                };
+                reports::protondb_report(f, specs, &endpoints)
+            }
+            other => {
+                eprintln!("Unknown target {other}. Expected awacy or protondb.");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        println!("=== {k} ===");
+        println!("{}", report.body);
+        println!("File it at: {}", report.url);
+        if !report.missing.is_empty() {
+            println!();
+            println!("Before filing, this draft still needs:");
+            for m in &report.missing {
+                println!("  - {m}");
+            }
+        }
+        println!();
+    }
+    println!("Nothing was submitted. Review, complete, and file it yourself.");
     ExitCode::SUCCESS
 }
 

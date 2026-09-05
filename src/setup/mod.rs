@@ -17,6 +17,7 @@ pub mod lutris_library;
 pub mod mcp;
 pub mod paths;
 pub mod protonfix;
+pub mod reports;
 pub mod specs;
 pub mod status;
 pub mod ui;
