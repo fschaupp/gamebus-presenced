@@ -13,6 +13,7 @@ pub mod actions;
 pub mod compat;
 pub mod gamedb;
 pub mod heroic_library;
+pub mod inbox;
 pub mod lutris_library;
 pub mod mcp;
 pub mod paths;

@@ -4,14 +4,18 @@
 //! (owner policy, 2026-09-05). Two intakes, and which one can work depends on
 //! the wall.
 //!
-//! **Push**, the detector's own trigger:
+//! **Push**, the detector's own trigger, is a drop directory: beisl writes
+//! one JSON file per finding into the inbox (`compat --inbox` prints it) and
+//! is done - no gamebus binary on its detection path, nothing to wait for.
+//! Every `compat` invocation drains it first, so a spooled finding shows up
+//! in a list or an export without anyone running an intake command. See
+//! [`crate::setup::inbox`] for the writer's half of the contract.
 //!
-//! ```text
-//! gamebus-setup compat --record -   < finding.json
-//! ```
+//! `compat --record <file|->` takes the same payload synchronously, for a
+//! sender that wants an exit code, and for pasting one by hand.
 //!
-//! It keeps gamebus free of any knowledge of beisl's on-disk layout and keeps
-//! this tool the stash's only writer.
+//! Either way the payload names beisl's own evidence (`kernel-driver`), not
+//! this side's vocabulary, and [`wall_for`] does the translating.
 //!
 //! **Pull**, `compat --scan`, reads beisl's structured output over MCP.
 //!
@@ -66,6 +70,7 @@ use serde_json::json;
 
 use crate::compat::{CompatStash, Incoming, Observation, WallKind};
 use crate::naming::NamingDb;
+use crate::setup::inbox;
 use crate::setup::mcp::{Client, ServerSpec};
 use crate::endpoints::Endpoints;
 use crate::setup::protonfix;
@@ -134,7 +139,9 @@ impl Delivery {
 
     fn into_incoming(self) -> Incoming {
         Incoming {
-            wall: WallKind::parse(&self.wall),
+            // Through the same seam a scan uses: a sender names the evidence
+            // it saw, this side names the wall (see `wall_for`).
+            wall: wall_for(&self.wall),
             title: self.title,
             steam_appid: self.steam_appid,
             awacy_slug: self.awacy_slug,
@@ -183,6 +190,67 @@ fn ingest(stash: &mut CompatStash, raw: &str) -> Result<Vec<String>, String> {
         keys.push(key);
     }
     Ok(keys)
+}
+
+/// What one pass over the inbox did.
+#[derive(Default)]
+struct Drained {
+    /// Keys taken into the stash.
+    recorded: Vec<String>,
+    /// Drops this side refused, and where each one was parked.
+    rejected: Vec<(PathBuf, String)>,
+    /// Findings were ingested but the stash did not reach disk, so the drops
+    /// were left where they are. They are still the only copy.
+    held: bool,
+}
+
+/// Take everything beisl has dropped into the stash.
+///
+/// The order is what makes this safe to interrupt: every drop is ingested
+/// into the in-memory stash, the stash is written once, and only then are the
+/// files removed. A crash anywhere before the write leaves the drops in place
+/// and the next run re-ingests them, which is a no-op - `record` dedups an
+/// observation on `(source, signature, wine)`. Removing a file first would
+/// trade a duplicate for a lost finding.
+///
+/// Runs on every `compat` invocation, not just `--scan`: a spooled finding
+/// should show up in a list or an export without the user knowing an intake
+/// exists (beisl's request, 2026-09-05). Its notices go to stderr so
+/// `--export` stdout stays pasteable.
+fn drain(stash: &mut CompatStash) -> Drained {
+    match inbox::dir() {
+        Some(dir) => drain_dir(stash, &dir),
+        None => Drained::default(),
+    }
+}
+
+fn drain_dir(stash: &mut CompatStash, dir: &Path) -> Drained {
+    let mut out = Drained::default();
+    let mut taken = Vec::new();
+    for path in inbox::pending(dir) {
+        match inbox::read(&path).and_then(|raw| ingest(stash, &raw)) {
+            Ok(keys) => {
+                out.recorded.extend(keys);
+                taken.push(path);
+            }
+            Err(why) => {
+                let landed = inbox::reject(&path).unwrap_or(path);
+                out.rejected.push((landed, why));
+            }
+        }
+    }
+
+    if !taken.is_empty() {
+        stash.save();
+        if stash.unsaved() {
+            out.held = true;
+            return out;
+        }
+        for path in &taken {
+            inbox::remove(path);
+        }
+    }
+    out
 }
 
 /// Translate beisl's signal name into this side's finding name.
@@ -444,6 +512,22 @@ struct Scan {
 
 pub fn run(args: &[String]) -> ExitCode {
     let rest = &args[1..];
+
+    // Answered before the stash is touched: beisl asks for this path so it
+    // can spool a finding, and a stash it cannot read is no reason to refuse.
+    if rest.iter().any(|a| a == "--inbox") {
+        let Some(dir) = inbox::dir() else {
+            eprintln!("Cannot resolve the inbox path (no HOME).");
+            return ExitCode::FAILURE;
+        };
+        if let Err(e) = inbox::ensure(&dir) {
+            eprintln!("Cannot create {}: {e}", dir.display());
+            return ExitCode::FAILURE;
+        }
+        println!("{}", dir.display());
+        return ExitCode::SUCCESS;
+    }
+
     let record = flag_value(rest, "--record");
     let reported = flag_value(rest, "--reported");
     let target = flag_value(rest, "--target");
@@ -470,6 +554,20 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     if stash.path().is_none() {
         eprintln!("Cannot resolve the stash path (no HOME).");
+        return ExitCode::FAILURE;
+    }
+
+    let drained = drain(&mut stash);
+    for key in &drained.recorded {
+        eprintln!("Took {key} from the inbox.");
+    }
+    for (path, why) in &drained.rejected {
+        eprintln!("Refused {}: {why}", path.display());
+        eprintln!("It was kept, not deleted; nothing else was written.");
+    }
+    if drained.held {
+        eprintln!("Ingested findings did not reach the stash file.");
+        eprintln!("The drops are still in the inbox; nothing was lost.");
         return ExitCode::FAILURE;
     }
 
@@ -627,7 +725,7 @@ fn run_export(stash: &CompatStash, target: &str, key: Option<&str>) -> ExitCode 
 fn list(stash: &CompatStash) {
     if stash.findings().is_empty() {
         println!("No compat findings stashed.");
-        println!("beisl records them with: gamebus-setup compat --record -");
+        println!("beisl drops them in: gamebus-setup compat --inbox");
         return;
     }
 
@@ -899,5 +997,126 @@ mod tests {
         let mut s = CompatStash::default();
         ingest(&mut s, r#"{"wall":"wine-stub","key":"steam:1"}"#).unwrap();
         assert_eq!(s.findings()["steam:1"].latest().unwrap().source, "beisl");
+    }
+
+    fn inbox_scratch(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "gamebus-drain-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let inbox = root.join("compat-inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        (root, inbox)
+    }
+
+    fn drop_file(inbox: &Path, name: &str, body: &str) {
+        // The writer's contract: publish by rename, never by open-and-write.
+        let tmp = inbox.join(format!("{name}.tmp"));
+        std::fs::write(&tmp, body).unwrap();
+        std::fs::rename(&tmp, inbox.join(name)).unwrap();
+    }
+
+    #[test]
+    fn a_spooled_finding_lands_in_the_stash_and_the_drop_is_taken() {
+        let (root, inbox) = inbox_scratch("basic");
+        drop_file(
+            &inbox,
+            "0001-run-42.json",
+            r#"{"wall":"kernel-driver","steam_appid":"4809930","title":"WARDOGS Playtest",
+                "signature":"lighthouse_driver.sys"}"#,
+        );
+
+        let mut stash = CompatStash::from_path(root.join("compat-findings.json"));
+        let out = drain_dir(&mut stash, &inbox);
+
+        assert_eq!(out.recorded, vec!["steam:4809930"]);
+        assert!(!out.held);
+        // beisl's own evidence name, translated on this side.
+        assert_eq!(stash.findings()["steam:4809930"].wall, WallKind::KernelAntiCheat);
+        assert!(inbox::pending(&inbox).is_empty(), "the drop was taken");
+        assert!(root.join("compat-findings.json").exists(), "and it reached disk");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_partial_write_is_invisible_until_it_is_renamed() {
+        let (root, inbox) = inbox_scratch("partial");
+        std::fs::write(inbox.join("0001-run-42.json.tmp"), r#"{"wall":"wine-s"#).unwrap();
+
+        let mut stash = CompatStash::from_path(root.join("compat-findings.json"));
+        let out = drain_dir(&mut stash, &inbox);
+
+        assert!(out.recorded.is_empty());
+        assert!(out.rejected.is_empty(), "a half-written file is not a refusal");
+        assert!(inbox.join("0001-run-42.json.tmp").exists(), "and it is left alone");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn one_bad_drop_does_not_block_the_others() {
+        let (root, inbox) = inbox_scratch("mixed");
+        drop_file(&inbox, "0001-bad.json", "{ not json");
+        drop_file(
+            &inbox,
+            "0002-good.json",
+            r#"{"wall":"wine-stub","steam_appid":"1867240"}"#,
+        );
+        // Parsed, but nothing names the game: refused rather than invented.
+        drop_file(&inbox, "0003-keyless.json", r#"{"wall":"wine-stub"}"#);
+
+        let mut stash = CompatStash::from_path(root.join("compat-findings.json"));
+        let out = drain_dir(&mut stash, &inbox);
+
+        assert_eq!(out.recorded, vec!["steam:1867240"]);
+        assert_eq!(out.rejected.len(), 2);
+        // Refused evidence is parked, not deleted - the writer gets to see it.
+        assert!(inbox.join("0001-bad.json.rejected").exists());
+        assert!(inbox.join("0003-keyless.json.rejected").exists());
+        assert!(inbox::pending(&inbox).is_empty(), "and neither is retried");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_stash_that_cannot_be_written_keeps_the_drops() {
+        let (root, inbox) = inbox_scratch("held");
+        drop_file(
+            &inbox,
+            "0001-run-42.json",
+            r#"{"wall":"kernel-driver","steam_appid":"4809930"}"#,
+        );
+
+        // A corrupt stash refuses to be overwritten, which is exactly the
+        // case where deleting the drop would destroy the only other copy.
+        let path = root.join("compat-findings.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let mut stash = CompatStash::from_path(path);
+        let out = drain_dir(&mut stash, &inbox);
+
+        assert!(out.held);
+        assert_eq!(inbox::pending(&inbox).len(), 1, "the finding is still spooled");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn draining_the_same_drop_twice_adds_one_observation() {
+        let (root, inbox) = inbox_scratch("idempotent");
+        let body = r#"{"wall":"kernel-driver","steam_appid":"4809930",
+                       "signature":"lighthouse_driver.sys","wine":"SpritzWine-Prater"}"#;
+        let mut stash = CompatStash::from_path(root.join("compat-findings.json"));
+
+        drop_file(&inbox, "0001-run-42.json", body);
+        drain_dir(&mut stash, &inbox);
+        // What a crash between the save and the unlink would leave behind.
+        drop_file(&inbox, "0001-run-42.json", body);
+        drain_dir(&mut stash, &inbox);
+
+        assert_eq!(stash.findings()["steam:4809930"].observations.len(), 1);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

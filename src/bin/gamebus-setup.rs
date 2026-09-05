@@ -68,7 +68,10 @@ fn usage() {
     eprintln!("                            (structured output, no LLM). Idempotent: a rescan");
     eprintln!("                            refreshes evidence rather than duplicating it.");
     eprintln!("  --since <unix>            Only scan runs active since this timestamp");
-    eprintln!("  --record <file|->         Take a compat finding beisl detected (JSON on");
+    eprintln!("  --inbox                   Print the drop directory beisl spools findings");
+    eprintln!("                            into, creating it. Every compat run drains it");
+    eprintln!("                            first, so a spooled finding needs no command.");
+    eprintln!("  --record <file|->         Take that same payload synchronously (JSON on");
     eprintln!("                            stdin or from a file; one object or an array).");
     eprintln!("                            beisl fires this; nothing here goes on the network.");
     eprintln!("  --export awacy|protondb [--key <key>]");

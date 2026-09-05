@@ -313,6 +313,12 @@ impl CompatStash {
         self.path.as_deref()
     }
 
+    /// True when a change has not reached disk. Checked by callers that
+    /// destroy their only other copy of the data once it is saved.
+    pub fn unsaved(&self) -> bool {
+        self.dirty
+    }
+
     /// Take a finding for `key`, creating or refreshing it. Does not write -
     /// batch, then [`save`](Self::save).
     ///
