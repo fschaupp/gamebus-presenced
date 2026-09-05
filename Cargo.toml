@@ -46,7 +46,7 @@ zbus = { version = "4", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
@@ -70,7 +70,7 @@ toml_edit = { version = "0.22", optional = true }
 # Tooling only, same rule. Reads Lutris's pga.db (a sqlite file) so the setup
 # tool can fill codenames from the user's own library. Same version and
 # features as gamedb-build's rusqlite, so Cargo.lock gains no new package.
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 discord-rich-presence = "1"

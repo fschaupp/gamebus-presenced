@@ -10,8 +10,13 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+// The compat-finding stash: beisl detects the wall, this tool houses it.
+// Setup-only by design - the daemon has no compat half at all, so its
+// hot path and its stash file cannot regress (see compat.rs).
 #[path = "../client.rs"]
 mod client;
+#[path = "../compat.rs"]
+mod compat;
 #[path = "../endpoints.rs"]
 mod endpoints;
 // The daemon's naming database, compiled into this tool for the umu-id
@@ -44,6 +49,8 @@ fn usage() {
     eprintln!("  gamedb [options]          Those same games as gamebus-gamedb pages: one");
     eprintln!("                            page per game, the store codenames and");
     eprintln!("                            executables that identify it");
+    eprintln!("  compat [options]          Compat walls beisl detected: the stash, and");
+    eprintln!("                            what has been reported upstream");
     eprintln!("  help                      Show this help");
     eprintln!();
     eprintln!("Actions:");
@@ -54,6 +61,35 @@ fn usage() {
     eprintln!("  --target user|system      Install target (default: user)");
     eprintln!("  --privileged-only         Run only the steps that need root");
     eprintln!("  --confirm                 Required by 'apply' - it writes to disk");
+    eprintln!();
+    eprintln!();
+    eprintln!("compat options:");
+    eprintln!("  --scan                    Pull findings from beisl over its MCP interface");
+    eprintln!("                            (structured output, no LLM). Idempotent: a rescan");
+    eprintln!("                            refreshes evidence rather than duplicating it.");
+    eprintln!("  --since <unix>            Only scan runs active since this timestamp");
+    eprintln!("  --inbox                   Print the drop directory beisl spools findings");
+    eprintln!("                            into, creating it. Every compat run drains it");
+    eprintln!("                            first, so a spooled finding needs no command.");
+    eprintln!("  --record <file|->         Take that same payload synchronously (JSON on");
+    eprintln!("                            stdin or from a file; one object or an array).");
+    eprintln!("                            beisl fires this; nothing here goes on the network.");
+    eprintln!("  --export awacy|protondb [--key <key>]");
+    eprintln!("                            Draft a submission from a finding and print it,");
+    eprintln!("                            with what it still needs. Never submits.");
+    eprintln!("  --reported <key> --target <name>");
+    eprintln!("                            Mark a finding submitted to protondb, awacy or");
+    eprintln!("                            gamedb, dated today.");
+    eprintln!("  --dismiss <key>           Stop offering a finding for submission. Keeps it");
+    eprintln!("                            and its evidence; --undismiss <key> puts it back.");
+    eprintln!("  --json                    Machine-readable output for the listing, --scan");
+    eprintln!("                            and --export. For another front-end over this");
+    eprintln!("                            flow; the text output is for people.");
+    eprintln!("  --dismiss <key>           Stop offering a finding for submission. Keeps it");
+    eprintln!("                            and its evidence; --undismiss <key> puts it back.");
+    eprintln!("  --json                    Machine-readable output for the listing, --scan");
+    eprintln!("                            and --export. For another front-end over this");
+    eprintln!("                            flow; the text output is for people.");
     eprintln!();
     eprintln!("umu-misses options:");
     eprintln!("  --verify                  Check every miss against the umu database");
@@ -103,6 +139,7 @@ async fn main() -> ExitCode {
         Some("apply") => cmd_apply(&args, &flags),
         Some("umu-misses") => setup::umu_misses::run(&args),
         Some("gamedb") => setup::gamedb::run(&args),
+        Some("compat") => setup::compat::run(&args),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             ExitCode::SUCCESS

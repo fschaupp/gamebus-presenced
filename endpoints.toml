@@ -82,3 +82,27 @@ pages = "https://raw.githubusercontent.com/fschaupp/gamebus-gamedb/main/games"
 
 # The data set itself, printed as the place an exported page goes next.
 project = "https://github.com/fschaupp/gamebus-gamedb"
+
+[awacy]
+# AreWeAntiCheatYet takes new games and status changes as GitHub ISSUES with
+# a form template - NOT pull requests against games.json (verified against
+# their README and .github/ISSUE_TEMPLATE, 2026-09-05; an earlier note here
+# assumed a PR and was wrong). Nothing submits automatically: the export
+# prints a filled-in body and this URL, and the user files it.
+new_game_issue = "https://github.com/AreWeAntiCheatYet/AreWeAntiCheatYet/issues/new?template=0-new-game.yml"
+
+# The same, for a game already on the list whose status changed.
+update_game_issue = "https://github.com/AreWeAntiCheatYet/AreWeAntiCheatYet/issues/new?template=1-update-game.yml"
+
+# Their data file, for checking whether a game is already listed before
+# filing. Entries carry slug, storeIds.steam, status and anticheats.
+games = "https://raw.githubusercontent.com/AreWeAntiCheatYet/AreWeAntiCheatYet/master/games.json"
+
+# One game's page, derived from its slug: <site>/<slug>.
+site = "https://areweanticheatyet.com/game"
+
+[protondb]
+# A game's ProtonDB page, derived from the Steam appid: <app>/<appid>.
+# Reports are filed on the site behind a Steam login - there is no
+# submission API - so the export prints a report body to paste there.
+app = "https://www.protondb.com/app"

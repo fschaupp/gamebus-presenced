@@ -56,6 +56,15 @@ pub struct Endpoints {
     pub gamedb_pages: String,
     /// The gamebus-gamedb repository, where an exported page goes next.
     pub gamedb_project: String,
+    /// Where an AreWeAntiCheatYet submission is filed: a GitHub issue form,
+    /// not a pull request (verified 2026-09-05).
+    pub awacy_new_game_issue: String,
+    pub awacy_update_game_issue: String,
+    pub awacy_games: String,
+    pub awacy_site: String,
+    /// A game's ProtonDB page. Reports are filed there behind a Steam
+    /// login; nothing here submits.
+    pub protondb_app: String,
 }
 
 impl Endpoints {
@@ -95,6 +104,11 @@ impl Endpoints {
             gamedb_identities: get("gamedb.identities"),
             gamedb_pages: get("gamedb.pages"),
             gamedb_project: get("gamedb.project"),
+            awacy_new_game_issue: get("awacy.new_game_issue"),
+            awacy_update_game_issue: get("awacy.update_game_issue"),
+            awacy_games: get("awacy.games"),
+            awacy_site: get("awacy.site"),
+            protondb_app: get("protondb.app"),
         }
     }
 }

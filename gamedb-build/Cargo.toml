@@ -23,7 +23,7 @@ parquet = { version = "56", default-features = false, features = ["arrow", "zstd
 arrow-array = "56"
 arrow-schema = "56"
 arrow-buffer = "56"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = { version = "0.8", features = ["preserve_order"] }

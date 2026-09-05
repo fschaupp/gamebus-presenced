@@ -30,6 +30,16 @@ cache, game-name enrichment, and a setup tool. The existing
 options (arRPC, the GameMode portal) each cover a single source; none of
 them join the sources into one record.
 
+Because the sources already name the game, the same tooling houses **compat
+findings**. When a launch is stopped by something Wine cannot do (a kernel
+anti-cheat driver, an unimplemented export, a volume-GUID path bug), whatever
+detected it drops the finding into an inbox, and `gamebus-setup compat` keeps
+it and drafts the ProtonDB and AreWeAntiCheatYet submissions from it. Nothing
+is ever submitted on your behalf: it prints a draft and lists what that draft
+still needs from a human, because the fields those sites require (a public
+source, the anti-cheat vendor's product name) are exactly the ones no trace
+can supply.
+
 ## Install
 
 ```sh
