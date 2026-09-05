@@ -260,6 +260,53 @@ pub struct CompatStash {
     load_error: Option<String>,
 }
 
+/// A signature with any per-launch nonce collapsed, for comparison only.
+///
+/// Some anti-cheats register their service under a name generated per launch:
+/// WARDOGS' Elytra produced `elytra_tu7-ELBU27khJhcC` on one run and
+/// `elytra_r7tC-LhUH4-egxUm` on the next (both real, 2026-09-05). Compared
+/// literally, every launch of the same game is a fresh observation, and
+/// twenty of those evict the evidence that actually differs.
+///
+/// The test is deliberately narrow: a tail after `_` counts as generated only
+/// when it is at least eight characters and mixes lower, upper and digit. The
+/// two risks are not symmetric. Missing a nonce costs one duplicate
+/// observation; matching too eagerly silently fuses two different walls, and
+/// the same Proton log carries `elytraldrfs_driver` and `elytraldrfs_shared`
+/// side by side - a rule that cut at the first `_` would merge them.
+pub fn canonical_signature(signature: &str) -> String {
+    let mut out = String::with_capacity(signature.len());
+    let mut segment = String::new();
+    for ch in signature.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            segment.push(ch);
+        } else {
+            push_canonical(&mut out, &segment);
+            segment.clear();
+            out.push(ch);
+        }
+    }
+    push_canonical(&mut out, &segment);
+    out
+}
+
+fn push_canonical(out: &mut String, segment: &str) {
+    match segment.rsplit_once('_') {
+        Some((stem, tail)) if looks_generated(tail) => {
+            out.push_str(stem);
+            out.push_str("_*");
+        }
+        _ => out.push_str(segment),
+    }
+}
+
+fn looks_generated(tail: &str) -> bool {
+    tail.len() >= 8
+        && tail.chars().any(|c| c.is_ascii_lowercase())
+        && tail.chars().any(|c| c.is_ascii_uppercase())
+        && tail.chars().any(|c| c.is_ascii_digit())
+}
+
 impl CompatStash {
     pub fn load() -> Self {
         match Self::default_path() {
@@ -324,8 +371,8 @@ impl CompatStash {
     ///
     /// Facts only ever ADD: a field this delivery leaves empty keeps whatever
     /// an earlier one established. The observation is deduped on
-    /// `(source, signature, wine)` - the same wall on the same build is one
-    /// piece of evidence seen twice, not two - and a repeat only refreshes
+    /// `(source, wine, canonical signature)` - the same wall on the same
+    /// build is one piece of evidence seen twice, not two - and a repeat only refreshes
     /// its date, which keeps a wall that reproduces on every launch from
     /// growing the file without bound.
     pub fn record(&mut self, key: &str, incoming: Incoming) {
@@ -355,13 +402,23 @@ impl CompatStash {
         fill(&mut entry.awacy_slug, incoming.awacy_slug);
 
         let obs = incoming.observation;
+        let canonical = obs.signature.as_deref().map(canonical_signature);
         let same = entry.observations.iter().position(|o| {
-            o.source == obs.source && o.signature == obs.signature && o.wine == obs.wine
+            o.source == obs.source
+                && o.wine == obs.wine
+                && o.signature.as_deref().map(canonical_signature) == canonical
         });
         match same {
             Some(i) => {
                 let existing = &mut entry.observations[i];
                 existing.observed = obs.observed;
+                // Two raw lines that canonicalise the same ARE the proof that
+                // the tail is generated, so the stored evidence becomes the
+                // form a reader can match. Until then the raw line stands:
+                // one sighting is no reason to claim a pattern.
+                if existing.signature != obs.signature {
+                    existing.signature = canonical;
+                }
                 // A repeat may carry facts the first sighting lacked.
                 fill(&mut existing.gpu, obs.gpu);
                 fill(&mut existing.gpu_vendor, obs.gpu_vendor);
@@ -664,5 +721,71 @@ mod tests {
         assert!(disk.contains_key("steam:4809930"), "ours survived");
         assert!(disk.contains_key("steam:1867240"), "theirs survived");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_service_name_generated_per_launch_is_one_observation() {
+        // Both lines are real, from two WARDOGS launches on 2026-09-05.
+        let mut s = CompatStash::from_path(std::env::temp_dir().join("unused-nonce.json"));
+        for sig in [
+            r"Services\elytra_tu7-ELBU27khJhcC",
+            r"Services\elytra_r7tC-LhUH4-egxUm",
+        ] {
+            let mut incoming = wardogs();
+            incoming.observation.signature = Some(sig.to_string());
+            s.record("steam:4809930", incoming);
+        }
+
+        let f = &s.findings["steam:4809930"];
+        assert_eq!(f.observations.len(), 1, "one wall, seen twice");
+        // Two raw lines that agree once collapsed ARE the proof the tail is
+        // generated, so the evidence becomes what a reader can match.
+        assert_eq!(
+            f.observations[0].signature.as_deref(),
+            Some(r"Services\elytra_*")
+        );
+    }
+
+    #[test]
+    fn one_sighting_keeps_its_exact_line() {
+        let mut s = CompatStash::from_path(std::env::temp_dir().join("unused-single.json"));
+        let mut incoming = wardogs();
+        incoming.observation.signature = Some(r"Services\elytra_tu7-ELBU27khJhcC".into());
+        s.record("steam:4809930", incoming);
+
+        assert_eq!(
+            s.findings["steam:4809930"].observations[0].signature.as_deref(),
+            Some(r"Services\elytra_tu7-ELBU27khJhcC"),
+            "a pattern is not claimed from a single observation"
+        );
+    }
+
+    #[test]
+    fn two_drivers_sharing_a_stem_stay_apart() {
+        // The same Proton log carries both. Fusing them would lose a driver.
+        assert_ne!(
+            canonical_signature("elytraldrfs_driver.sys"),
+            canonical_signature("elytraldrfs_shared.sys")
+        );
+        assert_eq!(canonical_signature("elytraldrfs_driver.sys"), "elytraldrfs_driver.sys");
+    }
+
+    #[test]
+    fn only_a_mixed_case_digit_bearing_tail_counts_as_generated() {
+        // Long enough, and mixes all three classes.
+        assert_eq!(canonical_signature("elytra_tu7-ELBU27khJhcC"), "elytra_*");
+        // Too short.
+        assert_eq!(canonical_signature("EasyAntiCheat_x64"), "EasyAntiCheat_x64");
+        // No digit.
+        assert_eq!(canonical_signature("wardogs_Shipping"), "wardogs_Shipping");
+        // No uppercase.
+        assert_eq!(canonical_signature("mod_a7f3c9d2"), "mod_a7f3c9d2");
+        // Nothing to cut.
+        assert_eq!(canonical_signature("BEDaisy.sys"), "BEDaisy.sys");
+        // Separators and list shape survive intact.
+        assert_eq!(
+            canonical_signature("lighthouse_driver.sys, elytra_tu7-ELBU27khJhcC"),
+            "lighthouse_driver.sys, elytra_*"
+        );
     }
 }
