@@ -10,6 +10,11 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+// The compat-finding stash: beisl detects the wall, this tool houses it.
+// Setup-only by design - the daemon has no compat half at all, so its
+// hot path and its stash file cannot regress (see compat.rs).
+#[path = "../compat.rs"]
+mod compat;
 #[path = "../client.rs"]
 mod client;
 #[path = "../endpoints.rs"]
@@ -44,6 +49,8 @@ fn usage() {
     eprintln!("  gamedb [options]          Those same games as gamebus-gamedb pages: one");
     eprintln!("                            page per game, the store codenames and");
     eprintln!("                            executables that identify it");
+    eprintln!("  compat [options]          Compat walls beisl detected: the stash, and");
+    eprintln!("                            what has been reported upstream");
     eprintln!("  help                      Show this help");
     eprintln!();
     eprintln!("Actions:");
@@ -54,6 +61,15 @@ fn usage() {
     eprintln!("  --target user|system      Install target (default: user)");
     eprintln!("  --privileged-only         Run only the steps that need root");
     eprintln!("  --confirm                 Required by 'apply' - it writes to disk");
+    eprintln!();
+    eprintln!();
+    eprintln!("compat options:");
+    eprintln!("  --record <file|->         Take a compat finding beisl detected (JSON on");
+    eprintln!("                            stdin or from a file; one object or an array).");
+    eprintln!("                            beisl fires this; nothing here goes on the network.");
+    eprintln!("  --reported <key> --target <name>");
+    eprintln!("                            Mark a finding submitted to protondb, awacy or");
+    eprintln!("                            gamedb, dated today.");
     eprintln!();
     eprintln!("umu-misses options:");
     eprintln!("  --verify                  Check every miss against the umu database");
@@ -103,6 +119,7 @@ async fn main() -> ExitCode {
         Some("apply") => cmd_apply(&args, &flags),
         Some("umu-misses") => setup::umu_misses::run(&args),
         Some("gamedb") => setup::gamedb::run(&args),
+        Some("compat") => setup::compat::run(&args),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             ExitCode::SUCCESS
