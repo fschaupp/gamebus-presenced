@@ -246,11 +246,14 @@ pub(super) fn verify(report: &mut UmuReport, db: Option<&UmuDb>) -> Result<Vec<S
         }
     };
 
+    let local = fixes::LocalFixes::load();
+
     // Single write-back, then the human-readable summary.
     for (key, verdict) in &verdicts {
         let scope = fix_list.as_ref().map(|list| {
             scope_id(verdict).map(|id| FixCheck {
                 fixes: list.fixes_for(&id).to_vec(),
+                local: local.fixes_for(&id).to_vec(),
                 umu_id: id,
                 checked: today.clone(),
             })

@@ -132,6 +132,21 @@ fn partition(report: &UmuReport) -> (Vec<SubmissionRow<'_>>, Vec<(&Miss, String)
             .verification
             .as_ref()
             .is_some_and(|v| v.state == VerificationState::CrossStoreId);
+        // A local-only fix proves the need, but a row may only point at a
+        // fix upstream actually has.
+        if let Some(local) = scope.filter(|f| !f.has_fix() && f.has_local_fix()) {
+            if m.umu_promoted.is_none() && !cross_store {
+                held.push((
+                    m,
+                    format!(
+                        "only a local protonfix serves {umu_id} ({}) - submit it to \
+                         umu-protonfixes first; the row follows once it is upstream",
+                        local.local[0]
+                    ),
+                ));
+                continue;
+            }
+        }
         if m.umu_promoted.is_none() && !cross_store && !scope.is_some_and(|f| f.has_fix()) {
             held.push((
                 m,
@@ -483,6 +498,7 @@ mod tests {
                     "gamefixes-steam/{}.py",
                     id.trim_start_matches("umu-")
                 )],
+                local: vec![],
                 checked: "2026-08-22".into(),
             });
         });
@@ -507,6 +523,25 @@ mod tests {
         assert!(rows.is_empty(), "a game with no protonfix reached a row");
         assert!(held[0].1.contains("no protonfix"), "{}", held[0].1);
         assert!(held[0].1.contains("runs out of the box"), "{}", held[0].1);
+    }
+
+    #[test]
+    fn a_local_only_fix_is_held_until_it_is_upstream() {
+        let (mut report, key) = pick_report("egs", "Catnip");
+        in_scope(&mut report, &key, "umu-397540");
+        report.update(&key, |m| {
+            let fix = m.fix.as_mut().expect("set above");
+            fix.fixes.clear();
+            fix.local = vec!["/home/u/.config/protonfixes/localfixes/umu-397540.py".into()];
+        });
+        let (rows, held) = partition(&report);
+        assert!(rows.is_empty(), "a row pointed at a fix upstream lacks");
+        assert!(
+            held[0].1.contains("only a local protonfix"),
+            "{}",
+            held[0].1
+        );
+        assert!(held[0].1.contains("umu-protonfixes first"), "{}", held[0].1);
     }
 
     #[test]

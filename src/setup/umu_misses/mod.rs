@@ -75,7 +75,7 @@ pub(crate) fn umu_candidate(m: &Miss) -> bool {
             || m.verification
                 .as_ref()
                 .is_some_and(|v| v.state == VerificationState::CrossStoreId)
-            || m.fix.as_ref().is_some_and(|f| f.has_fix()))
+            || m.fix.as_ref().is_some_and(|f| f.needs_fix()))
 }
 
 /// One line on where an entry stands with the umu-database pipeline.
@@ -106,6 +106,9 @@ pub(crate) fn candidacy_line(m: &Miss) -> String {
     }
     if m.fix.as_ref().is_some_and(|f| f.has_fix()) {
         return "umu candidate, suggested: a protonfix exists - the game needs umu".into();
+    }
+    if m.fix.as_ref().is_some_and(|f| f.has_local_fix()) {
+        return "umu candidate, suggested: a local protonfix exists - the game needs umu".into();
     }
     "not a umu candidate - no protonfix and no cross-store match (u in the TUI promotes)".into()
 }
@@ -416,6 +419,10 @@ pub(crate) fn scope_line(m: &Miss) -> Option<String> {
             };
             format!("needs umu: protonfix {first}{more} - worth submitting")
         }
+        None if scope.has_local_fix() => format!(
+            "needs umu: local protonfix {} - not upstream yet, submit it to umu-protonfixes before the row",
+            scope.local[0]
+        ),
         None if id_is_firm(m) => format!(
             "no protonfix for {} - runs out of the box, and the database only wants games that need a fix",
             scope.umu_id
@@ -530,6 +537,7 @@ mod tests {
         Some(FixCheck {
             umu_id: "umu-397540".into(),
             fixes: fixes.iter().map(|s| s.to_string()).collect(),
+            local: vec![],
             checked: "2026-08-24".into(),
         })
     }
@@ -561,6 +569,14 @@ mod tests {
         let mut m = miss("umu-0");
         m.fix = fix_check(&["gamefixes-steam/397540.py"]);
         assert!(umu_candidate(&m));
+
+        // A local fix proves the same need.
+        let mut m = miss("umu-0");
+        m.fix = fix_check(&[]);
+        m.fix.as_mut().unwrap().local =
+            vec!["/h/.config/protonfixes/localfixes/umu-397540.py".into()];
+        assert!(umu_candidate(&m));
+        assert!(scope_line(&m).unwrap().contains("local protonfix"));
 
         // A fix check that found nothing is no suggestion.
         let mut m = miss("umu-0");

@@ -208,7 +208,7 @@ pub(super) fn render_misses(f: &mut Frame, area: Rect, app: &mut App) {
         // Whether upstream wants the entry at all outranks the id details:
         // a game that runs without a protonfix is nothing to submit, however
         // well its id checks out.
-        let color = if m.fix.as_ref().is_some_and(|f| f.has_fix()) {
+        let color = if m.fix.as_ref().is_some_and(|f| f.needs_fix()) {
             Color::Green
         } else {
             Color::DarkGray
@@ -429,7 +429,7 @@ fn miss_state(m: &Miss) -> (&'static str, Style) {
     }
     // The protonfix suggestion: the game needs umu, so the entry is a
     // candidate - with or without a drafted id yet.
-    if m.fix.as_ref().is_some_and(|f| f.has_fix()) {
+    if m.fix.as_ref().is_some_and(|f| f.needs_fix()) {
         return if m.drafted_id.is_some() {
             ("+", Style::default().fg(Color::Yellow))
         } else {
@@ -503,6 +503,7 @@ mod tests {
         m.fix = Some(FixCheck {
             umu_id: "umu-870780".into(),
             fixes: vec![],
+            local: vec![],
             checked: "2026-08-24".into(),
         });
         assert_eq!(miss_state(&m).0, "○");
