@@ -230,6 +230,63 @@ fn load_local(path: &std::path::Path) -> Result<ProtonFixes, String> {
     })
 }
 
+/// protonfixes' own local fix directory. It expands `~` itself rather than
+/// following XDG, so this does the same.
+fn local_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/protonfixes/localfixes"))
+}
+
+/// The local fixes, indexed by umu id. Named by the raw `GAMEID` they serve:
+/// `umu-<id>.py`, or the bare appid for Steam games. A missing directory is
+/// simply no local fixes.
+#[derive(Debug, Default)]
+pub(super) struct LocalFixes {
+    by_umu_id: HashMap<String, Vec<String>>,
+}
+
+impl LocalFixes {
+    pub(super) fn load() -> Self {
+        local_dir().map(|d| Self::read(&d)).unwrap_or_default()
+    }
+
+    fn read(dir: &std::path::Path) -> Self {
+        let mut by_umu_id: HashMap<String, Vec<String>> = HashMap::new();
+        for file in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = file.file_name().to_string_lossy().to_string();
+            let Some(id) = local_umu_id_of(&name) else {
+                continue;
+            };
+            by_umu_id
+                .entry(id)
+                .or_default()
+                .push(file.path().to_string_lossy().to_string());
+        }
+        for paths in by_umu_id.values_mut() {
+            paths.sort();
+        }
+        Self { by_umu_id }
+    }
+
+    pub(super) fn fixes_for(&self, umu_id: &str) -> &[String] {
+        self.by_umu_id
+            .get(&umu_id.to_lowercase())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+fn local_umu_id_of(file: &str) -> Option<String> {
+    let name = file.strip_suffix(".py")?;
+    let id = if name.starts_with("umu-") && name.len() > 4 {
+        name.to_string()
+    } else if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) {
+        format!("umu-{name}")
+    } else {
+        return None;
+    };
+    Some(id.to_lowercase())
+}
+
 /// A fix file's page upstream, for the merge request's evidence line.
 pub(super) fn fix_url(path: &str) -> String {
     format!("{}/{path}", endpoints().umu_protonfixes_file)
@@ -284,6 +341,30 @@ mod tests {
         // A bare name outside gamefixes-steam is not an appid, so it names
         // no id we could match a draft against.
         assert_eq!(umu_id_of("gamefixes-gog/2049187585.py"), None);
+    }
+
+    #[test]
+    fn local_fixes_are_indexed_by_the_gameid_they_serve() {
+        let dir = std::env::temp_dir().join(format!("gamebus-localfixes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in [
+            "umu-1227690.py",
+            "2840770.py",
+            "default.py",
+            "__init__.py",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let local = LocalFixes::read(&dir);
+        assert_eq!(local.fixes_for("umu-1227690").len(), 1);
+        // A Steam GAMEID is the bare appid.
+        assert_eq!(local.fixes_for("UMU-2840770").len(), 1);
+        assert_eq!(local.by_umu_id.len(), 2);
+        assert!(LocalFixes::read(&dir.join("absent"))
+            .fixes_for("umu-1")
+            .is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

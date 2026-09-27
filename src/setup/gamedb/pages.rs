@@ -454,7 +454,7 @@ impl Group {
         // game here at all: umu-database does not want it, so its store
         // codename has nowhere else to live. Only a umu miss ever went near
         // that scope gate, so only a umu miss can carry the verdict.
-        if let Some(fix) = miss.fix.as_ref().filter(|f| f.fixes.is_empty()) {
+        if let Some(fix) = miss.fix.as_ref().filter(|f| !f.needs_fix()) {
             if miss.is_umu_miss()
                 && super::super::umu_misses::id_is_firm(miss)
                 && self.no_fix_checked.as_deref() < Some(fix.checked.as_str())
@@ -1073,6 +1073,7 @@ mod tests {
                 m.fix = Some(FixCheck {
                     umu_id: format!("umu-{appid}"),
                     fixes: Vec::new(),
+                    local: vec![],
                     checked: checked.to_string(),
                 });
             });

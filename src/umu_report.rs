@@ -251,12 +251,26 @@ pub struct FixCheck {
     /// The fix files found upstream, repository-relative
     /// (`gamefixes-steam/870780.py`). Empty means: no fix, out of scope.
     pub fixes: Vec<String>,
+    /// Fixes in protonfixes' `localfixes` directory serving the same id,
+    /// as absolute paths. Proof the game needs a fix, but not one a database
+    /// row can point at until it is upstream.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<String>,
     pub checked: String,
 }
 
 impl FixCheck {
     pub fn has_fix(&self) -> bool {
         !self.fixes.is_empty()
+    }
+
+    pub fn has_local_fix(&self) -> bool {
+        !self.local.is_empty()
+    }
+
+    /// Upstream or local: either way the game needs a fix in Proton.
+    pub fn needs_fix(&self) -> bool {
+        self.has_fix() || self.has_local_fix()
     }
 }
 
