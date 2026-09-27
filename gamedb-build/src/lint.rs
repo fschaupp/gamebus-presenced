@@ -326,12 +326,116 @@ pub fn check(data: &DataSet) -> Report {
     report
 }
 
-/// Both schemas, against every page and `helpers.toml`.
+/// Everything wrong with `stores.toml`: its schema, and its agreement with
+/// the page schema. Shared by the lint and the builder, which runs it even
+/// when told to skip the lint: no artifact is ever built from a store list
+/// gamebus would refuse.
+pub fn store_problems(data: &DataSet) -> std::result::Result<Vec<String>, String> {
+    let game_schema = crate::model::read_json(&data.schema_dir.join("game.schema.json"))
+        .map_err(|e| e.to_string())?;
+    let stores_schema = crate::model::read_json(&data.schema_dir.join("stores.schema.json"))
+        .map_err(|e| e.to_string())?;
+    let mut errs = Vec::new();
+    Validator::new(stores_schema).check(&data.stores, "stores.toml", &mut errs);
+    store_keys_match(&game_schema, &data.stores, &mut errs);
+    Ok(errs)
+}
+
+/// The store keys a page may use must be exactly the stores `stores.toml`
+/// lists, less the standalone one; and the id precedence may only name those.
+/// Also what the schema cannot say about the file, and gamebus's build
+/// refuses: no spelling may name two stores, and exactly one entry is the
+/// standalone "no store".
+fn store_keys_match(game_schema: &serde_json::Value, stores: &toml::Value, errs: &mut Vec<String>) {
+    use std::collections::BTreeSet;
+    let entries = stores
+        .get("store")
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let listed: BTreeSet<String> = entries
+        .iter()
+        .filter(|s| {
+            !s.get("standalone")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|s| {
+            s.get("id")
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let keys: BTreeSet<String> = game_schema
+        .pointer("/properties/stores/propertyNames/enum")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut seen = BTreeSet::new();
+    for entry in &entries {
+        let id = entry.get("id").and_then(toml::Value::as_str);
+        let aliases = entry.get("aliases").and_then(toml::Value::as_array);
+        let spellings = id.into_iter().chain(
+            aliases
+                .into_iter()
+                .flatten()
+                .filter_map(toml::Value::as_str),
+        );
+        for spelling in spellings {
+            if !seen.insert(spelling.to_string()) {
+                errs.push(format!("stores.toml: {spelling:?} names two stores"));
+            }
+        }
+    }
+    let standalone = entries
+        .iter()
+        .filter(|s| {
+            s.get("standalone")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    if standalone != 1 {
+        errs.push(format!(
+            "stores.toml: {standalone} standalone entries; exactly one says \"no store\""
+        ));
+    }
+
+    let missing: Vec<&String> = listed.difference(&keys).collect();
+    let extra: Vec<&String> = keys.difference(&listed).collect();
+    if !missing.is_empty() || !extra.is_empty() {
+        errs.push(format!(
+            "game.schema.json: its store keys must match stores.toml (missing {missing:?}, not in stores.toml {extra:?})"
+        ));
+    }
+    for p in stores
+        .get("id_precedence")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+    {
+        if !listed.contains(p) {
+            errs.push(format!(
+                "stores.toml: id_precedence names {p:?}, which is not a store it lists"
+            ));
+        }
+    }
+}
+
+/// The schemas, against every page, `helpers.toml` and `stores.toml`; and
+/// the page schema's store keys against `stores.toml`, the one list of
+/// stores everything else is built from.
 fn schema_pass(data: &DataSet, errs: &mut Vec<String>) -> std::result::Result<(), String> {
     let game_schema = crate::model::read_json(&data.schema_dir.join("game.schema.json"))
         .map_err(|e| e.to_string())?;
     let helpers_schema = crate::model::read_json(&data.schema_dir.join("helpers.schema.json"))
         .map_err(|e| e.to_string())?;
+    errs.extend(store_problems(data)?);
 
     let mut games = Validator::new(game_schema);
     for page in &data.pages {
@@ -339,4 +443,76 @@ fn schema_pass(data: &DataSet, errs: &mut Vec<String>) -> std::result::Result<()
     }
     Validator::new(helpers_schema).check(&data.helpers, "helpers.toml", errs);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::store_keys_match;
+
+    fn stores() -> toml::Value {
+        r#"
+id_precedence = ["gog"]
+[[store]]
+id = "gog"
+[[store]]
+id = "steam"
+[[store]]
+id = "none"
+standalone = true
+"#
+        .parse()
+        .expect("fixture parses")
+    }
+
+    fn schema(keys: &[&str]) -> serde_json::Value {
+        serde_json::json!({"properties": {"stores": {"propertyNames": {"enum": keys}}}})
+    }
+
+    #[test]
+    fn the_page_schema_must_list_exactly_the_stores_file() {
+        let mut errs = Vec::new();
+        store_keys_match(&schema(&["gog", "steam"]), &stores(), &mut errs);
+        assert!(errs.is_empty(), "{errs:?}");
+
+        store_keys_match(&schema(&["gog", "steam", "origin"]), &stores(), &mut errs);
+        store_keys_match(&schema(&["gog"]), &stores(), &mut errs);
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        assert!(errs[0].contains("\"origin\""), "{}", errs[0]);
+        assert!(errs[1].contains("\"steam\""), "{}", errs[1]);
+    }
+
+    #[test]
+    fn a_spelling_may_name_one_store_and_one_entry_is_no_store() {
+        let bad: toml::Value = r#"
+id_precedence = ["gog"]
+[[store]]
+id = "gog"
+aliases = ["steam"]
+[[store]]
+id = "steam"
+"#
+        .parse()
+        .expect("fixture parses");
+        let mut errs = Vec::new();
+        store_keys_match(&schema(&["gog", "steam"]), &bad, &mut errs);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("\"steam\" names two stores")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("0 standalone entries")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn the_precedence_may_only_name_listed_stores() {
+        let mut bad = stores();
+        bad["id_precedence"] = toml::Value::Array(vec!["origin".into()]);
+        let mut errs = Vec::new();
+        store_keys_match(&schema(&["gog", "steam"]), &bad, &mut errs);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("origin"));
+    }
 }

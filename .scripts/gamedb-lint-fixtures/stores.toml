@@ -1,0 +1,70 @@
+# The stores gamebus knows, in umu-database's own spelling, and the other
+# spellings launchers use for them. The one list everything else is built
+# from: the page schema's store keys are checked against it, gamebus-setup
+# normalises launcher store names with it, and store pickers offer it.
+#
+# Order is the order a picker offers them: by how often umu-database uses
+# each id (counted from its CSV, 2026-08-07), `none` last as the way out.
+
+# The stores that lend a page its canonical id, best first (see "Ids" in the
+# README). `steam` and `umu` rank above all of these and are not listed.
+id_precedence = [
+    "gog",
+    "egs",
+    "ubisoft",
+    "ea",
+    "battlenet",
+    "amazon",
+    "humble",
+    "itchio",
+    "zoomplatform",
+]
+
+[[store]]
+id = "egs"
+# Heroic names the Epic store `epic`.
+aliases = ["epic"]
+
+[[store]]
+id = "gog"
+
+[[store]]
+id = "amazon"
+# Heroic's Amazon Games integration is called Nile.
+aliases = ["nile"]
+
+[[store]]
+id = "ubisoft"
+
+[[store]]
+id = "humble"
+aliases = ["humblebundle"]
+
+[[store]]
+id = "ea"
+aliases = ["ea_app"]
+
+[[store]]
+id = "zoomplatform"
+
+[[store]]
+id = "steam"
+aliases = ["steamwindows"]
+
+[[store]]
+id = "itchio"
+
+[[store]]
+id = "battlenet"
+
+[[store]]
+id = "umu"
+# umu-database's own namespace, for games no store sells. A valid key, but
+# not a store anyone picks for a game they bought somewhere.
+pick = false
+
+[[store]]
+id = "none"
+# umu-database's word for "standalone". Never a key in a page: a page with no
+# store identity omits `stores` instead.
+standalone = true
