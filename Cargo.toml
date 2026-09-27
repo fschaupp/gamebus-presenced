@@ -3,7 +3,7 @@
 # `cargo clippy` at the repo root behave exactly as they did before
 # gamedb-build joined the workspace, and the daemon's dependency tree gains
 # nothing. Reach the builder explicitly with `-p gamedb-build`.
-members = [".", "gamedb-build"]
+members = [".", "gamedb-build", "gamebus-coupler"]
 default-members = ["."]
 
 [package]
@@ -39,13 +39,24 @@ required-features = ["setup"]
 default = ["setup"]
 # The setup/status TUI. On by default because you need it to install the
 # daemon; `--no-default-features` builds the daemon and CLI without ratatui.
-setup = ["dep:ratatui", "dep:toml_edit", "dep:rusqlite"]
+setup = [
+    "dep:ratatui",
+    "dep:toml_edit",
+    "dep:rusqlite",
+    "dep:ed25519-dalek",
+    "dep:sha2",
+    "dep:argon2",
+    "dep:getrandom",
+]
 
 [dependencies]
+# The records, judgements and edit verbs the front-ends share. serde-only by
+# design, so beisl can link it without inheriting this crate's IO.
+gamebus-coupler = { path = "gamebus-coupler" }
 zbus = { version = "4", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -71,6 +82,13 @@ toml_edit = { version = "0.22", optional = true }
 # tool can fill codenames from the user's own library. Same version and
 # features as gamedb-build's rusqlite, so Cargo.lock gains no new package.
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+# The MCP server's client identities and ledger (setup only, never the
+# daemon). Pure Rust, pinned by the lock, audited before and after adding.
+# The owner key is derived from the passphrase with argon2 and never stored.
+ed25519-dalek = { version = "2", optional = true }
+sha2 = { version = "0.10", optional = true }
+argon2 = { version = "0.5", optional = true }
+getrandom = { version = "0.3", optional = true }
 
 [dev-dependencies]
 discord-rich-presence = "1"

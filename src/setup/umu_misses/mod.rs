@@ -53,30 +53,7 @@ pub(crate) use self::tui::{
 use self::export::{export_csv, export_markdown};
 use self::verify::{check_open_prs, fetch_full_dump, verify};
 
-/// Whether an entry participates in the umu-database pipeline at all.
-///
-/// Owner policy (2026-08-24): gamedb is ALWAYS active - every identity
-/// record shows there by default - but umu-database participation is
-/// OPT-IN per entry. An entry is a umu candidate only when it actually
-/// went through umu ([`Miss::is_umu_miss`]) AND at least one of:
-///
-/// - the user promoted it in the TUI (`u`; `umu_promoted` carries the date),
-/// - verification found the game already active in the umu database under
-///   another store ([`VerificationState::CrossStoreId`] - the id exists,
-///   this store's copy is the gap), or
-/// - the fix check found a protonfix, i.e. the game needs umu's help.
-///
-/// Suggestion and promotion, never automatic enrollment: everything else
-/// stays a gamedb-only identity record, and drafting, `export::partition`,
-/// both exporters, and `--check-prs` hold it back.
-pub(crate) fn umu_candidate(m: &Miss) -> bool {
-    m.is_umu_miss()
-        && (m.umu_promoted.is_some()
-            || m.verification
-                .as_ref()
-                .is_some_and(|v| v.state == VerificationState::CrossStoreId)
-            || m.fix.as_ref().is_some_and(|f| f.needs_fix()))
-}
+pub(crate) use gamebus_coupler::umu_candidate;
 
 /// One line on where an entry stands with the umu-database pipeline.
 /// Shared by the CLI list and the TUI's misses detail pane.
@@ -283,6 +260,17 @@ fn api_base() -> String {
 /// `GAMEBUS_UMU_DB` environment variable, or the `--fetch` cache. An
 /// explicitly named file that fails to parse is a hard error; a stale cache
 /// just degrades to API-only verification.
+/// The engine's check before a hand-typed umu id is applied: well-formed and
+/// collision-free against the local database. No database, no assignment.
+pub(crate) fn check_id(title: Option<&str>, id: &str) -> Result<String, String> {
+    match load_db(&Opts::none())? {
+        Some(db) => verify::check_assignment(&db, title, id),
+        None => {
+            Err("No local umu database to collision-check against - fetch it first (net).".into())
+        }
+    }
+}
+
 fn load_db(opts: &Opts) -> Result<Option<UmuDb>, String> {
     let explicit = opts
         .db

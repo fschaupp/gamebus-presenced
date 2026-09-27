@@ -51,6 +51,12 @@ fn usage() {
     eprintln!("                            executables that identify it");
     eprintln!("  compat [options]          Compat walls beisl detected: the stash, and");
     eprintln!("                            what has been reported upstream");
+    eprintln!("  auth [command]            MCP client identities and the ledger: init,");
+    eprintln!("                            status, approve <name>, forget <name>, set,");
+    eprintln!("                            reset-ledger, log. Owner commands ask for the");
+    eprintln!("                            passphrase on the terminal.");
+    eprintln!("  mcp [options]             Serve the stash, gamedb and compat findings");
+    eprintln!("                            over MCP on stdio, for front-ends and agents");
     eprintln!("  help                      Show this help");
     eprintln!();
     eprintln!("Actions:");
@@ -109,6 +115,13 @@ fn usage() {
     eprintln!("  --check-prs               Also scan open upstream merge requests for");
     eprintln!("                            already-submitted entries (best-effort)");
     eprintln!();
+    eprintln!("mcp options:");
+    eprintln!("  --allow-edits             Offer the tools that change the stash");
+    eprintln!("  --allow-network           Offer the tools that reach the network");
+    eprintln!("                            Without either, the server only reads. The");
+    eprintln!("                            flags scope what a client was configured to");
+    eprintln!("                            do; they are not a security boundary.");
+    eprintln!();
     eprintln!("gamedb options:");
     eprintln!("  --fetch                   Refresh the cached index of what gamebus-gamedb");
     eprintln!("                            already carries (one request)");
@@ -140,6 +153,8 @@ async fn main() -> ExitCode {
         Some("umu-misses") => setup::umu_misses::run(&args),
         Some("gamedb") => setup::gamedb::run(&args),
         Some("compat") => setup::compat::run(&args),
+        Some("mcp") => setup::mcp_server::run(&args),
+        Some("auth") => setup::auth_cli::run(&args),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             ExitCode::SUCCESS
@@ -221,6 +236,10 @@ enum Msg {
     /// The gamedb pane's rows, the index state and the export directory,
     /// loaded off the render path like the miss list.
     Gamedb(Box<setup::gamedb::GamedbView>),
+    /// A line for the output pane that ends no flow (a background notice).
+    Note(String),
+    /// The auth and audit tabs' model: ledger state, clients, entries.
+    Auth(Box<setup::auth::AuthView>),
     Done(Action, Vec<actions::StepOutcome>),
     /// A umu flow (verify / assign / pick / store cycle) finished: its log
     /// lines and whether it completed. Clears `busy` and refreshes the pane.
@@ -282,6 +301,7 @@ async fn cmd_tui() -> ExitCode {
     spawn_probe(&tx, &dirs);
     spawn_misses(&tx);
     spawn_gamedb(&tx);
+    spawn_auth(&tx);
 
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -304,10 +324,17 @@ async fn cmd_tui() -> ExitCode {
             _ = monitor_tick.tick(),
                 if matches!(
                     app.view,
-                    ui::View::Monitor | ui::View::Misses | ui::View::Gamedb
+                    ui::View::Monitor
+                        | ui::View::Misses
+                        | ui::View::Gamedb
+                        | ui::View::Auth
+                        | ui::View::Audit
                 ) =>
             {
-                if app.view == ui::View::Gamedb {
+                if matches!(app.view, ui::View::Auth | ui::View::Audit) {
+                    // Clients register and edits land while the tab is open.
+                    spawn_auth(&tx);
+                } else if app.view == ui::View::Gamedb {
                     // The same stash the misses pane watches, folded into
                     // pages - and the same convention: no I/O on the render
                     // path, so it arrives as a message.
@@ -373,15 +400,35 @@ fn spawn_activities(tx: &tokio::sync::mpsc::Sender<Msg>, conn: Option<zbus::Conn
 /// and the key is the final sort tie-break - same-day unresolved entries
 /// would otherwise land in HashMap iteration order, which reshuffles on
 /// every load.
+/// The miss list, read through the MCP surface like every other client
+/// reads it. A server that cannot answer falls back to the file, and says
+/// so once rather than on every refresh.
 fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
-        let report = umu_report::UmuReport::load();
-        let mut misses: Vec<(String, umu_report::Miss)> = report
-            .entries()
-            .iter()
-            .map(|(k, m)| (k.clone(), m.clone()))
-            .collect();
+        let listed =
+            setup::tui_client::with_session(|s| s.read("list_misses", serde_json::json!({})))
+                .map_err(|e| e.to_string())
+                .and_then(|v| {
+                    serde_json::from_value::<Vec<gamebus_coupler::MissRow>>(v["misses"].clone())
+                        .map_err(|e| e.to_string())
+                });
+        let mut misses: Vec<(String, umu_report::Miss)> = match listed {
+            Ok(rows) => rows.into_iter().map(|r| (r.key, r.miss)).collect(),
+            Err(e) => {
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let _ = tx.blocking_send(Msg::Note(format!(
+                        "gamebus-setup mcp could not list the stash ({e}); reading the file directly."
+                    )));
+                }
+                umu_report::UmuReport::load()
+                    .entries()
+                    .iter()
+                    .map(|(k, m)| (k.clone(), m.clone()))
+                    .collect()
+            }
+        };
         misses.sort_by(|a, b| {
             // Dismissed entries park at the bottom, out of the way.
             (a.1.dismissed.is_some())
@@ -397,6 +444,16 @@ fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
 /// Refresh the gamedb pane: the stash folded into pages, the cached index,
 /// and the configured export directory. Local files only - the pane's `r`
 /// is the one key that reaches the network.
+fn spawn_auth(tx: &tokio::sync::mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let view = setup::auth::AuthPaths::default_paths()
+            .map(|p| setup::auth::view(&p))
+            .unwrap_or_default();
+        let _ = tx.blocking_send(Msg::Auth(Box::new(view)));
+    });
+}
+
 fn spawn_gamedb(tx: &tokio::sync::mpsc::Sender<Msg>) {
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
@@ -575,6 +632,8 @@ async fn handle(
         Msg::Activities(activities) => app.activities = activities,
         Msg::Misses(misses) => app.set_misses(misses),
         Msg::Gamedb(view) => app.set_gamedb(*view),
+        Msg::Auth(view) => app.set_auth(*view),
+        Msg::Note(line) => app.log_styled(format!("  {line}"), Style::default().fg(Color::Yellow)),
         Msg::UmuOutcome(lines, ok) => {
             for line in lines {
                 app.log_styled(
@@ -590,6 +649,7 @@ async fn handle(
             // Show what the flow changed without waiting for the next tick.
             spawn_misses(tx);
             spawn_gamedb(tx);
+            spawn_auth(tx);
         }
         Msg::UmuCandidates {
             key,
@@ -845,6 +905,50 @@ async fn handle(
                     spawn_umu_flow(tx, setup::gamedb::tui_fetch);
                 }
                 ui::Intent::GamedbExport { force } => start_gamedb_export(app, tx, force),
+                ui::Intent::AuthOwner { op, passphrase } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("deriving the owner key".into());
+                    spawn_umu_flow(tx, move || {
+                        let Some(paths) = setup::auth::AuthPaths::default_paths() else {
+                            return (vec!["No data directory (no HOME).".into()], false);
+                        };
+                        let outcome = match setup::auth::owner_op(&paths, &passphrase.0, &op) {
+                            Ok(line) => (vec![line], true),
+                            Err(e) => (vec![e], false),
+                        };
+                        // Who is approved may have changed: the next edit
+                        // authenticates afresh.
+                        setup::tui_client::reset();
+                        outcome
+                    });
+                }
+                ui::Intent::AuthInit { passphrase } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("creating the owner key".into());
+                    spawn_umu_flow(tx, move || {
+                        let Some(paths) = setup::auth::AuthPaths::default_paths() else {
+                            return (vec!["No data directory (no HOME).".into()], false);
+                        };
+                        let outcome = match setup::auth::init(&paths, &passphrase.0) {
+                            Ok(ledger) => (
+                                vec![format!(
+                                    "Auth set up in {}. Ledger {}. This TUI registers as \
+                                     gamebus-tui on its first edit.",
+                                    paths.dir.display(),
+                                    &ledger.id[..12]
+                                )],
+                                true,
+                            ),
+                            Err(e) => (vec![e], false),
+                        };
+                        setup::tui_client::reset();
+                        outcome
+                    });
+                }
                 ui::Intent::GamedbSetDir { dir } => {
                     if app.busy.is_some() {
                         return;

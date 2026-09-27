@@ -17,22 +17,6 @@ use crate::umu_report::{Confidence, DraftBasis, Miss, UmuReport};
 
 use super::index::GamedbIndex;
 
-/// The stores that can lend a page its canonical id, in the precedence
-/// `gamedb/CONTRIBUTING.md` lays down. Steam outranks all of them and is
-/// handled separately; `umu` and `steam` never appear here, because a umu
-/// id is only ever recorded when umu-database really named the game.
-const ID_STORES: [&str; 9] = [
-    "gog",
-    "egs",
-    "ubisoft",
-    "ea",
-    "battlenet",
-    "amazon",
-    "humble",
-    "itchio",
-    "zoomplatform",
-];
-
 /// One `[[stores.<store>]]` block: one product, on one store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StoreEntry {
@@ -155,12 +139,12 @@ impl Candidate {
         }
         // A steam store entry carries the appid as its codename - the same
         // authority as a drafted sku, learned from Steam's own manifest
-        // rather than detectable.json (ID_STORES deliberately lacks steam,
+        // rather than detectable.json (the id precedence deliberately lacks steam,
         // written when a Steam appid could only arrive as a sku).
         if let Some(entry) = self.stores.iter().find(|e| e.store == "steam") {
             return Some(format!("steam-{}", entry.codename));
         }
-        for store in ID_STORES {
+        for &store in gamebus_coupler::ID_PRECEDENCE {
             if let Some(entry) = self.stores.iter().find(|e| e.store == store) {
                 return Some(format!("{}-{}", entry.store, entry.codename));
             }
@@ -1748,7 +1732,7 @@ mod tests {
 
     #[test]
     fn a_steam_store_entry_identifies_a_page_on_its_own() {
-        // Regression: ID_STORES lacks steam, so a lone steam store entry
+        // Regression: the id precedence lacks steam, so a lone steam store entry
         // read as "nothing identifies it" and the candidate was Incomplete.
         let mut report = UmuReport::default();
         report.note_launch_with(
