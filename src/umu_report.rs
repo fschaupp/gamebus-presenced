@@ -101,6 +101,14 @@ impl UmuReport {
         }
     }
 
+    /// The annotation writer on an explicit path (the MCP server's stores).
+    pub(crate) fn annotating_at(path: PathBuf) -> Self {
+        Self {
+            annotator: true,
+            ..Self::from_path(path)
+        }
+    }
+
     /// crate-visible for tests that need a stash on a scratch path.
     pub(crate) fn from_path(path: PathBuf) -> Self {
         match std::fs::read_to_string(&path) {

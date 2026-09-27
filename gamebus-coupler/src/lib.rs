@@ -11,6 +11,7 @@
 pub mod compat;
 pub mod miss;
 pub mod verb;
+pub mod wire;
 
 pub use compat::{
     canonical_signature, pending_targets, CompatFinding, Observation, WallKind, TARGETS,
@@ -22,3 +23,4 @@ pub use miss::{
 pub use verb::{
     apply_finding, apply_miss, FindingChange, FindingVerb, MissChange, MissVerb, Refusal,
 };
+pub use wire::{ErrorReason, FindingRow, MissRow, ToolError};

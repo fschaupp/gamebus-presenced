@@ -68,7 +68,7 @@ use serde_json::Value;
 
 use serde_json::json;
 
-use crate::compat::{CompatStash, Incoming, Observation, WallKind};
+use crate::compat::{CompatFinding, CompatStash, Incoming, Observation, WallKind};
 use crate::endpoints::Endpoints;
 use crate::naming::NamingDb;
 use crate::setup::inbox;
@@ -77,7 +77,7 @@ use crate::setup::protonfix;
 use crate::setup::reports;
 use crate::setup::specs;
 use crate::umu_report::today;
-use gamebus_coupler::{pending_targets, FindingVerb, TARGETS};
+use gamebus_coupler::{pending_targets, FindingChange, FindingVerb, TARGETS};
 
 /// One finding as a source delivers it. Flat on purpose: the run facts and
 /// the game keys arrive together, and a sender should not have to model this
@@ -197,14 +197,14 @@ fn ingest(stash: &mut CompatStash, raw: &str) -> Result<Vec<String>, String> {
 
 /// What one pass over the inbox did.
 #[derive(Default)]
-struct Drained {
+pub(crate) struct Drained {
     /// Keys taken into the stash.
-    recorded: Vec<String>,
+    pub(crate) recorded: Vec<String>,
     /// Drops this side refused, and where each one was parked.
-    rejected: Vec<(PathBuf, String)>,
+    pub(crate) rejected: Vec<(PathBuf, String)>,
     /// Findings were ingested but the stash did not reach disk, so the drops
     /// were left where they are. They are still the only copy.
-    held: bool,
+    pub(crate) held: bool,
 }
 
 /// Take everything beisl has dropped into the stash.
@@ -227,7 +227,7 @@ fn drain(stash: &mut CompatStash) -> Drained {
     }
 }
 
-fn drain_dir(stash: &mut CompatStash, dir: &Path) -> Drained {
+pub(crate) fn drain_dir(stash: &mut CompatStash, dir: &Path) -> Drained {
     let mut out = Drained::default();
     let mut taken = Vec::new();
     for path in inbox::pending(dir) {
@@ -651,7 +651,13 @@ pub fn run(args: &[String]) -> ExitCode {
         } else {
             FindingVerb::Dismiss
         };
-        stash.apply(key, &verb);
+        let prior = json!(stash.findings()[key]);
+        if let Some(Ok(change)) = stash.apply(key, &verb) {
+            if let Err(e) = record_cli(key, verb, change, prior) {
+                eprintln!("{e} Nothing was written.");
+                return ExitCode::FAILURE;
+            }
+        }
         stash.save();
         if clearing {
             println!("Restored {key} to the review list.");
@@ -666,8 +672,17 @@ pub fn run(args: &[String]) -> ExitCode {
             eprintln!("--reported needs --target ({}).", TARGETS.join(", "));
             return ExitCode::FAILURE;
         };
+        let prior = stash.findings().get(&key).map_or(Value::Null, |f| json!(f));
         match stash.mark_reported(&key, &target) {
-            Some(Ok(())) => {}
+            Some(Ok(())) => {
+                let verb = FindingVerb::MarkReported {
+                    target: target.clone(),
+                };
+                if let Err(e) = record_cli(&key, verb, FindingChange::Reported, prior) {
+                    eprintln!("{e} Nothing was written.");
+                    return ExitCode::FAILURE;
+                }
+            }
             Some(Err(_)) => {
                 eprintln!(
                     "Unknown target {target} - one of {}. Nothing was written.",
@@ -690,6 +705,22 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     list(&stash);
     ExitCode::SUCCESS
+}
+
+/// Record a CLI edit in the ledger when auth is set up. The stash is only
+/// written after this succeeds, so a refused edit never lands.
+fn record_cli(
+    key: &str,
+    verb: FindingVerb,
+    change: FindingChange,
+    prior: Value,
+) -> Result<(), super::auth::AppendError> {
+    let action = super::auth::Action::EditFinding {
+        key: key.to_string(),
+        verb,
+        change,
+    };
+    super::auth::record_local(super::auth::Origin::Cli, action, prior)
 }
 
 /// Draft a submission for one finding, or for every finding a target still
@@ -796,34 +827,37 @@ fn run_export(stash: &CompatStash, target: &str, key: Option<&str>, as_json: boo
 /// `--scan` and on `--export`, and so it can gain a field without breaking a
 /// reader. `key` and `needs` are computed onto each finding; everything else
 /// is the stored record, unknown fields included.
+/// One finding as every JSON surface shows it (`compat --json`, the MCP
+/// server): the stored record plus its `key` and `needs`. Shared so the two
+/// cannot drift.
+pub(crate) fn finding_json(key: &str, f: &CompatFinding) -> Value {
+    let mut value = serde_json::to_value(f).unwrap_or_else(|_| json!({}));
+    if let Some(map) = value.as_object_mut() {
+        map.insert("key".into(), json!(key));
+        map.insert("needs".into(), json!(pending_targets(f)));
+        // The stored record omits an empty field to keep the file small. A
+        // reader should not have to tell "absent" from "empty", so every
+        // documented key is present here even when the stash left it out.
+        for (field, empty) in [
+            ("title", Value::Null),
+            ("steam_appid", Value::Null),
+            ("awacy_slug", Value::Null),
+            ("dismissed", Value::Null),
+            ("reported", json!({})),
+        ] {
+            map.entry(field).or_insert(empty);
+        }
+    }
+    value
+}
+
 fn list_json(stash: &CompatStash, drained: &Drained) -> ExitCode {
     let mut keys: Vec<&String> = stash.findings().keys().collect();
     keys.sort();
 
     let findings: Vec<Value> = keys
         .into_iter()
-        .map(|key| {
-            let f = &stash.findings()[key];
-            let mut value = serde_json::to_value(f).unwrap_or_else(|_| json!({}));
-            if let Some(map) = value.as_object_mut() {
-                map.insert("key".into(), json!(key));
-                map.insert("needs".into(), json!(pending_targets(f)));
-                // The stored record omits an empty field to keep the file
-                // small. A reader should not have to tell "absent" from
-                // "empty", so every documented key is present here even when
-                // the stash left it out.
-                for (field, empty) in [
-                    ("title", Value::Null),
-                    ("steam_appid", Value::Null),
-                    ("awacy_slug", Value::Null),
-                    ("dismissed", Value::Null),
-                    ("reported", json!({})),
-                ] {
-                    map.entry(field).or_insert(empty);
-                }
-            }
-            value
-        })
+        .map(|key| finding_json(key, &stash.findings()[key]))
         .collect();
 
     let refused: Vec<Value> = drained

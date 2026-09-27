@@ -51,6 +51,12 @@ fn usage() {
     eprintln!("                            executables that identify it");
     eprintln!("  compat [options]          Compat walls beisl detected: the stash, and");
     eprintln!("                            what has been reported upstream");
+    eprintln!("  auth [command]            MCP client identities and the ledger: init,");
+    eprintln!("                            status, approve <name>, forget <name>, set,");
+    eprintln!("                            reset-ledger, log. Owner commands ask for the");
+    eprintln!("                            passphrase on the terminal.");
+    eprintln!("  mcp [options]             Serve the stash, gamedb and compat findings");
+    eprintln!("                            over MCP on stdio, for front-ends and agents");
     eprintln!("  help                      Show this help");
     eprintln!();
     eprintln!("Actions:");
@@ -109,6 +115,13 @@ fn usage() {
     eprintln!("  --check-prs               Also scan open upstream merge requests for");
     eprintln!("                            already-submitted entries (best-effort)");
     eprintln!();
+    eprintln!("mcp options:");
+    eprintln!("  --allow-edits             Offer the tools that change the stash");
+    eprintln!("  --allow-network           Offer the tools that reach the network");
+    eprintln!("                            Without either, the server only reads. The");
+    eprintln!("                            flags scope what a client was configured to");
+    eprintln!("                            do; they are not a security boundary.");
+    eprintln!();
     eprintln!("gamedb options:");
     eprintln!("  --fetch                   Refresh the cached index of what gamebus-gamedb");
     eprintln!("                            already carries (one request)");
@@ -140,6 +153,8 @@ async fn main() -> ExitCode {
         Some("umu-misses") => setup::umu_misses::run(&args),
         Some("gamedb") => setup::gamedb::run(&args),
         Some("compat") => setup::compat::run(&args),
+        Some("mcp") => setup::mcp_server::run(&args),
+        Some("auth") => setup::auth_cli::run(&args),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             ExitCode::SUCCESS

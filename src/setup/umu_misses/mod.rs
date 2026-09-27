@@ -260,6 +260,17 @@ fn api_base() -> String {
 /// `GAMEBUS_UMU_DB` environment variable, or the `--fetch` cache. An
 /// explicitly named file that fails to parse is a hard error; a stale cache
 /// just degrades to API-only verification.
+/// The engine's check before a hand-typed umu id is applied: well-formed and
+/// collision-free against the local database. No database, no assignment.
+pub(crate) fn check_id(title: Option<&str>, id: &str) -> Result<String, String> {
+    match load_db(&Opts::none())? {
+        Some(db) => verify::check_assignment(&db, title, id),
+        None => {
+            Err("No local umu database to collision-check against - fetch it first (net).".into())
+        }
+    }
+}
+
 fn load_db(opts: &Opts) -> Result<Option<UmuDb>, String> {
     let explicit = opts
         .db
