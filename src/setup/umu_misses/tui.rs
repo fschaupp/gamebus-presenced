@@ -4,7 +4,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 use gamebus_coupler::{apply_miss, Refusal};
-use gamebus_coupler::{ErrorReason, MissChange, MissRow, MissVerb};
+use gamebus_coupler::{pickable_stores, ErrorReason, MissChange, MissRow, MissVerb};
 use serde_json::json;
 
 use crate::setup::mcp::CallError;
@@ -464,24 +464,6 @@ fn set_title(
     (vec![line], true)
 }
 
-/// Every store id the database actually uses (counted from the upstream
-/// CSV, 2026-08-07), most common first - the TUI's `s` key cycles these.
-/// The tail holds the ids a launcher can hand us but the CSV rarely
-/// carries, in umu's own order; `none` stays last, as the way out.
-pub(crate) const KNOWN_STORES: &[&str] = &[
-    "egs",
-    "gog",
-    "amazon",
-    "ubisoft",
-    "humble",
-    "ea",
-    "zoomplatform",
-    "steam",
-    "itchio",
-    "battlenet",
-    "none",
-];
-
 /// The TUI's store correction: cycle the entry's effective store to the
 /// next known id. The cycle is a keyboard affordance; what is sent is a
 /// plain SetStore, and landing on the daemon's own guess clears the
@@ -495,8 +477,10 @@ fn cycle_store(editor: &mut impl Editor, key: &str) -> (Vec<String>, bool) {
         Ok(m) => m.effective_store().to_string(),
         Err(line) => return (vec![line], false),
     };
-    let idx = KNOWN_STORES.iter().position(|s| *s == current);
-    let next = KNOWN_STORES[(idx.map_or(0, |i| i + 1)) % KNOWN_STORES.len()].to_string();
+    // The cycle offers what gamedb's stores.toml offers a picker, in its order.
+    let stores: Vec<&str> = pickable_stores().collect();
+    let idx = stores.iter().position(|s| *s == current);
+    let next = stores[(idx.map_or(0, |i| i + 1)) % stores.len()].to_string();
     let line = match editor.apply(
         key,
         &MissVerb::SetStore {

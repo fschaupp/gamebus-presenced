@@ -37,9 +37,10 @@ use serde::Deserialize;
 // Each crate root that compiles this file uses a different subset.
 #[allow(unused_imports)]
 pub use gamebus_coupler::miss::{
-    normalize_store, Confidence, DraftBasis, DraftedId, FixCheck, Miss, Verification,
-    VerificationState,
+    Confidence, DraftBasis, DraftedId, FixCheck, Miss, Verification, VerificationState,
 };
+#[allow(unused_imports)]
+pub use gamebus_coupler::normalize_store;
 
 /// What the launcher said about a launch, as far as the daemon could read
 /// it off the environment. All optional, all resolution-half: a launcher
@@ -427,11 +428,13 @@ pub fn guess_store(
             return normalized.to_string();
         }
     }
-    match heroic_source {
-        Some("epic") => return "egs".to_string(),
-        Some("gog") => return "gog".to_string(),
-        Some("amazon" | "nile") => return "amazon".to_string(),
-        _ => {}
+    // Heroic's source names (`epic`, `nile`) are aliases in gamedb's
+    // stores.toml, so the same table translates them.
+    if let Some(source) = heroic_source {
+        let normalized = normalize_store(source);
+        if normalized != gamebus_coupler::STANDALONE {
+            return normalized.to_string();
+        }
     }
     let exe = executable.to_lowercase();
     if exe.contains("ubisoft") {

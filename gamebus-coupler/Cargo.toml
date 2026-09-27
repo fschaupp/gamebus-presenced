@@ -14,3 +14,9 @@ publish = false
 # must hold whatever a newer writer sent.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[build-dependencies]
+# Build time only: reads gamedb's stores.toml and generates the store table.
+# Never linked into the crate, so a consumer's binary gains nothing.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

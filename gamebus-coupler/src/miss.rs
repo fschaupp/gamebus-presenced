@@ -249,39 +249,6 @@ pub enum DraftBasis {
     Manual,
 }
 
-/// Translate a launcher's own store id into the umu-database's spelling.
-///
-/// Lutris names its services in its own vocabulary (`ea_app`,
-/// `humblebundle`, `steamwindows`) where the database says `ea`, `humble`,
-/// `steam`; the spellings the two already share pass straight through.
-/// Anything that names no store - `flathub`, empty, `unknown`, a service we
-/// have never seen - is `none`, the database's own word for "standalone".
-/// Shared by the daemon's guess and the setup tool so one string never means
-/// two stores.
-pub fn normalize_store(raw: &str) -> &'static str {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        // Launcher spellings that need translating.
-        "ea_app" => "ea",
-        "humblebundle" => "humble",
-        "steamwindows" => "steam",
-        // Spellings the umu-database already uses, passed through.
-        "steam" => "steam",
-        "gog" => "gog",
-        "egs" => "egs",
-        "ubisoft" => "ubisoft",
-        "zoomplatform" => "zoomplatform",
-        "humble" => "humble",
-        "itchio" => "itchio",
-        "amazon" => "amazon",
-        "battlenet" => "battlenet",
-        "ea" => "ea",
-        "umu" => "umu",
-        // `flathub` is a distribution channel, not a store; empty and
-        // `unknown` say nothing; anything else is unproven.
-        _ => "none",
-    }
-}
-
 /// Whether an entry participates in the umu-database pipeline at all.
 ///
 /// Owner policy (2026-08-24): gamedb is ALWAYS active - every identity

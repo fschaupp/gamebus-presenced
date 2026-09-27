@@ -10,6 +10,7 @@
 
 pub mod compat;
 pub mod miss;
+pub mod stores;
 pub mod verb;
 pub mod wire;
 
@@ -17,9 +18,10 @@ pub use compat::{
     canonical_signature, pending_targets, CompatFinding, Observation, WallKind, TARGETS,
 };
 pub use miss::{
-    normalize_store, umu_candidate, Confidence, DraftBasis, DraftedId, FixCheck, Miss,
-    Verification, VerificationState,
+    umu_candidate, Confidence, DraftBasis, DraftedId, FixCheck, Miss, Verification,
+    VerificationState,
 };
+pub use stores::{normalize_store, pickable_stores, Store, ID_PRECEDENCE, STANDALONE, STORES};
 pub use verb::{
     apply_finding, apply_miss, FindingChange, FindingVerb, MissChange, MissVerb, Refusal,
 };
