@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, ListState, Paragraph};
 use ratatui::Frame;
 
 use super::actions::{Action, Plan};
+use super::auth::{AuthView, ClientRow, ClientStatus, OwnerOp, Registration, Strategy};
 use super::gamedb::{GamedbFilter, GamedbRow, GamedbView};
 use super::paths::Target;
 use super::status::{Health, Row, Status};
@@ -19,11 +20,13 @@ use super::umu_misses::PickCandidate;
 use crate::client::ActivityView;
 use crate::umu_report::Miss;
 
+mod auth;
 mod gamedb;
 mod misses;
 mod monitor;
 mod status;
 
+use self::auth::{render_audit, render_auth};
 use self::gamedb::render_gamedb;
 use self::misses::render_misses;
 use self::monitor::render_monitor;
@@ -54,11 +57,25 @@ pub enum View {
     /// and `x` for dismiss, because `d` is the directory here. This is the
     /// tab where you find out an identity is wrong.
     Gamedb,
+    /// MCP client identities and the ledger's policy: who initialised it,
+    /// which clients are on record or waiting, what gets recorded. Every
+    /// change here is an owner action and asks for the passphrase.
+    Auth,
+    /// The ledger itself, read-only: who changed what, from which process,
+    /// and what it replaced.
+    Audit,
 }
 
 impl View {
     /// Tab-bar order; `Tab` cycles it.
-    pub const ALL: [View; 4] = [View::Status, View::Monitor, View::Misses, View::Gamedb];
+    pub const ALL: [View; 6] = [
+        View::Status,
+        View::Monitor,
+        View::Misses,
+        View::Gamedb,
+        View::Auth,
+        View::Audit,
+    ];
 
     /// Whether this view's keys correct a stash entry. Both stash views do,
     /// so the text-entry and pick modes are gated on this rather than on one
@@ -73,6 +90,8 @@ impl View {
             View::Monitor => "monitor",
             View::Misses => "identity misses",
             View::Gamedb => "gamedb",
+            View::Auth => "auth",
+            View::Audit => "audit",
         }
     }
 }
@@ -136,6 +155,23 @@ pub struct Pick {
     pub stale: Option<String>,
 }
 
+/// A passphrase being typed for one owner action. Never echoed; the buffer
+/// is dropped the moment Enter or Esc ends the mode.
+pub struct PassPrompt {
+    pub op: OwnerOp,
+    pub buffer: String,
+}
+
+/// A passphrase in flight to the owner action. Its `Debug` never prints it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Passphrase(pub String);
+
+impl std::fmt::Debug for Passphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Passphrase(<hidden>)")
+    }
+}
+
 pub struct App {
     pub view: View,
     pub focus: Focus,
@@ -188,6 +224,13 @@ pub struct App {
     /// cancels. Remembers the stash key it was opened for; a refresh that
     /// drops that miss cancels the mode (see [`App::set_misses`]).
     pub pick: Option<Pick>,
+    /// The auth and audit tabs' model, loaded off the render path.
+    pub auth: AuthView,
+    pub client_list: ListState,
+    pub audit_list: ListState,
+    /// While `Some`, the auth tab is asking for the passphrase and owns the
+    /// keyboard.
+    pub pass_input: Option<PassPrompt>,
     pub output: Vec<Line<'static>>,
     pub confirm: Option<Confirm>,
     /// Set while a mutating action is running. Also the mutual-exclusion gate
@@ -229,6 +272,10 @@ impl Default for App {
             id_input: None,
             title_input: None,
             pick: None,
+            auth: AuthView::default(),
+            client_list: ListState::default(),
+            audit_list: ListState::default(),
+            pass_input: None,
             output: Vec::new(),
             confirm: None,
             busy: None,
@@ -413,12 +460,41 @@ impl App {
         self.gamedb_list.select(idx);
     }
 
+    /// Replace the auth model, keeping the client selection on the same name.
+    pub fn set_auth(&mut self, view: AuthView) {
+        let selected = self.selected_client().map(|c| c.name.clone());
+        self.auth = view;
+        let at = selected
+            .and_then(|n| self.auth.clients.iter().position(|c| c.name == n))
+            .or((!self.auth.clients.is_empty()).then_some(0));
+        self.client_list.select(at);
+        if self.audit_list.selected().is_none() && !self.auth.entries.is_empty() {
+            self.audit_list.select(Some(0));
+        }
+        if self
+            .audit_list
+            .selected()
+            .is_some_and(|i| i >= self.auth.entries.len())
+        {
+            self.audit_list
+                .select(self.auth.entries.len().checked_sub(1));
+        }
+    }
+
+    pub fn selected_client(&self) -> Option<&ClientRow> {
+        self.client_list
+            .selected()
+            .and_then(|i| self.auth.clients.get(i))
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let action_count = self.action_list().len();
         let (state, len) = match (self.view, self.focus) {
             (View::Monitor, _) => (&mut self.monitor, self.activities.len()),
             (View::Misses, _) => (&mut self.miss_list, self.misses.len()),
             (View::Gamedb, _) => (&mut self.gamedb_list, self.gamedb.len()),
+            (View::Auth, _) => (&mut self.client_list, self.auth.clients.len()),
+            (View::Audit, _) => (&mut self.audit_list, self.auth.entries.len()),
             (_, Focus::Checks) => (&mut self.checks, self.rows.len()),
             (_, Focus::Actions) => (&mut self.actions, action_count),
         };
@@ -445,6 +521,11 @@ pub enum Intent {
     /// dump and verify the stash. Network - the footer labels the key as
     /// such.
     UmuVerify,
+    /// An owner action from the auth tab, with the passphrase typed for it.
+    AuthOwner {
+        op: OwnerOp,
+        passphrase: Passphrase,
+    },
     /// Misses pane, Enter in id-entry mode: collision-check `id` against
     /// the local database and save it on the entry when it survives.
     UmuAssign {
@@ -542,6 +623,40 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                 Intent::None
             }
             _ => Intent::ConfirmNo,
+        };
+    }
+
+    // The passphrase prompt owns every key while it is up, and echoes none.
+    if app.pass_input.is_some() {
+        return match key.code {
+            KeyCode::Esc => {
+                app.pass_input = None;
+                Intent::None
+            }
+            KeyCode::Backspace => {
+                app.pass_input.as_mut().expect("checked").buffer.pop();
+                Intent::None
+            }
+            KeyCode::Enter => {
+                let prompt = app.pass_input.take().expect("checked");
+                if prompt.buffer.is_empty() {
+                    Intent::None
+                } else {
+                    Intent::AuthOwner {
+                        op: prompt.op,
+                        passphrase: Passphrase(prompt.buffer),
+                    }
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.pass_input = None;
+                Intent::Quit
+            }
+            KeyCode::Char(c) => {
+                app.pass_input.as_mut().expect("checked").buffer.push(c);
+                Intent::None
+            }
+            _ => Intent::None,
         };
     }
 
@@ -779,6 +894,63 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             Some(key) => Intent::UmuDismiss { key },
             None => Intent::None,
         },
+        // The auth tab's owner actions. Each opens the passphrase prompt;
+        // nothing changes until it is confirmed.
+        KeyCode::Char('a') if app.view == View::Auth && app.auth.settings.is_some() => {
+            if let Some(c) = app.selected_client() {
+                if c.status != ClientStatus::Approved {
+                    app.pass_input = Some(PassPrompt {
+                        op: OwnerOp::Approve(c.name.clone()),
+                        buffer: String::new(),
+                    });
+                }
+            }
+            Intent::None
+        }
+        KeyCode::Char('x') if app.view == View::Auth && app.auth.settings.is_some() => {
+            if let Some(c) = app.selected_client() {
+                if !matches!(
+                    c.status,
+                    ClientStatus::Waiting {
+                        replaces: false,
+                        ..
+                    }
+                ) {
+                    app.pass_input = Some(PassPrompt {
+                        op: OwnerOp::Forget(c.name.clone()),
+                        buffer: String::new(),
+                    });
+                }
+            }
+            Intent::None
+        }
+        KeyCode::Char('m') if app.view == View::Auth => {
+            if let Some(mut s) = app.auth.settings {
+                s.registration = match s.registration {
+                    Registration::TrustOnFirstUse => Registration::ExplicitApproval,
+                    Registration::ExplicitApproval => Registration::TrustOnFirstUse,
+                };
+                app.pass_input = Some(PassPrompt {
+                    op: OwnerOp::SetSettings(s),
+                    buffer: String::new(),
+                });
+            }
+            Intent::None
+        }
+        KeyCode::Char('s') if app.view == View::Auth => {
+            if let Some(mut s) = app.auth.settings {
+                s.strategy = match s.strategy {
+                    Strategy::McpEdits => Strategy::Everything,
+                    Strategy::Everything => Strategy::OptIn,
+                    Strategy::OptIn => Strategy::McpEdits,
+                };
+                app.pass_input = Some(PassPrompt {
+                    op: OwnerOp::SetSettings(s),
+                    buffer: String::new(),
+                });
+            }
+            Intent::None
+        }
         KeyCode::Char('r') => Intent::Refresh,
         KeyCode::Tab => {
             let idx = View::ALL.iter().position(|v| *v == app.view).unwrap_or(0);
@@ -945,6 +1117,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         View::Monitor => render_monitor(f, chunks[2], app),
         View::Misses => render_misses(f, chunks[2], app),
         View::Gamedb => render_gamedb(f, chunks[2], app),
+        View::Auth => render_auth(f, chunks[2], app),
+        View::Audit => render_audit(f, chunks[2], app),
     }
     render_output(f, chunks[3], app);
     render_footer(f, chunks[4], app);
@@ -1071,6 +1245,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 /// candidates to pick through - trains nobody to read the footer, so the
 /// entry modes come first and the list states drop their entry verbs.
 fn footer_keys(app: &App) -> &'static str {
+    if app.pass_input.is_some() {
+        return "type the passphrase (hidden) · ⏎ confirm · esc cancel";
+    }
     // The entry modes edit the stash, so both stash tabs open them and both
     // draw the same line while one is up.
     if app.view.edits_misses() {
@@ -1112,6 +1289,11 @@ fn footer_keys(app: &App) -> &'static str {
         }
         // The pane's own verbs, then the matchup verbs - which act on this
         // game's representative stash entry only.
+        View::Auth if app.auth.settings.is_none() => "tab view · q quit",
+        View::Auth => {
+            "↑↓ · tab view · a approve · x forget · m registration mode · s what is recorded · q quit"
+        }
+        View::Audit => "↑↓ · tab view · q quit",
         View::Gamedb => {
             "↑↓ · tab view · ⏎ show entry · f filter · r index (net) · v verify (net) · \
              e export · d directory · on the entry: o lookup (net) · a assign · t title · \
@@ -1381,6 +1563,10 @@ mod tests {
         assert_eq!(app.view, View::Misses);
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.view, View::Gamedb);
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.view, View::Auth);
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.view, View::Audit);
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.view, View::Status);
         assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Intent::Quit);
@@ -2370,6 +2556,172 @@ mod tests {
                 umu_promoted: None,
             },
         )
+    }
+
+    fn auth_app() -> App {
+        use super::super::auth::{ClientRow, Settings};
+        let mut app = App {
+            view: View::Auth,
+            ..App::default()
+        };
+        app.set_auth(AuthView {
+            state: Some(Ok(())),
+            settings: Some(Settings::default()),
+            clients: vec![
+                ClientRow {
+                    name: "beisl-compat".into(),
+                    fingerprint: "aa".into(),
+                    status: ClientStatus::Remembered,
+                },
+                ClientRow {
+                    name: "agent".into(),
+                    fingerprint: "bb".into(),
+                    status: ClientStatus::Waiting {
+                        date: "2026-09-27".into(),
+                        from: "claude".into(),
+                        replaces: false,
+                    },
+                },
+            ],
+            ..AuthView::default()
+        });
+        app
+    }
+
+    fn type_str(app: &mut App, text: &str) {
+        for c in text.chars() {
+            assert_eq!(handle_key(app, key(KeyCode::Char(c))), Intent::None);
+        }
+    }
+
+    #[test]
+    fn an_owner_action_asks_for_the_passphrase_and_owns_the_keyboard() {
+        let mut app = auth_app();
+        assert_eq!(handle_key(&mut app, key(KeyCode::Char('a'))), Intent::None);
+        assert!(app.pass_input.is_some());
+        // q is a passphrase character now, not quit, and Tab does not
+        // switch the view away from a half-typed passphrase.
+        type_str(&mut app, "q");
+        assert_eq!(handle_key(&mut app, key(KeyCode::Tab)), Intent::None);
+        type_str(&mut app, "pw");
+        assert_eq!(app.view, View::Auth);
+        assert_eq!(app.pass_input.as_ref().unwrap().buffer, "qpw");
+        match handle_key(&mut app, key(KeyCode::Enter)) {
+            Intent::AuthOwner { op, passphrase } => {
+                assert_eq!(op, OwnerOp::Approve("beisl-compat".into()));
+                assert_eq!(passphrase.0, "qpw");
+                assert!(!format!("{passphrase:?}").contains("qpw"), "Debug leaks it");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.pass_input.is_none(), "the buffer is gone after Enter");
+    }
+
+    #[test]
+    fn esc_abandons_the_prompt_and_an_empty_passphrase_does_nothing() {
+        let mut app = auth_app();
+        handle_key(&mut app, key(KeyCode::Char('s')));
+        type_str(&mut app, "secret");
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Intent::None);
+        assert!(app.pass_input.is_none());
+        handle_key(&mut app, key(KeyCode::Char('m')));
+        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Intent::None);
+    }
+
+    #[test]
+    fn the_policy_keys_propose_the_next_setting() {
+        use super::super::auth::Settings;
+        let mut app = auth_app();
+        handle_key(&mut app, key(KeyCode::Char('m')));
+        assert_eq!(
+            app.pass_input.as_ref().unwrap().op,
+            OwnerOp::SetSettings(Settings {
+                registration: Registration::ExplicitApproval,
+                strategy: Strategy::McpEdits,
+            })
+        );
+        app.pass_input = None;
+        handle_key(&mut app, key(KeyCode::Char('s')));
+        assert_eq!(
+            app.pass_input.as_ref().unwrap().op,
+            OwnerOp::SetSettings(Settings {
+                registration: Registration::TrustOnFirstUse,
+                strategy: Strategy::Everything,
+            })
+        );
+    }
+
+    #[test]
+    fn forgetting_a_new_waiting_client_is_not_offered() {
+        let mut app = auth_app();
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.selected_client().unwrap().name, "agent");
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        assert!(app.pass_input.is_none(), "nothing on record to forget");
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        assert_eq!(
+            app.pass_input.as_ref().unwrap().op,
+            OwnerOp::Approve("agent".into())
+        );
+    }
+
+    #[test]
+    fn before_init_the_auth_tab_offers_no_owner_actions() {
+        let mut app = App {
+            view: View::Auth,
+            ..App::default()
+        };
+        for c in ['a', 'x', 'm', 's'] {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+            assert!(app.pass_input.is_none(), "{c} opened a prompt");
+        }
+        assert_eq!(footer_keys(&app), "tab view · q quit");
+    }
+
+    fn draw(app: &mut App) -> String {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn the_auth_tab_draws_the_prompt_as_dots_never_the_passphrase() {
+        let mut app = auth_app();
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        type_str(&mut app, "hunter22");
+        let screen = draw(&mut app);
+        assert!(
+            screen.contains("••••••••"),
+            "the prompt shows its length as dots"
+        );
+        assert!(
+            !screen.contains("hunter22"),
+            "the passphrase reached the screen"
+        );
+        assert!(screen.contains("approve beisl-compat"));
+    }
+
+    #[test]
+    fn the_audit_tab_draws_a_real_ledger() {
+        let paths = super::super::auth::test_paths("audit-draw");
+        super::super::auth::fast_init(&paths, "pw");
+        let mut app = App {
+            view: View::Audit,
+            ..App::default()
+        };
+        app.set_auth(super::super::auth::view(&paths));
+        let screen = draw(&mut app);
+        assert!(screen.contains("Ledger started"));
+        assert!(
+            !screen.contains("\"action\""),
+            "raw JSON reached the audit tab"
+        );
+        assert!(screen.contains("Ledger verified"));
+        app.view = View::Auth;
+        assert!(draw(&mut app).contains("No MCP clients yet"));
+        let _ = std::fs::remove_dir_all(&paths.dir);
     }
 
     #[test]

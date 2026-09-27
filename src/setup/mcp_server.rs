@@ -410,6 +410,17 @@ impl Server {
         let approved = match ledger.clients.get(&name) {
             Some(rec) if rec.key == key_hex => rec.approved,
             Some(rec) => {
+                // Parked so the owner can re-approve it: a reinstall or a new
+                // machine changes the key innocently.
+                auth::note_pending(
+                    paths,
+                    &name,
+                    auth::Pending {
+                        key: key_hex.to_string(),
+                        process,
+                        date: today(),
+                    },
+                );
                 return Err(ToolError::new(
                     ErrorReason::ClientKeyMismatch,
                     format!(

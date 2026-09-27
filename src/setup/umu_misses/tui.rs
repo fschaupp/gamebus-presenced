@@ -118,6 +118,16 @@ fn apply_verb(
         Refusal::EmptyId => "Empty id - nothing recorded.".to_string(),
         Refusal::UnknownTarget { target } => format!("Unknown target {target}."),
     })?;
+    // Recorded per the ledger's policy; a broken ledger blocks the edit
+    // here as it does everywhere else, before anything is written.
+    let action = crate::setup::auth::Action::EditMiss {
+        key: key.to_string(),
+        verb: verb.clone(),
+        change: change.clone(),
+    };
+    let prior = serde_json::json!(report.entries().get(key));
+    crate::setup::auth::record_local(crate::setup::auth::Origin::Tui, action, prior)
+        .map_err(|e| format!("{e} Nothing was written."))?;
     report.update(key, |m| *m = edited);
     Ok((title, change))
 }

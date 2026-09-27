@@ -7,9 +7,7 @@ use std::process::ExitCode;
 
 use serde_json::{json, Value};
 
-use super::auth::{
-    self, Action, Actor, AuthPaths, Ledger, LedgerState, Origin, Registration, Settings, Strategy,
-};
+use super::auth::{self, AuthPaths, Ledger, LedgerState, Origin, Registration, Settings, Strategy};
 
 pub fn run(args: &[String]) -> ExitCode {
     let Some(paths) = AuthPaths::default_paths() else {
@@ -33,15 +31,6 @@ pub fn run(args: &[String]) -> ExitCode {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
-    }
-}
-
-fn owner() -> Actor {
-    Actor {
-        origin: Origin::Owner,
-        name: None,
-        key: None,
-        process: auth::process_tree(),
     }
 }
 
@@ -155,51 +144,18 @@ fn approve(paths: &AuthPaths, args: &[&str]) -> Result<(), String> {
     let name = args
         .first()
         .ok_or("Usage: gamebus-setup auth approve <name>")?;
-    let ledger = verified(paths)?;
-    let key = match auth::pending_requests(paths).remove(*name) {
-        Some(p) => p.key,
-        None => {
-            let rec = ledger.clients.get(*name).ok_or_else(|| {
-                format!("No request from {name} is waiting; let it connect once first.")
-            })?;
-            rec.key.clone()
-        }
-    };
-    println!("Approving {name} with key {}.", auth::fingerprint(&key));
-    let owner_key = auth::owner_key(paths, &auth::read_passphrase("Passphrase: ")?)?;
-    let prior = ledger.clients.get(*name).map_or(Value::Null, |r| json!(r));
-    let action = Action::ApproveClient {
-        name: name.to_string(),
-        key,
-    };
-    auth::append(paths, owner(), action, prior, Some(&owner_key)).map_err(|e| e.to_string())?;
-    auth::clear_pending(paths, name);
-    println!("Approved.");
-    Ok(())
+    owner(paths, auth::OwnerOp::Approve(name.to_string()))
 }
 
 fn forget(paths: &AuthPaths, args: &[&str]) -> Result<(), String> {
     let name = args
         .first()
         .ok_or("Usage: gamebus-setup auth forget <name>")?;
-    let ledger = verified(paths)?;
-    let Some(rec) = ledger.clients.get(*name) else {
-        auth::clear_pending(paths, name);
-        return Err(format!("{name} is not on record."));
-    };
-    let owner_key = auth::owner_key(paths, &auth::read_passphrase("Passphrase: ")?)?;
-    let action = Action::ForgetClient {
-        name: name.to_string(),
-    };
-    auth::append(paths, owner(), action, json!(rec), Some(&owner_key))
-        .map_err(|e| e.to_string())?;
-    println!("Forgot {name}. Its next connection is treated as new.");
-    Ok(())
+    owner(paths, auth::OwnerOp::Forget(name.to_string()))
 }
 
 fn set(paths: &AuthPaths, args: &[&str]) -> Result<(), String> {
-    let ledger = verified(paths)?;
-    let mut settings: Settings = ledger.settings;
+    let mut settings: Settings = verified(paths)?.settings;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -219,21 +175,14 @@ fn set(paths: &AuthPaths, args: &[&str]) -> Result<(), String> {
             }
         }
     }
-    if settings == ledger.settings {
-        println!("Nothing to change.");
-        return Ok(());
-    }
-    let owner_key = auth::owner_key(paths, &auth::read_passphrase("Passphrase: ")?)?;
-    let action = Action::SetSettings { settings };
-    auth::append(
-        paths,
-        owner(),
-        action,
-        json!(ledger.settings),
-        Some(&owner_key),
-    )
-    .map_err(|e| e.to_string())?;
-    println!("Policy changed and recorded.");
+    owner(paths, auth::OwnerOp::SetSettings(settings))
+}
+
+/// Ask for the passphrase and run one owner action.
+fn owner(paths: &AuthPaths, op: auth::OwnerOp) -> Result<(), String> {
+    verified(paths)?;
+    let passphrase = auth::read_passphrase("Passphrase: ")?;
+    println!("{}", auth::owner_op(paths, &passphrase, &op)?);
     Ok(())
 }
 
@@ -280,14 +229,14 @@ fn log(paths: &AuthPaths, as_json: bool) -> Result<(), String> {
             .first()
             .map(|p| p.name.as_str())
             .unwrap_or("-");
-        let what = serde_json::to_value(&e.action)
-            .ok()
-            .and_then(|v| v.get("action").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_default();
+        let (what, facts) = auth::describe(e);
         println!(
             "{:>4} {} {:<16} via {:<16} {what}",
             e.seq, e.date, who, from
         );
+        for (label, value) in facts {
+            println!("{:>8}{label}: {value}", "");
+        }
     }
     Ok(())
 }

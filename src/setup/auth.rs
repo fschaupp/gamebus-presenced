@@ -541,10 +541,25 @@ fn unix_now() -> u64 {
 /// to record, so the edit simply proceeds. After it, a missing or unverified
 /// ledger refuses the edit: the policy that would allow it cannot be read.
 pub fn record_local(origin: Origin, action: Action, prior: Value) -> Result<(), AppendError> {
-    let Some(paths) = AuthPaths::default_paths() else {
-        return Ok(());
+    // A unit test must never append to the user's real ledger.
+    let paths = if cfg!(test) {
+        None
+    } else {
+        AuthPaths::default_paths()
     };
-    let ledger = match open(&paths) {
+    match paths {
+        Some(paths) => record_local_at(&paths, origin, action, prior),
+        None => Ok(()),
+    }
+}
+
+fn record_local_at(
+    paths: &AuthPaths,
+    origin: Origin,
+    action: Action,
+    prior: Value,
+) -> Result<(), AppendError> {
+    let ledger = match open(paths) {
         LedgerState::Uninitialized => return Ok(()),
         LedgerState::Missing => return Err(AppendError::Missing),
         LedgerState::Unverified(e) => return Err(AppendError::Unverified(e)),
@@ -571,7 +586,7 @@ pub fn record_local(origin: Origin, action: Action, prior: Value) -> Result<(), 
         key: None,
         process: process_tree(),
     };
-    append(&paths, actor, action, prior, None).map(|_| ())
+    append(paths, actor, action, prior, None).map(|_| ())
 }
 
 /// Create the owner key and a fresh genesis. Refuses when an owner exists.
@@ -782,6 +797,374 @@ pub fn read_passphrase(prompt: &str) -> Result<String, String> {
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
+/// The owner actions, shared by `gamebus-setup auth` and the TUI. Each
+/// derives the owner key from the passphrase (refusing a wrong one) and
+/// appends one owner-signed entry recording what it replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerOp {
+    /// Approve the key waiting under this name: a new client under explicit
+    /// approval, or a changed key after a reinstall. With nothing waiting,
+    /// promotes a first-use registration to approved.
+    Approve(String),
+    Forget(String),
+    SetSettings(Settings),
+}
+
+pub fn owner_op(paths: &AuthPaths, passphrase: &str, op: &OwnerOp) -> Result<String, String> {
+    let ledger = match open(paths) {
+        LedgerState::Ok(l) => l,
+        LedgerState::Uninitialized => {
+            return Err("Auth is not initialised: run `gamebus-setup auth init`.".into())
+        }
+        LedgerState::Missing => {
+            return Err(
+                "The ledger is missing: `gamebus-setup auth reset-ledger` starts a new one.".into(),
+            )
+        }
+        LedgerState::Unverified(e) => return Err(format!("The ledger does not verify ({e}).")),
+    };
+    let owner = Actor {
+        origin: Origin::Owner,
+        name: None,
+        key: None,
+        process: process_tree(),
+    };
+    let (action, prior, done) = match op {
+        OwnerOp::Approve(name) => {
+            let key = match pending_requests(paths).remove(name) {
+                Some(p) => p.key,
+                None => ledger
+                    .clients
+                    .get(name)
+                    .map(|r| r.key.clone())
+                    .ok_or_else(|| {
+                        format!("No request from {name} is waiting; let it connect once first.")
+                    })?,
+            };
+            let prior = ledger
+                .clients
+                .get(name)
+                .map_or(Value::Null, |r| serde_json::json!(r));
+            let done = format!("Approved {name} ({}).", fingerprint(&key));
+            (
+                Action::ApproveClient {
+                    name: name.clone(),
+                    key,
+                },
+                prior,
+                done,
+            )
+        }
+        OwnerOp::Forget(name) => {
+            let rec = ledger
+                .clients
+                .get(name)
+                .ok_or_else(|| format!("{name} is not on record."))?;
+            (
+                Action::ForgetClient { name: name.clone() },
+                serde_json::json!(rec),
+                format!("Forgot {name}; its next connection is treated as new."),
+            )
+        }
+        OwnerOp::SetSettings(settings) => {
+            if *settings == ledger.settings {
+                return Ok("Nothing to change.".into());
+            }
+            (
+                Action::SetSettings {
+                    settings: *settings,
+                },
+                serde_json::json!(ledger.settings),
+                "Policy changed and recorded.".to_string(),
+            )
+        }
+    };
+    let key = owner_key(paths, passphrase)?;
+    append(paths, owner, action, prior, Some(&key)).map_err(|e| e.to_string())?;
+    if let OwnerOp::Approve(name) | OwnerOp::Forget(name) = op {
+        clear_pending(paths, name);
+    }
+    Ok(done)
+}
+
+/// An entry in words: one sentence for what happened, and labelled lines
+/// for only the fields it touched, each with the value it replaced. Shared
+/// by the audit tab and `auth log`.
+pub fn describe(e: &Entry) -> (String, Vec<(&'static str, String)>) {
+    let mut lines: Vec<(&'static str, String)> = Vec::new();
+    let prior = &e.prior;
+    let was = |field: &str| -> String {
+        match prior.get(field) {
+            None | Some(Value::Null) => "unset".to_string(),
+            Some(Value::String(s)) => format!("'{s}'"),
+            Some(v) => v.to_string(),
+        }
+    };
+    let sentence = match &e.action {
+        Action::Genesis {
+            settings, clients, ..
+        } => {
+            lines.push(("Policy", settings_words(*settings)));
+            if !clients.is_empty() {
+                let names: Vec<&str> = clients.keys().map(String::as_str).collect();
+                lines.push(("Carried over", names.join(", ")));
+            }
+            "Ledger started".to_string()
+        }
+        Action::SetSettings { settings } => {
+            lines.push(("Now", settings_words(*settings)));
+            if let Ok(before) = serde_json::from_value::<Settings>(prior.clone()) {
+                lines.push(("Was", settings_words(before)));
+            }
+            "Policy changed".to_string()
+        }
+        Action::ApproveClient { name, key } => {
+            lines.push(("Key", fingerprint(key)));
+            match prior.get("key").and_then(Value::as_str) {
+                Some(old) if old != key => lines.push(("Replaced key", fingerprint(old))),
+                Some(_) => lines.push(("Was", "remembered on first use".into())),
+                None => {}
+            }
+            format!("Approved {name}")
+        }
+        Action::ForgetClient { name } => {
+            if let Some(old) = prior.get("key").and_then(Value::as_str) {
+                lines.push(("Had key", fingerprint(old)));
+            }
+            format!("Forgot {name}")
+        }
+        Action::RegisterClient { name, key } => {
+            lines.push(("Key", fingerprint(key)));
+            format!("{name} remembered on first use")
+        }
+        Action::EditMiss { key, verb, change } => {
+            lines.push(("Entry", key.clone()));
+            if let Some(title) = prior
+                .get("title_override")
+                .and_then(Value::as_str)
+                .or_else(|| prior.get("title").and_then(Value::as_str))
+            {
+                lines.push(("Game", title.to_string()));
+            }
+            let sentence = match verb {
+                MissVerb::Dismiss => {
+                    lines.push(("Dismissed was", was("dismissed")));
+                    "Dismissed an identity miss".to_string()
+                }
+                MissVerb::Undismiss => {
+                    lines.push(("Dismissed was", was("dismissed")));
+                    "Restored an identity miss".to_string()
+                }
+                MissVerb::Promote | MissVerb::Demote => {
+                    lines.push(("Promoted was", was("umu_promoted")));
+                    if matches!(verb, MissVerb::Promote) {
+                        "Promoted into the umu pipeline".to_string()
+                    } else {
+                        "Took the umu promotion back".to_string()
+                    }
+                }
+                MissVerb::SetTitle { title } => {
+                    lines.push(("Title", format!("'{title}'")));
+                    lines.push(("Override was", was("title_override")));
+                    "Corrected the title".to_string()
+                }
+                MissVerb::SetStore { store } => {
+                    lines.push(("Store", store.clone()));
+                    lines.push(("Override was", was("store_override")));
+                    "Corrected the store".to_string()
+                }
+                MissVerb::SetIdentity { store, codename } => {
+                    lines.push(("Codename", codename.clone()));
+                    lines.push(("Codename was", was("codename_override")));
+                    if let Some(st) = store {
+                        lines.push(("Store", st.clone()));
+                    }
+                    "Set the store identity".to_string()
+                }
+                MissVerb::AssignId { id } => {
+                    lines.push(("Umu id", id.clone()));
+                    let before = prior
+                        .pointer("/drafted_id/id")
+                        .and_then(Value::as_str)
+                        .map_or("none".to_string(), |d| format!("'{d}'"));
+                    lines.push(("Draft was", before));
+                    "Assigned a umu id".to_string()
+                }
+                MissVerb::PickEntry {
+                    store,
+                    codename,
+                    umu_id,
+                } => {
+                    lines.push(("Picked", format!("{umu_id} ({store}/{codename})")));
+                    "Picked a umu-database entry".to_string()
+                }
+            };
+            lines.push(("Result", change_words(change)));
+            sentence
+        }
+        Action::EditFinding { key, verb, .. } => {
+            lines.push(("Finding", key.clone()));
+            if let Some(title) = prior.get("title").and_then(Value::as_str) {
+                lines.push(("Game", title.to_string()));
+            }
+            match verb {
+                FindingVerb::Dismiss => {
+                    lines.push(("Dismissed was", was("dismissed")));
+                    "Dismissed a compat finding".to_string()
+                }
+                FindingVerb::Undismiss => {
+                    lines.push(("Dismissed was", was("dismissed")));
+                    "Restored a compat finding".to_string()
+                }
+                FindingVerb::MarkReported { target } => {
+                    let before = prior
+                        .pointer(&format!("/reported/{target}"))
+                        .and_then(Value::as_str)
+                        .map_or("not reported".to_string(), |d| format!("reported {d}"));
+                    lines.push(("Before", before));
+                    format!("Marked reported to {target}")
+                }
+            }
+        }
+        Action::DrainInbox { keys } => {
+            lines.push(("Findings", keys.join(", ")));
+            format!("Took {} finding(s) from the inbox", keys.len())
+        }
+    };
+    (sentence, lines)
+}
+
+fn change_words(c: &MissChange) -> String {
+    match c {
+        MissChange::Dismissed => "dismissed".into(),
+        MissChange::Restored => "restored".into(),
+        MissChange::Promoted => "promoted".into(),
+        MissChange::Demoted => "promotion taken back".into(),
+        MissChange::TitleSet { .. } => "title overridden".into(),
+        MissChange::TitleReset => "back to the resolver's title".into(),
+        MissChange::StoreSet { guessed } => format!("store overridden (daemon guessed {guessed})"),
+        MissChange::StoreReset => "back to the daemon's store guess".into(),
+        MissChange::IdentitySet => "identity set".into(),
+        MissChange::IdAssigned => "id drafted by hand".into(),
+        MissChange::AlreadyInDatabase => "already in the database (launcher-side miss)".into(),
+        MissChange::CrossStoreId => "shares another store's id".into(),
+    }
+}
+
+fn settings_words(s: Settings) -> String {
+    let registration = match s.registration {
+        Registration::TrustOnFirstUse => "new clients remembered on first use",
+        Registration::ExplicitApproval => "new clients need approval",
+    };
+    let strategy = match s.strategy {
+        Strategy::McpEdits => "MCP and CLI edits recorded",
+        Strategy::OptIn => "no edits recorded",
+        Strategy::Everything => "MCP, CLI and TUI edits recorded",
+    };
+    format!("{registration}; {strategy}")
+}
+
+/// Where a client stands, for the TUI's auth tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientStatus {
+    Approved,
+    Remembered,
+    /// A key waiting for the owner: new under explicit approval, or a
+    /// changed key under a name already on record.
+    Waiting {
+        date: String,
+        from: String,
+        replaces: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientRow {
+    pub name: String,
+    pub fingerprint: String,
+    pub status: ClientStatus,
+}
+
+/// Everything the auth and audit tabs show, loaded off the render path.
+#[derive(Debug, Clone, Default)]
+pub struct AuthView {
+    pub dir: String,
+    /// `None` before `auth init`; `Some(Err)` when the ledger is missing or
+    /// does not verify.
+    pub state: Option<Result<(), String>>,
+    pub ledger_id: Option<String>,
+    pub head: Option<String>,
+    pub initialised: Option<String>,
+    pub settings: Option<Settings>,
+    pub clients: Vec<ClientRow>,
+    /// Newest first, with whether each carries an owner signature.
+    pub entries: Vec<(Entry, bool)>,
+}
+
+pub fn view(paths: &AuthPaths) -> AuthView {
+    let mut v = AuthView {
+        dir: paths.dir.display().to_string(),
+        ..AuthView::default()
+    };
+    let state = open(paths);
+    if matches!(state, LedgerState::Uninitialized) {
+        return v;
+    }
+    v.entries = entries(paths).unwrap_or_default();
+    if let Some((genesis, _)) = v.entries.first() {
+        let chain: Vec<&str> = genesis
+            .actor
+            .process
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        v.initialised = Some(format!("{} from {}", genesis.date, chain.join(" <- ")));
+    }
+    v.entries.reverse();
+    let pending = pending_requests(paths);
+    match state {
+        LedgerState::Ok(l) => {
+            v.state = Some(Ok(()));
+            v.ledger_id = Some(l.id);
+            v.head = Some(l.head);
+            v.settings = Some(l.settings);
+            for (name, rec) in &l.clients {
+                v.clients.push(ClientRow {
+                    name: name.clone(),
+                    fingerprint: fingerprint(&rec.key),
+                    status: if rec.approved {
+                        ClientStatus::Approved
+                    } else {
+                        ClientStatus::Remembered
+                    },
+                });
+            }
+            for (name, p) in pending {
+                let replaces = l.clients.contains_key(&name);
+                v.clients.push(ClientRow {
+                    name,
+                    fingerprint: fingerprint(&p.key),
+                    status: ClientStatus::Waiting {
+                        date: p.date,
+                        from: p
+                            .process
+                            .first()
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default(),
+                        replaces,
+                    },
+                });
+            }
+        }
+        LedgerState::Missing => v.state = Some(Err("the ledger is missing".into())),
+        LedgerState::Unverified(e) => {
+            v.state = Some(Err(format!("the ledger does not verify: {e}")))
+        }
+        LedgerState::Uninitialized => unreachable!("returned above"),
+    }
+    v
+}
+
 #[cfg(test)]
 pub(crate) fn test_paths(tag: &str) -> AuthPaths {
     let dir = std::env::temp_dir().join(format!("gamebus-auth-{tag}-{}", std::process::id()));
@@ -978,6 +1361,143 @@ mod tests {
         assert_eq!(
             owner_key(&paths, "wrong").err().as_deref(),
             Some("wrong passphrase")
+        );
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn a_reinstalled_client_is_waiting_until_the_owner_approves_its_new_key() {
+        let paths = test_paths("reinstall");
+        fast_init(&paths, "pw");
+        let reg = Action::RegisterClient {
+            name: "beisl-compat".into(),
+            key: "aa".into(),
+        };
+        append(&paths, client("beisl-compat", "aa"), reg, Value::Null, None).unwrap();
+        // The server parks the new key when it sees the mismatch.
+        note_pending(
+            &paths,
+            "beisl-compat",
+            Pending {
+                key: "bb".into(),
+                process: vec![],
+                date: "2026-09-27".into(),
+            },
+        );
+        let v = view(&paths);
+        assert!(v
+            .clients
+            .iter()
+            .any(|c| matches!(c.status, ClientStatus::Waiting { replaces: true, .. })));
+
+        let op = OwnerOp::Approve("beisl-compat".into());
+        assert_eq!(
+            owner_op(&paths, "nope", &op).err().as_deref(),
+            Some("wrong passphrase")
+        );
+        assert_eq!(
+            state(&paths).clients["beisl-compat"].key,
+            "aa",
+            "a wrong passphrase changed nothing"
+        );
+
+        owner_op(&paths, "pw", &op).unwrap();
+        let l = state(&paths);
+        assert_eq!(l.clients["beisl-compat"].key, "bb");
+        assert!(l.clients["beisl-compat"].approved);
+        assert!(pending_requests(&paths).is_empty());
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn the_view_reads_newest_first_and_names_the_origin() {
+        let paths = test_paths("view");
+        assert!(view(&paths).state.is_none());
+        let key = fast_init(&paths, "pw");
+        let set = OwnerOp::SetSettings(Settings {
+            registration: Registration::TrustOnFirstUse,
+            strategy: Strategy::Everything,
+        });
+        owner_op(&paths, "pw", &set).unwrap();
+        let _ = key;
+        let v = view(&paths);
+        assert_eq!(v.state, Some(Ok(())));
+        assert_eq!(v.entries.len(), 2);
+        assert_eq!(v.entries[0].0.seq, 1, "newest first");
+        assert!(v.entries[0].1, "a policy change is owner-signed");
+        assert!(v.initialised.is_some());
+        assert_eq!(v.settings.unwrap().strategy, Strategy::Everything);
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn local_edits_follow_the_strategy_and_a_broken_ledger_blocks_them() {
+        let paths = test_paths("local");
+        let edit = || Action::EditFinding {
+            key: "steam:1".into(),
+            verb: FindingVerb::Dismiss,
+            change: FindingChange::Dismissed,
+        };
+        // Before init there is nothing to record into; the edit proceeds.
+        record_local_at(&paths, Origin::Cli, edit(), Value::Null).unwrap();
+        fast_init(&paths, "pw");
+        record_local_at(&paths, Origin::Cli, edit(), Value::Null).unwrap();
+        record_local_at(&paths, Origin::Tui, edit(), Value::Null).unwrap();
+        let recorded: Vec<Origin> = entries(&paths)
+            .unwrap()
+            .iter()
+            .skip(1)
+            .map(|(e, _)| e.actor.origin)
+            .collect();
+        assert_eq!(
+            recorded,
+            [Origin::Cli],
+            "the default records the CLI, not the TUI"
+        );
+
+        std::fs::remove_file(paths.ledger()).unwrap();
+        assert!(matches!(
+            record_local_at(&paths, Origin::Tui, edit(), Value::Null),
+            Err(AppendError::Missing)
+        ));
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn entries_read_as_words_with_what_they_replaced() {
+        let paths = test_paths("words");
+        fast_init(&paths, "pw");
+        let reg = Action::RegisterClient {
+            name: "beisl-compat".into(),
+            key: "aa".into(),
+        };
+        append(&paths, client("beisl-compat", "aa"), reg, Value::Null, None).unwrap();
+        let edit = Action::EditMiss {
+            key: "lutris:severed-steel".into(),
+            verb: MissVerb::SetTitle {
+                title: "Severed Steel".into(),
+            },
+            change: MissChange::TitleSet {
+                resolved: Some("ThankYouVeryCool".into()),
+            },
+        };
+        let prior = serde_json::json!({"title": "ThankYouVeryCool", "title_override": null});
+        append(&paths, client("beisl-compat", "aa"), edit, prior, None).unwrap();
+
+        let all = entries(&paths).unwrap();
+        let (what, facts) = describe(&all[2].0);
+        assert_eq!(what, "Corrected the title");
+        let facts: BTreeMap<_, _> = facts.into_iter().collect();
+        assert_eq!(facts["Game"], "ThankYouVeryCool");
+        assert_eq!(facts["Title"], "'Severed Steel'");
+        assert_eq!(facts["Override was"], "unset");
+        assert_eq!(facts["Result"], "title overridden");
+        // Nothing reads as raw JSON.
+        assert!(facts.values().all(|v| !v.starts_with('{')));
+        assert_eq!(describe(&all[0].0).0, "Ledger started");
+        assert_eq!(
+            describe(&all[1].0).0,
+            "beisl-compat remembered on first use"
         );
         let _ = std::fs::remove_dir_all(&paths.dir);
     }

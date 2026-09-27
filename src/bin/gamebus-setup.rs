@@ -236,6 +236,8 @@ enum Msg {
     /// The gamedb pane's rows, the index state and the export directory,
     /// loaded off the render path like the miss list.
     Gamedb(Box<setup::gamedb::GamedbView>),
+    /// The auth and audit tabs' model: ledger state, clients, entries.
+    Auth(Box<setup::auth::AuthView>),
     Done(Action, Vec<actions::StepOutcome>),
     /// A umu flow (verify / assign / pick / store cycle) finished: its log
     /// lines and whether it completed. Clears `busy` and refreshes the pane.
@@ -297,6 +299,7 @@ async fn cmd_tui() -> ExitCode {
     spawn_probe(&tx, &dirs);
     spawn_misses(&tx);
     spawn_gamedb(&tx);
+    spawn_auth(&tx);
 
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -319,10 +322,17 @@ async fn cmd_tui() -> ExitCode {
             _ = monitor_tick.tick(),
                 if matches!(
                     app.view,
-                    ui::View::Monitor | ui::View::Misses | ui::View::Gamedb
+                    ui::View::Monitor
+                        | ui::View::Misses
+                        | ui::View::Gamedb
+                        | ui::View::Auth
+                        | ui::View::Audit
                 ) =>
             {
-                if app.view == ui::View::Gamedb {
+                if matches!(app.view, ui::View::Auth | ui::View::Audit) {
+                    // Clients register and edits land while the tab is open.
+                    spawn_auth(&tx);
+                } else if app.view == ui::View::Gamedb {
                     // The same stash the misses pane watches, folded into
                     // pages - and the same convention: no I/O on the render
                     // path, so it arrives as a message.
@@ -412,6 +422,16 @@ fn spawn_misses(tx: &tokio::sync::mpsc::Sender<Msg>) {
 /// Refresh the gamedb pane: the stash folded into pages, the cached index,
 /// and the configured export directory. Local files only - the pane's `r`
 /// is the one key that reaches the network.
+fn spawn_auth(tx: &tokio::sync::mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let view = setup::auth::AuthPaths::default_paths()
+            .map(|p| setup::auth::view(&p))
+            .unwrap_or_default();
+        let _ = tx.blocking_send(Msg::Auth(Box::new(view)));
+    });
+}
+
 fn spawn_gamedb(tx: &tokio::sync::mpsc::Sender<Msg>) {
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
@@ -590,6 +610,7 @@ async fn handle(
         Msg::Activities(activities) => app.activities = activities,
         Msg::Misses(misses) => app.set_misses(misses),
         Msg::Gamedb(view) => app.set_gamedb(*view),
+        Msg::Auth(view) => app.set_auth(*view),
         Msg::UmuOutcome(lines, ok) => {
             for line in lines {
                 app.log_styled(
@@ -605,6 +626,7 @@ async fn handle(
             // Show what the flow changed without waiting for the next tick.
             spawn_misses(tx);
             spawn_gamedb(tx);
+            spawn_auth(tx);
         }
         Msg::UmuCandidates {
             key,
@@ -860,6 +882,21 @@ async fn handle(
                     spawn_umu_flow(tx, setup::gamedb::tui_fetch);
                 }
                 ui::Intent::GamedbExport { force } => start_gamedb_export(app, tx, force),
+                ui::Intent::AuthOwner { op, passphrase } => {
+                    if app.busy.is_some() {
+                        return;
+                    }
+                    app.busy = Some("deriving the owner key".into());
+                    spawn_umu_flow(tx, move || {
+                        let Some(paths) = setup::auth::AuthPaths::default_paths() else {
+                            return (vec!["No data directory (no HOME).".into()], false);
+                        };
+                        match setup::auth::owner_op(&paths, &passphrase.0, &op) {
+                            Ok(line) => (vec![line], true),
+                            Err(e) => (vec![e], false),
+                        }
+                    });
+                }
                 ui::Intent::GamedbSetDir { dir } => {
                     if app.busy.is_some() {
                         return;
