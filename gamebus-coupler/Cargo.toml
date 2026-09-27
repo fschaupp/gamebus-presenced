@@ -1,0 +1,16 @@
+[package]
+name = "gamebus-coupler"
+version = "0.1.0"
+edition = "2021"
+authors = ["fschaupp <spritzwine.absently488@passinbox.com>"]
+description = "The records, judgements and edit verbs gamebus-setup's front-ends share"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+# serde and serde_json only. A front-end links this crate and nothing else of
+# gamebus, so every dependency here lands in beisl too: no IO, no network, no
+# SQL, no async. serde_json is here for the forward-compat catch-alls, which
+# must hold whatever a newer writer sent.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

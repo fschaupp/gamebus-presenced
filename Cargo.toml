@@ -3,7 +3,7 @@
 # `cargo clippy` at the repo root behave exactly as they did before
 # gamedb-build joined the workspace, and the daemon's dependency tree gains
 # nothing. Reach the builder explicitly with `-p gamedb-build`.
-members = [".", "gamedb-build"]
+members = [".", "gamedb-build", "gamebus-coupler"]
 default-members = ["."]
 
 [package]
@@ -42,6 +42,9 @@ default = ["setup"]
 setup = ["dep:ratatui", "dep:toml_edit", "dep:rusqlite"]
 
 [dependencies]
+# The records, judgements and edit verbs the front-ends share. serde-only by
+# design, so beisl can link it without inheriting this crate's IO.
+gamebus-coupler = { path = "gamebus-coupler" }
 zbus = { version = "4", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

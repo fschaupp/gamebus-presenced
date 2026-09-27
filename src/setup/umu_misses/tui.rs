@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use crate::umu_report::{
-    self, DraftBasis, DraftedId, UmuDb, UmuEntry, UmuReport, Verification, VerificationState,
-};
+use gamebus_coupler::{apply_miss, MissChange, MissVerb, Refusal};
+
+use crate::umu_report::{self, UmuDb, UmuEntry, UmuReport};
 
 use super::verify::{check_assignment, fetch_full_dump, verify};
 use super::{api_base, load_db, Opts};
@@ -90,15 +90,36 @@ pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
         Ok(note) => note,
         Err(e) => return (vec![e], false),
     };
-    report.update(key, |m| {
-        m.drafted_id = Some(DraftedId {
-            id: id.clone(),
-            basis: DraftBasis::Manual,
-            collision_checked: umu_report::today(),
-        });
-    });
+    if let Err(line) = apply_verb(&mut report, key, &MissVerb::AssignId { id: id.clone() }) {
+        return (vec![line], false);
+    }
     report.save();
     (vec![format!("Assigned {id}: {note}")], true)
+}
+
+/// Apply one coupler verb to a stash entry, returning the entry's display
+/// title and what changed, or the line to show instead. The engine's half of
+/// every edit: find the entry, stamp today, word a refusal.
+fn apply_verb(
+    report: &mut UmuReport,
+    key: &str,
+    verb: &MissVerb,
+) -> Result<(String, MissChange), String> {
+    let Some(m) = report.entries().get(key) else {
+        return Err(format!("No stash entry under '{key}' anymore."));
+    };
+    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
+    let mut edited = m.clone();
+    let change = apply_miss(&mut edited, verb, &umu_report::today()).map_err(|r| match r {
+        Refusal::NotAUmuMiss => format!(
+            "{title} never went through umu - a launcher launch has nothing to promote into the umu database."
+        ),
+        Refusal::EmptyTitle => "Empty title - nothing recorded.".to_string(),
+        Refusal::EmptyId => "Empty id - nothing recorded.".to_string(),
+        Refusal::UnknownTarget { target } => format!("Unknown target {target}."),
+    })?;
+    report.update(key, |m| *m = edited);
+    Ok((title, change))
 }
 
 /// One row of the TUI's pick list, tagged with what Enter on it means. The
@@ -287,39 +308,22 @@ fn pick_entry(
     codename: &str,
     umu_id: &str,
 ) -> (Vec<String>, bool) {
-    let Some(m) = report.entries().get(key) else {
-        return (
-            vec![format!("No stash entry under '{key}' anymore.")],
-            false,
-        );
+    let verb = MissVerb::PickEntry {
+        store: store.to_string(),
+        codename: codename.to_string(),
+        umu_id: umu_id.to_string(),
     };
-    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
-    let same_row = m.effective_store().eq_ignore_ascii_case(store)
-        && m.effective_codename()
-            .is_some_and(|c| c.eq_ignore_ascii_case(codename));
-    let (state, line) = if same_row {
-        (
-            VerificationState::AlreadyInDatabase,
-            format!("{title}: already in the database as {umu_id} - the launcher missed, not the database."),
-        )
-    } else {
-        (
-            VerificationState::CrossStoreId,
-            format!("{title}: recorded {umu_id} from the database's {store}/{codename} entry."),
-        )
-    };
-    report.update(key, |m| {
-        m.verification = Some(Verification {
-            state,
-            umu_id: Some(umu_id.to_string()),
-            checked: umu_report::today(),
-            note: Some(format!(
-                "picked from the database's {store}/{codename} entry"
-            )),
-        });
-        m.drafted_id = None;
-    });
-    (vec![line], true)
+    match apply_verb(report, key, &verb) {
+        Ok((title, MissChange::AlreadyInDatabase)) => (
+            vec![format!("{title}: already in the database as {umu_id} - the launcher missed, not the database.")],
+            true,
+        ),
+        Ok((title, _)) => (
+            vec![format!("{title}: recorded {umu_id} from the database's {store}/{codename} entry.")],
+            true,
+        ),
+        Err(line) => (vec![line], false),
+    }
 }
 
 /// The TUI's identity write: a Heroic library pick or an online lookup
@@ -356,35 +360,23 @@ fn set_identity(
     codename: &str,
     source: &str,
 ) -> (Vec<String>, bool) {
-    let Some(m) = report.entries().get(key) else {
-        return (
-            vec![format!("No stash entry under '{key}' anymore.")],
-            false,
-        );
+    let verb = MissVerb::SetIdentity {
+        store: store.map(str::to_string),
+        codename: codename.to_string(),
     };
-    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
-    let guessed = m.store.clone();
-    let store = store.map(str::to_string);
     let mut what = format!("codename {codename}");
-    if let Some(s) = &store {
+    if let Some(s) = store {
         what.push_str(&format!(", store {s}"));
     }
-    report.update(key, |m| {
-        m.codename_override = Some(codename.to_string());
-        // A hand correction never wears a tool's provenance.
-        m.codename_override_source = None;
-        if let Some(s) = &store {
-            // Mirrors the s-cycle: landing on the daemon's own guess means
-            // the entry is back to "guessed", not "corrected to the guess".
-            m.store_override = (*s != guessed).then(|| s.clone());
-        }
-    });
-    (
-        vec![format!(
-            "{title}: {what} from {source} - v verifies with the new identity (net)."
-        )],
-        true,
-    )
+    match apply_verb(report, key, &verb) {
+        Ok((title, _)) => (
+            vec![format!(
+                "{title}: {what} from {source} - v verifies with the new identity (net)."
+            )],
+            true,
+        ),
+        Err(line) => (vec![line], false),
+    }
 }
 
 /// The TUI's title write: the user typed a title (`t`), or a GOG product
@@ -409,26 +401,19 @@ pub(crate) fn tui_set_title(key: &str, title: &str, source: &str) -> (Vec<String
 /// resolution". A title, never a verdict; `v` re-verifies with it.
 fn set_title(report: &mut UmuReport, key: &str, title: &str, source: &str) -> (Vec<String>, bool) {
     let title = title.trim();
-    if title.is_empty() {
-        return (vec!["Empty title - nothing recorded.".to_string()], false);
-    }
-    let Some(m) = report.entries().get(key) else {
-        return (
-            vec![format!("No stash entry under '{key}' anymore.")],
-            false,
-        );
+    let verb = MissVerb::SetTitle {
+        title: title.to_string(),
     };
-    let resolved = m.title.clone();
-    let line = if resolved.as_deref() == Some(title) {
-        report.update(key, |m| m.title_override = None);
-        format!("Title back to the resolver's own: {title}.")
-    } else {
-        report.update(key, |m| m.title_override = Some(title.to_string()));
-        let resolver_note = match resolved.as_deref() {
-            Some(r) => format!("; resolver said '{r}'"),
-            None => "; nothing had resolved one".to_string(),
-        };
-        format!("Title set to '{title}' (from {source}{resolver_note}).")
+    let line = match apply_verb(report, key, &verb) {
+        Ok((_, MissChange::TitleSet { resolved })) => {
+            let resolver_note = match resolved.as_deref() {
+                Some(r) => format!("; resolver said '{r}'"),
+                None => "; nothing had resolved one".to_string(),
+            };
+            format!("Title set to '{title}' (from {source}{resolver_note}).")
+        }
+        Ok(_) => format!("Title back to the resolver's own: {title}."),
+        Err(line) => return (vec![line], false),
     };
     (vec![line], true)
 }
@@ -467,15 +452,20 @@ pub(crate) fn tui_cycle_store(key: &str) -> (Vec<String>, bool) {
         );
     };
     let current = m.effective_store().to_string();
-    let guessed = m.store.clone();
     let idx = KNOWN_STORES.iter().position(|s| *s == current);
     let next = KNOWN_STORES[(idx.map_or(0, |i| i + 1)) % KNOWN_STORES.len()].to_string();
-    let line = if next == guessed {
-        report.update(key, |m| m.store_override = None);
-        format!("Store back to the daemon's guess: {guessed}.")
-    } else {
-        report.update(key, |m| m.store_override = Some(next.clone()));
-        format!("Store set to {next} (daemon guessed {guessed}) - press v to re-verify.")
+    let line = match apply_verb(
+        &mut report,
+        key,
+        &MissVerb::SetStore {
+            store: next.clone(),
+        },
+    ) {
+        Ok((_, MissChange::StoreSet { guessed })) => {
+            format!("Store set to {next} (daemon guessed {guessed}) - press v to re-verify.")
+        }
+        Ok(_) => format!("Store back to the daemon's guess: {next}."),
+        Err(line) => return (vec![line], false),
     };
     report.save();
     (vec![line], true)
@@ -497,13 +487,19 @@ pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
             false,
         );
     };
-    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
-    let line = if m.dismissed.is_some() {
-        report.update(key, |m| m.dismissed = None);
-        format!("{title} restored - back in the list and the exports.")
+    let verb = if m.dismissed.is_some() {
+        MissVerb::Undismiss
     } else {
-        report.update(key, |m| m.dismissed = Some(umu_report::today()));
-        format!("{title} dismissed - kept in the stash, out of the exports (d restores).")
+        MissVerb::Dismiss
+    };
+    let line = match apply_verb(&mut report, key, &verb) {
+        Ok((title, MissChange::Restored)) => {
+            format!("{title} restored - back in the list and the exports.")
+        }
+        Ok((title, _)) => {
+            format!("{title} dismissed - kept in the stash, out of the exports (d restores).")
+        }
+        Err(line) => return (vec![line], false),
     };
     report.save();
     (vec![line], true)
@@ -530,27 +526,19 @@ pub(crate) fn tui_toggle_promote(key: &str) -> (Vec<String>, bool) {
 /// id) never went through umu, so there is nothing to promote - refused
 /// with a line saying so.
 fn toggle_promote(report: &mut UmuReport, key: &str) -> (Vec<String>, bool) {
-    let Some(m) = report.entries().get(key) else {
-        return (
-            vec![format!("No stash entry under '{key}' anymore.")],
-            false,
-        );
-    };
-    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
-    if !m.is_umu_miss() {
-        return (
-            vec![format!(
-                "{title} never went through umu - a launcher launch has nothing to promote into the umu database."
-            )],
-            false,
-        );
-    }
-    let line = if m.umu_promoted.is_some() {
-        report.update(key, |m| m.umu_promoted = None);
-        format!("{title} no longer promoted - a umu candidate only if a protonfix or cross-store match suggests it.")
+    let promoted = report
+        .entries()
+        .get(key)
+        .is_some_and(|m| m.umu_promoted.is_some());
+    let verb = if promoted {
+        MissVerb::Demote
     } else {
-        report.update(key, |m| m.umu_promoted = Some(umu_report::today()));
-        format!("{title} promoted - in the umu exports even without a protonfix or cross-store match (u reverts).")
+        MissVerb::Promote
+    };
+    let line = match apply_verb(report, key, &verb) {
+        Ok((title, MissChange::Demoted)) => format!("{title} no longer promoted - a umu candidate only if a protonfix or cross-store match suggests it."),
+        Ok((title, _)) => format!("{title} promoted - in the umu exports even without a protonfix or cross-store match (u reverts)."),
+        Err(line) => return (vec![line], false),
     };
     (vec![line], true)
 }
@@ -559,6 +547,7 @@ fn toggle_promote(report: &mut UmuReport, key: &str) -> (Vec<String>, bool) {
 mod tests {
     use super::super::{pick_db, pick_report};
     use super::*;
+    use crate::umu_report::{DraftBasis, DraftedId, VerificationState};
 
     /// The `p` pick's local sources are the umu database, the Heroic store
     /// caches, and the Lutris library. Database rows come first; a Lutris

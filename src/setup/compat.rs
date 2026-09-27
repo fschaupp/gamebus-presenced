@@ -68,7 +68,7 @@ use serde_json::Value;
 
 use serde_json::json;
 
-use crate::compat::{CompatFinding, CompatStash, Incoming, Observation, WallKind};
+use crate::compat::{CompatStash, Incoming, Observation, WallKind};
 use crate::endpoints::Endpoints;
 use crate::naming::NamingDb;
 use crate::setup::inbox;
@@ -77,6 +77,7 @@ use crate::setup::protonfix;
 use crate::setup::reports;
 use crate::setup::specs;
 use crate::umu_report::today;
+use gamebus_coupler::{pending_targets, FindingVerb, TARGETS};
 
 /// One finding as a source delivers it. Flat on purpose: the run facts and
 /// the game keys arrive together, and a sender should not have to model this
@@ -645,10 +646,12 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
         let clearing = undismiss.is_some();
-        let day = today();
-        stash.update(key, |f| {
-            f.dismissed = if clearing { None } else { Some(day) };
-        });
+        let verb = if clearing {
+            FindingVerb::Undismiss
+        } else {
+            FindingVerb::Dismiss
+        };
+        stash.apply(key, &verb);
         stash.save();
         if clearing {
             println!("Restored {key} to the review list.");
@@ -660,14 +663,23 @@ pub fn run(args: &[String]) -> ExitCode {
 
     if let Some(key) = reported {
         let Some(target) = target else {
-            eprintln!("--reported needs --target (protondb, awacy, gamedb).");
+            eprintln!("--reported needs --target ({}).", TARGETS.join(", "));
             return ExitCode::FAILURE;
         };
-        if !stash.findings().contains_key(&key) {
-            eprintln!("No finding under {key}.");
-            return ExitCode::FAILURE;
+        match stash.mark_reported(&key, &target) {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                eprintln!(
+                    "Unknown target {target} - one of {}. Nothing was written.",
+                    TARGETS.join(", ")
+                );
+                return ExitCode::FAILURE;
+            }
+            None => {
+                eprintln!("No finding under {key}.");
+                return ExitCode::FAILURE;
+            }
         }
-        stash.mark_reported(&key, &target);
         stash.save();
         println!("Marked {key} reported to {target}.");
         return ExitCode::SUCCESS;
@@ -776,20 +788,6 @@ fn run_export(stash: &CompatStash, target: &str, key: Option<&str>, as_json: boo
     }
     println!("Nothing was submitted. Review, complete, and file it yourself.");
     ExitCode::SUCCESS
-}
-
-/// Targets that still want this finding.
-///
-/// The AreWeAntiCheatYet rule lives here rather than in each caller:
-/// AWACY collects anti-cheat behaviour, and a Wine stub is a Wine bug, not
-/// theirs to carry. beisl's window reads this off `--json` instead of
-/// reimplementing it (its request, 2026-09-05).
-fn pending_targets(f: &CompatFinding) -> Vec<&'static str> {
-    ["protondb", "awacy", "gamedb"]
-        .into_iter()
-        .filter(|t| f.needs(t))
-        .filter(|t| *t != "awacy" || f.wall.is_anti_cheat())
-        .collect()
 }
 
 /// The stash as one JSON object.

@@ -1049,10 +1049,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamebus-coupler"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gamebus-presenced"
 version = "0.4.0"
 dependencies = [
  "discord-rich-presence",
+ "gamebus-coupler",
  "libc",
  "ratatui",
  "rsrpc",
