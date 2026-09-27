@@ -581,7 +581,10 @@ fn an_invalid_store_list_builds_nothing_even_with_the_lint_skipped() {
     })
     .expect_err("an invalid store list must not build, lint or no lint");
     let message = error.to_string();
-    assert!(message.contains("stores.toml does not validate"), "{message}");
+    assert!(
+        message.contains("stores.toml does not validate"),
+        "{message}"
+    );
     assert!(message.contains("\"gog\" names two stores"), "{message}");
     assert!(!scratch.join("out").join("identities.json").exists());
 }
