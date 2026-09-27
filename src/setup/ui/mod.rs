@@ -155,11 +155,21 @@ pub struct Pick {
     pub stale: Option<String>,
 }
 
-/// A passphrase being typed for one owner action. Never echoed; the buffer
-/// is dropped the moment Enter or Esc ends the mode.
+/// A passphrase being typed. Never echoed; the buffer is dropped the moment
+/// Enter or Esc ends the mode.
 pub struct PassPrompt {
-    pub op: OwnerOp,
+    pub op: PromptOp,
     pub buffer: String,
+}
+
+/// What the passphrase prompt is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptOp {
+    Owner(OwnerOp),
+    /// `auth init`, first entry of the new passphrase.
+    NewPassphrase,
+    /// `auth init`, the confirmation; holds the first entry.
+    ConfirmPassphrase(Passphrase),
 }
 
 /// A passphrase in flight to the owner action. Its `Debug` never prints it.
@@ -526,6 +536,10 @@ pub enum Intent {
         op: OwnerOp,
         passphrase: Passphrase,
     },
+    /// `auth init` from the auth tab, the new passphrase typed twice.
+    AuthInit {
+        passphrase: Passphrase,
+    },
     /// Misses pane, Enter in id-entry mode: collision-check `id` against
     /// the local database and save it on the entry when it survives.
     UmuAssign {
@@ -640,11 +654,30 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             KeyCode::Enter => {
                 let prompt = app.pass_input.take().expect("checked");
                 if prompt.buffer.is_empty() {
-                    Intent::None
-                } else {
-                    Intent::AuthOwner {
-                        op: prompt.op,
+                    return Intent::None;
+                }
+                match prompt.op {
+                    PromptOp::Owner(op) => Intent::AuthOwner {
+                        op,
                         passphrase: Passphrase(prompt.buffer),
+                    },
+                    PromptOp::NewPassphrase if prompt.buffer.chars().count() < 8 => {
+                        app.log("Use at least 8 characters; nothing was created.");
+                        Intent::None
+                    }
+                    PromptOp::NewPassphrase => {
+                        app.pass_input = Some(PassPrompt {
+                            op: PromptOp::ConfirmPassphrase(Passphrase(prompt.buffer)),
+                            buffer: String::new(),
+                        });
+                        Intent::None
+                    }
+                    PromptOp::ConfirmPassphrase(first) if first.0 == prompt.buffer => {
+                        Intent::AuthInit { passphrase: first }
+                    }
+                    PromptOp::ConfirmPassphrase(_) => {
+                        app.log("The two entries differ; nothing was created.");
+                        Intent::None
                     }
                 }
             }
@@ -894,13 +927,22 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
             Some(key) => Intent::UmuDismiss { key },
             None => Intent::None,
         },
+        // Setting up auth from here, like `gamebus-setup auth init`: the
+        // TUI's own edits go through MCP and need it.
+        KeyCode::Char('i') if app.view == View::Auth && app.auth.state.is_none() => {
+            app.pass_input = Some(PassPrompt {
+                op: PromptOp::NewPassphrase,
+                buffer: String::new(),
+            });
+            Intent::None
+        }
         // The auth tab's owner actions. Each opens the passphrase prompt;
         // nothing changes until it is confirmed.
         KeyCode::Char('a') if app.view == View::Auth && app.auth.settings.is_some() => {
             if let Some(c) = app.selected_client() {
                 if c.status != ClientStatus::Approved {
                     app.pass_input = Some(PassPrompt {
-                        op: OwnerOp::Approve(c.name.clone()),
+                        op: PromptOp::Owner(OwnerOp::Approve(c.name.clone())),
                         buffer: String::new(),
                     });
                 }
@@ -917,7 +959,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                     }
                 ) {
                     app.pass_input = Some(PassPrompt {
-                        op: OwnerOp::Forget(c.name.clone()),
+                        op: PromptOp::Owner(OwnerOp::Forget(c.name.clone())),
                         buffer: String::new(),
                     });
                 }
@@ -931,7 +973,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                     Registration::ExplicitApproval => Registration::TrustOnFirstUse,
                 };
                 app.pass_input = Some(PassPrompt {
-                    op: OwnerOp::SetSettings(s),
+                    op: PromptOp::Owner(OwnerOp::SetSettings(s)),
                     buffer: String::new(),
                 });
             }
@@ -945,7 +987,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Intent {
                     Strategy::OptIn => Strategy::McpEdits,
                 };
                 app.pass_input = Some(PassPrompt {
-                    op: OwnerOp::SetSettings(s),
+                    op: PromptOp::Owner(OwnerOp::SetSettings(s)),
                     buffer: String::new(),
                 });
             }
@@ -1289,6 +1331,7 @@ fn footer_keys(app: &App) -> &'static str {
         }
         // The pane's own verbs, then the matchup verbs - which act on this
         // game's representative stash entry only.
+        View::Auth if app.auth.state.is_none() => "i set up auth · tab view · q quit",
         View::Auth if app.auth.settings.is_none() => "tab view · q quit",
         View::Auth => {
             "↑↓ · tab view · a approve · x forget · m registration mode · s what is recorded · q quit"
@@ -2635,19 +2678,19 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('m')));
         assert_eq!(
             app.pass_input.as_ref().unwrap().op,
-            OwnerOp::SetSettings(Settings {
+            PromptOp::Owner(OwnerOp::SetSettings(Settings {
                 registration: Registration::ExplicitApproval,
                 strategy: Strategy::McpEdits,
-            })
+            }))
         );
         app.pass_input = None;
         handle_key(&mut app, key(KeyCode::Char('s')));
         assert_eq!(
             app.pass_input.as_ref().unwrap().op,
-            OwnerOp::SetSettings(Settings {
+            PromptOp::Owner(OwnerOp::SetSettings(Settings {
                 registration: Registration::TrustOnFirstUse,
                 strategy: Strategy::Everything,
-            })
+            }))
         );
     }
 
@@ -2661,7 +2704,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('a')));
         assert_eq!(
             app.pass_input.as_ref().unwrap().op,
-            OwnerOp::Approve("agent".into())
+            PromptOp::Owner(OwnerOp::Approve("agent".into()))
         );
     }
 
@@ -2675,7 +2718,7 @@ mod tests {
             handle_key(&mut app, key(KeyCode::Char(c)));
             assert!(app.pass_input.is_none(), "{c} opened a prompt");
         }
-        assert_eq!(footer_keys(&app), "tab view · q quit");
+        assert_eq!(footer_keys(&app), "i set up auth · tab view · q quit");
     }
 
     fn draw(app: &mut App) -> String {

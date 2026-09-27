@@ -47,6 +47,10 @@ pub struct ServerSpec {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    /// Set on the child on top of ours. Empty in production; tests point a
+    /// server at a scratch directory this way without touching our own
+    /// environment.
+    pub env: Vec<(String, String)>,
 }
 
 impl ServerSpec {
@@ -58,6 +62,7 @@ impl ServerSpec {
             name: "beisl".into(),
             command,
             args: Vec::new(),
+            env: Vec::new(),
         }
     }
 }
@@ -69,6 +74,27 @@ pub struct Client {
     stdin: ChildStdin,
     lines: Receiver<String>,
     next_id: u64,
+    /// The server's `initialize` result: its `_meta` carries the challenge
+    /// a client signs to authenticate.
+    init: Value,
+}
+
+/// Why a typed call failed. A refusal carries the server's reason, which has
+/// one cure; a transport fault (a dead pipe, a timeout, an unreadable
+/// answer) has none, and a front-end must not offer one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallError {
+    Refused(gamebus_coupler::ToolError),
+    Transport(String),
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(e) => f.write_str(&e.message),
+            Self::Transport(e) => f.write_str(e),
+        }
+    }
 }
 
 impl Client {
@@ -78,8 +104,14 @@ impl Client {
     /// complains should complain where the user can see it, and this tool has
     /// no business swallowing another program's diagnostics.
     pub fn start(spec: ServerSpec) -> Result<Self, String> {
+        Self::start_as(spec, "gamebus-setup")
+    }
+
+    /// Start the server, introducing ourselves as `label` in `clientInfo`.
+    pub fn start_as(spec: ServerSpec, label: &str) -> Result<Self, String> {
         let mut child = Command::new(&spec.command)
             .args(&spec.args)
+            .envs(spec.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -107,18 +139,19 @@ impl Client {
             stdin,
             lines,
             next_id: 0,
+            init: Value::Null,
         };
-        client.handshake()?;
+        client.handshake(label)?;
         Ok(client)
     }
 
-    fn handshake(&mut self) -> Result<(), String> {
-        self.request(
+    fn handshake(&mut self, label: &str) -> Result<(), String> {
+        self.init = self.request(
             "initialize",
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": { "name": "gamebus-setup", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": label, "version": env!("CARGO_PKG_VERSION") },
             }),
         )?;
         // A notification: no id, and by definition no response to wait for.
@@ -138,6 +171,51 @@ impl Client {
         let result = self.request("tools/call", json!({ "name": tool, "arguments": args }))?;
         let text = tool_text(&result).map_err(|e| format!("{tool}: {e}"))?;
         serde_json::from_str(&text).map_err(|e| format!("{tool}: result is not JSON: {e}"))
+    }
+
+    /// Call a tool and return its JSON result, or the typed reason it failed.
+    pub fn call_tool(&mut self, tool: &str, args: Value) -> Result<Value, CallError> {
+        let result =
+            match self.request_raw("tools/call", json!({ "name": tool, "arguments": args }))? {
+                Ok(result) => result,
+                Err(error) => return Err(rpc_refusal(&error)),
+            };
+        let is_error = result.get("isError").and_then(Value::as_bool) == Some(true);
+        let text =
+            tool_text_any(&result).map_err(|e| CallError::Transport(format!("{tool}: {e}")))?;
+        if is_error {
+            return Err(match serde_json::from_str(&text) {
+                Ok(refusal) => CallError::Refused(refusal),
+                Err(_) => CallError::Transport(format!("{tool}: {text}")),
+            });
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| CallError::Transport(format!("{tool}: result is not JSON: {e}")))
+    }
+
+    /// Prove this client's key against the challenge `initialize` handed out
+    /// (gamebus-setup's own server). The key signs the raw challenge bytes.
+    pub fn authenticate(
+        &mut self,
+        name: &str,
+        key: &ed25519_dalek::SigningKey,
+    ) -> Result<Value, CallError> {
+        use ed25519_dalek::Signer;
+        let challenge = self
+            .init
+            .pointer("/_meta/gamebus~1challenge")
+            .and_then(Value::as_str)
+            .and_then(super::auth::unhex)
+            .ok_or_else(|| CallError::Transport("the server offered no challenge".into()))?;
+        let params = json!({
+            "name": name,
+            "public_key": super::auth::hex(key.verifying_key().as_bytes()),
+            "signature": super::auth::hex(&key.sign(&challenge).to_bytes()),
+        });
+        match self.request_raw("gamebus/authenticate", params)? {
+            Ok(result) => Ok(result),
+            Err(error) => Err(rpc_refusal(&error)),
+        }
     }
 
     /// The tool names this server offers, for a capability check before use.
@@ -161,6 +239,27 @@ impl Client {
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        match self.request_raw(method, params) {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error)) => Err(format!(
+                "server error: {}",
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error")
+            )),
+            Err(CallError::Transport(e))
+            | Err(CallError::Refused(gamebus_coupler::ToolError { message: e, .. })) => Err(e),
+        }
+    }
+
+    /// One request: the outer `Err` is the transport, the inner one the
+    /// server's JSON-RPC error object.
+    fn request_raw(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<Result<Value, Value>, CallError> {
         self.next_id += 1;
         let id = self.next_id;
         self.send(&json!({
@@ -168,7 +267,8 @@ impl Client {
             "id": id,
             "method": method,
             "params": params,
-        }))?;
+        }))
+        .map_err(CallError::Transport)?;
 
         // Skip anything that is not the response to this id: a server may
         // interleave notifications of its own, which are not ours to read.
@@ -176,20 +276,20 @@ impl Client {
             let line = match self.lines.recv_timeout(CALL_TIMEOUT) {
                 Ok(line) => line,
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!(
+                    return Err(CallError::Transport(format!(
                         "{} did not answer {method} in time",
                         self.spec.name
-                    ))
+                    )))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(format!(
+                    return Err(CallError::Transport(format!(
                         "{} exited before answering {method}",
                         self.spec.name
-                    ))
+                    )))
                 }
             };
             match response_for(&line, id) {
-                Some(result) => return result,
+                Some(result) => return Ok(result),
                 None => continue,
             }
         }
@@ -218,19 +318,42 @@ impl Drop for Client {
 /// `None` means "not ours, keep reading" - a notification, another id, or a
 /// line that is not JSON at all. `Some` carries the result or the server's
 /// error. Pure, so the protocol rules are testable without a process.
-fn response_for(line: &str, id: u64) -> Option<Result<Value, String>> {
+fn response_for(line: &str, id: u64) -> Option<Result<Value, Value>> {
     let msg: Value = serde_json::from_str(line).ok()?;
     if msg.get("id").and_then(Value::as_u64) != Some(id) {
         return None;
     }
     if let Some(error) = msg.get("error") {
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        return Some(Err(format!("server error: {message}")));
+        return Some(Err(error.clone()));
     }
     Some(Ok(msg.get("result").cloned().unwrap_or(Value::Null)))
+}
+
+/// A JSON-RPC error: typed when its `data` is a ToolError (gamebus-setup's
+/// own server), a transport fault otherwise.
+fn rpc_refusal(error: &Value) -> CallError {
+    match error.get("data").cloned().map(serde_json::from_value) {
+        Some(Ok(refusal)) => CallError::Refused(refusal),
+        _ => CallError::Transport(format!(
+            "server error: {}",
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        )),
+    }
+}
+
+/// The text block of a result, whether or not it is an error.
+fn tool_text_any(result: &Value) -> Result<String, String> {
+    result
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or("result carried no content")?
+        .iter()
+        .find_map(|c| c.get("text").and_then(Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| "result carried no text block".to_string())
 }
 
 /// Unwrap MCP's content envelope to the single text block inside it.
@@ -279,7 +402,10 @@ mod tests {
         let line =
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
         let e = response_for(line, 1).unwrap().unwrap_err();
-        assert!(e.contains("method not found"), "{e}");
+        assert_eq!(e["message"], "method not found");
+        assert!(
+            matches!(rpc_refusal(&e), CallError::Transport(t) if t.contains("method not found"))
+        );
     }
 
     #[test]

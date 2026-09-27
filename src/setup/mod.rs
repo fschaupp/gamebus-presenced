@@ -24,6 +24,7 @@ pub mod protonfix;
 pub mod reports;
 pub mod specs;
 pub mod status;
+pub mod tui_client;
 pub mod ui;
 pub mod umu_misses;
 pub mod units;

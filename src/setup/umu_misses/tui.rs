@@ -2,11 +2,18 @@
 
 use std::time::Duration;
 
-use gamebus_coupler::{apply_miss, MissChange, MissVerb, Refusal};
+#[cfg(test)]
+use gamebus_coupler::{apply_miss, Refusal};
+use gamebus_coupler::{ErrorReason, MissChange, MissRow, MissVerb};
+use serde_json::json;
 
-use crate::umu_report::{self, UmuDb, UmuEntry, UmuReport};
+use crate::setup::mcp::CallError;
+use crate::setup::tui_client::with_session;
+#[cfg(test)]
+use crate::umu_report;
+use crate::umu_report::{Miss, UmuDb, UmuEntry, UmuReport};
 
-use super::verify::{check_assignment, fetch_full_dump, verify};
+use super::verify::{fetch_full_dump, verify};
 use super::{api_base, load_db, Opts};
 use super::{EgsBuild, EgsOffer, GogProduct};
 
@@ -54,82 +61,135 @@ pub(crate) fn tui_fetch_and_verify() -> (Vec<String>, bool) {
     }
 }
 
-/// The TUI's manual id assignment: validate the shape, collision-check
-/// against the local database (mandatory - no database, no assignment),
-/// then store it as a [`DraftBasis::Manual`] draft on the entry.
+/// The TUI's manual id assignment. The server validates the shape and
+/// collision-checks it against the local database (no database, no
+/// assignment) before it stores a [`DraftBasis::Manual`] draft.
+///
+/// [`DraftBasis::Manual`]: crate::umu_report::DraftBasis::Manual
 pub(crate) fn tui_assign_id(key: &str, id: &str) -> (Vec<String>, bool) {
-    let id = id.trim().to_lowercase();
-    let mut report = UmuReport::load_for_annotations();
-    if let Some(e) = report.load_error() {
-        return (vec![e.to_string()], false);
-    }
-    let Some(title) = report
-        .entries()
-        .get(key)
-        .map(|m| m.effective_title().map(str::to_string))
-    else {
-        return (
-            vec![format!("No stash entry under '{key}' anymore.")],
-            false,
-        );
-    };
-    let db = match load_db(&Opts::none()) {
-        Ok(Some(db)) => db,
-        Ok(None) => {
-            return (
-                vec![
-                    "No local database to collision-check against - press v to fetch it first."
-                        .to_string(),
-                ],
-                false,
-            );
-        }
-        Err(e) => return (vec![e], false),
-    };
-    let note = match check_assignment(&db, title.as_deref(), &id) {
-        Ok(note) => note,
-        Err(e) => return (vec![e], false),
-    };
-    if let Err(line) = apply_verb(&mut report, key, &MissVerb::AssignId { id: id.clone() }) {
-        return (vec![line], false);
-    }
-    report.save();
-    (vec![format!("Assigned {id}: {note}")], true)
+    assign_id(&mut McpEditor, key, id)
 }
 
-/// Apply one coupler verb to a stash entry, returning the entry's display
-/// title and what changed, or the line to show instead. The engine's half of
-/// every edit: find the entry, stamp today, word a refusal.
-fn apply_verb(
-    report: &mut UmuReport,
-    key: &str,
-    verb: &MissVerb,
-) -> Result<(String, MissChange), String> {
-    let Some(m) = report.entries().get(key) else {
-        return Err(format!("No stash entry under '{key}' anymore."));
+fn assign_id(editor: &mut impl Editor, key: &str, id: &str) -> (Vec<String>, bool) {
+    let id = id.trim().to_lowercase();
+    match editor.apply(key, &MissVerb::AssignId { id: id.clone() }) {
+        Ok(done) => {
+            let note = done.note.map(|n| format!(": {n}")).unwrap_or_default();
+            (vec![format!("Assigned {id}{note}")], true)
+        }
+        Err(line) => (vec![line], false),
+    }
+}
+
+/// What an applied edit came back with.
+pub(crate) struct Applied {
+    /// The entry's display title after the edit.
+    title: String,
+    change: MissChange,
+    /// The engine's remark, when it had one (an assigned id's check).
+    note: Option<String>,
+}
+
+/// Where the TUI's edits go. In the TUI it is the MCP session, the same
+/// surface every client uses; the tests drive an in-memory stash that
+/// applies the coupler's verbs directly, so the flows and their wording are
+/// tested without a process.
+pub(crate) trait Editor {
+    fn get(&mut self, key: &str) -> Result<Miss, String>;
+    fn apply(&mut self, key: &str, verb: &MissVerb) -> Result<Applied, String>;
+}
+
+/// The TUI's editor: `gamebus-setup mcp` as a child, see
+/// [`crate::setup::tui_client`].
+pub(crate) struct McpEditor;
+
+impl Editor for McpEditor {
+    fn get(&mut self, key: &str) -> Result<Miss, String> {
+        let row =
+            with_session(|s| s.read("get_miss", json!({"key": key}))).map_err(|e| cure(e, key))?;
+        serde_json::from_value::<MissRow>(row)
+            .map(|r| r.miss)
+            .map_err(|e| format!("gamebus-setup mcp answered an unreadable miss: {e}"))
+    }
+
+    fn apply(&mut self, key: &str, verb: &MissVerb) -> Result<Applied, String> {
+        let answer = with_session(|s| s.edit("apply_miss", json!({"key": key, "verb": verb})))
+            .map_err(|e| cure(e, key))?;
+        let change: MissChange = serde_json::from_value(answer["change"].clone())
+            .map_err(|e| format!("gamebus-setup mcp answered an unreadable change: {e}"))?;
+        let row: MissRow = serde_json::from_value(answer["row"].clone())
+            .map_err(|e| format!("gamebus-setup mcp answered an unreadable miss: {e}"))?;
+        Ok(Applied {
+            title: row
+                .miss
+                .effective_title()
+                .unwrap_or("(unresolved)")
+                .to_string(),
+            change,
+            note: answer["note"].as_str().map(str::to_string),
+        })
+    }
+}
+
+/// A failed call as the line the TUI shows, with the cure a TUI user can
+/// reach from here.
+fn cure(e: CallError, key: &str) -> String {
+    let CallError::Refused(refusal) = e else {
+        return format!("gamebus-setup mcp: {e}");
     };
-    let title = m.effective_title().unwrap_or("(unresolved)").to_string();
-    let mut edited = m.clone();
-    let change = apply_miss(&mut edited, verb, &umu_report::today()).map_err(|r| match r {
-        Refusal::NotAUmuMiss => format!(
-            "{title} never went through umu - a launcher launch has nothing to promote into the umu database."
+    match refusal.reason {
+        ErrorReason::NotFound => format!("No stash entry under '{key}' anymore."),
+        ErrorReason::AuthUninitialized => {
+            "Editing needs auth first: press i on the auth tab to set it up.".into()
+        }
+        ErrorReason::ClientUnapproved => {
+            "This TUI (gamebus-tui) is waiting for your approval: press a on the auth tab.".into()
+        }
+        ErrorReason::ClientKeyMismatch => {
+            "This TUI's key is not the one on record: approve the new one on the auth tab.".into()
+        }
+        ErrorReason::LedgerMissing | ErrorReason::LedgerUnverified => format!(
+            "{} Every edit is blocked until `gamebus-setup auth reset-ledger`.",
+            refusal.message
         ),
-        Refusal::EmptyTitle => "Empty title - nothing recorded.".to_string(),
-        Refusal::EmptyId => "Empty id - nothing recorded.".to_string(),
-        Refusal::UnknownTarget { target } => format!("Unknown target {target}."),
-    })?;
-    // Recorded per the ledger's policy; a broken ledger blocks the edit
-    // here as it does everywhere else, before anything is written.
-    let action = crate::setup::auth::Action::EditMiss {
-        key: key.to_string(),
-        verb: verb.clone(),
-        change: change.clone(),
-    };
-    let prior = serde_json::json!(report.entries().get(key));
-    crate::setup::auth::record_local(crate::setup::auth::Origin::Tui, action, prior)
-        .map_err(|e| format!("{e} Nothing was written."))?;
-    report.update(key, |m| *m = edited);
-    Ok((title, change))
+        _ => refusal.message,
+    }
+}
+
+#[cfg(test)]
+impl Editor for UmuReport {
+    fn get(&mut self, key: &str) -> Result<Miss, String> {
+        self.entries()
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("No stash entry under '{key}' anymore."))
+    }
+
+    fn apply(&mut self, key: &str, verb: &MissVerb) -> Result<Applied, String> {
+        let mut edited = self.get(key)?;
+        let before = edited
+            .effective_title()
+            .unwrap_or("(unresolved)")
+            .to_string();
+        let change = apply_miss(&mut edited, verb, &umu_report::today()).map_err(|r| match r {
+            Refusal::NotAUmuMiss => format!(
+                "{before} never went through umu - a launcher launch has nothing to promote into the umu database."
+            ),
+            Refusal::EmptyTitle => "Empty title - nothing recorded.".to_string(),
+            Refusal::EmptyId => "Empty id - nothing recorded.".to_string(),
+            Refusal::UnknownTarget { target } => format!("Unknown target {target}."),
+        })?;
+        let title = edited
+            .effective_title()
+            .unwrap_or("(unresolved)")
+            .to_string();
+        self.update(key, |m| *m = edited);
+        Ok(Applied {
+            title,
+            change,
+            note: None,
+        })
+    }
 }
 
 /// One row of the TUI's pick list, tagged with what Enter on it means. The
@@ -285,34 +345,23 @@ fn cache_staleness() -> Option<String> {
 }
 
 /// The TUI's pick: the user chose a database entry as "this game IS that
-/// entry" - recorded as the verification verdict, no network. Same shape as
-/// [`tui_assign_id`]; the decision itself lives in [`pick_entry`].
+/// entry" - recorded as the verification verdict, no network. The decision
+/// itself lives in [`pick_entry`].
 pub(crate) fn tui_pick_entry(
     key: &str,
     store: &str,
     codename: &str,
     umu_id: &str,
 ) -> (Vec<String>, bool) {
-    let mut report = UmuReport::load_for_annotations();
-    if let Some(e) = report.load_error() {
-        return (vec![e.to_string()], false);
-    }
-    let (lines, ok) = pick_entry(&mut report, key, store, codename, umu_id);
-    if ok {
-        report.save();
-    }
-    (lines, ok)
+    pick_entry(&mut McpEditor, key, store, codename, umu_id)
 }
 
 /// Record a picked database entry on a miss. A pick whose store+codename
 /// exactly equals the miss's own launch (case-insensitive) means the row
-/// already exists - a launcher-side miss, [`AlreadyInDatabase`]; anything
-/// else is the cross-store verdict carrying the picked id. The picked id
-/// supersedes any drafted one, so the draft is cleared either way.
-///
-/// [`AlreadyInDatabase`]: VerificationState::AlreadyInDatabase
+/// already exists - a launcher-side miss; anything else is the cross-store
+/// verdict carrying the picked id. The picked id supersedes any drafted one.
 fn pick_entry(
-    report: &mut UmuReport,
+    editor: &mut impl Editor,
     key: &str,
     store: &str,
     codename: &str,
@@ -323,12 +372,16 @@ fn pick_entry(
         codename: codename.to_string(),
         umu_id: umu_id.to_string(),
     };
-    match apply_verb(report, key, &verb) {
-        Ok((title, MissChange::AlreadyInDatabase)) => (
+    match editor.apply(key, &verb) {
+        Ok(Applied {
+            title,
+            change: MissChange::AlreadyInDatabase,
+            ..
+        }) => (
             vec![format!("{title}: already in the database as {umu_id} - the launcher missed, not the database.")],
             true,
         ),
-        Ok((title, _)) => (
+        Ok(Applied { title, .. }) => (
             vec![format!("{title}: recorded {umu_id} from the database's {store}/{codename} entry.")],
             true,
         ),
@@ -337,34 +390,21 @@ fn pick_entry(
 }
 
 /// The TUI's identity write: a Heroic library pick or an online lookup
-/// established what the game IS on its store. Same shape as
-/// [`tui_pick_entry`]; the decision lives in [`set_identity`].
+/// established what the game IS on its store.
 pub(crate) fn tui_set_identity(
     key: &str,
     store: Option<&str>,
     codename: &str,
     source: &str,
 ) -> (Vec<String>, bool) {
-    let mut report = UmuReport::load_for_annotations();
-    if let Some(e) = report.load_error() {
-        return (vec![e.to_string()], false);
-    }
-    let (lines, ok) = set_identity(&mut report, key, store, codename, source);
-    if ok {
-        report.save();
-    }
-    (lines, ok)
+    set_identity(&mut McpEditor, key, store, codename, source)
 }
 
-/// Record a store identity on a miss: `codename_override`, plus
-/// `store_override` when the pick names a store (a library pick does; an
-/// online lookup already ran under the miss's effective store). Both are
-/// annotation-half, so a daemon write never reverts them. Deliberately NOT
-/// a verification verdict: knowing what the game is says nothing about
-/// whether the database has it - a later `v` verifies with the new
-/// identity.
+/// Record a store identity on a miss. Deliberately NOT a verification
+/// verdict: knowing what the game is says nothing about whether the
+/// database has it - a later `v` verifies with the new identity.
 fn set_identity(
-    report: &mut UmuReport,
+    editor: &mut impl Editor,
     key: &str,
     store: Option<&str>,
     codename: &str,
@@ -378,8 +418,8 @@ fn set_identity(
     if let Some(s) = store {
         what.push_str(&format!(", store {s}"));
     }
-    match apply_verb(report, key, &verb) {
-        Ok((title, _)) => (
+    match editor.apply(key, &verb) {
+        Ok(Applied { title, .. }) => (
             vec![format!(
                 "{title}: {what} from {source} - v verifies with the new identity (net)."
             )],
@@ -390,32 +430,28 @@ fn set_identity(
 }
 
 /// The TUI's title write: the user typed a title (`t`), or a GOG product
-/// lookup answered with the store's own. Same shape as [`tui_set_identity`];
-/// the decision lives in [`set_title`].
+/// lookup answered with the store's own.
 pub(crate) fn tui_set_title(key: &str, title: &str, source: &str) -> (Vec<String>, bool) {
-    let mut report = UmuReport::load_for_annotations();
-    if let Some(e) = report.load_error() {
-        return (vec![e.to_string()], false);
-    }
-    let (lines, ok) = set_title(&mut report, key, title, source);
-    if ok {
-        report.save();
-    }
-    (lines, ok)
+    set_title(&mut McpEditor, key, title, source)
 }
 
-/// Record a title correction on a miss: `title_override`, annotation-half
-/// like the other overrides, so a daemon write never reverts it. Entering
-/// the daemon's own resolved title clears the override instead of storing a
-/// copy - mirrors the s-cycle: back to "resolved", not "corrected to the
-/// resolution". A title, never a verdict; `v` re-verifies with it.
-fn set_title(report: &mut UmuReport, key: &str, title: &str, source: &str) -> (Vec<String>, bool) {
+/// Record a title correction. Entering the daemon's own resolved title
+/// clears the override instead of storing a copy. A title, never a verdict.
+fn set_title(
+    editor: &mut impl Editor,
+    key: &str,
+    title: &str,
+    source: &str,
+) -> (Vec<String>, bool) {
     let title = title.trim();
     let verb = MissVerb::SetTitle {
         title: title.to_string(),
     };
-    let line = match apply_verb(report, key, &verb) {
-        Ok((_, MissChange::TitleSet { resolved })) => {
+    let line = match editor.apply(key, &verb) {
+        Ok(Applied {
+            change: MissChange::TitleSet { resolved },
+            ..
+        }) => {
             let resolver_note = match resolved.as_deref() {
                 Some(r) => format!("; resolver said '{r}'"),
                 None => "; nothing had resolved one".to_string(),
@@ -446,108 +482,82 @@ pub(crate) const KNOWN_STORES: &[&str] = &[
     "none",
 ];
 
-/// The TUI's store correction: cycle the selected entry's effective store
-/// to the next known id. Cycling onto the daemon's own guess clears the
-/// override (the entry is back to "guessed"). A corrected store is what
-/// makes the next verify's store+codename lookup able to hit.
+/// The TUI's store correction: cycle the entry's effective store to the
+/// next known id. The cycle is a keyboard affordance; what is sent is a
+/// plain SetStore, and landing on the daemon's own guess clears the
+/// override.
 pub(crate) fn tui_cycle_store(key: &str) -> (Vec<String>, bool) {
-    let mut report = UmuReport::load_for_annotations();
-    if let Some(e) = report.load_error() {
-        return (vec![e.to_string()], false);
-    }
-    let Some(m) = report.entries().get(key) else {
-        return (
-            vec![format!("No stash entry under '{key}' anymore.")],
-            false,
-        );
+    cycle_store(&mut McpEditor, key)
+}
+
+fn cycle_store(editor: &mut impl Editor, key: &str) -> (Vec<String>, bool) {
+    let current = match editor.get(key) {
+        Ok(m) => m.effective_store().to_string(),
+        Err(line) => return (vec![line], false),
     };
-    let current = m.effective_store().to_string();
     let idx = KNOWN_STORES.iter().position(|s| *s == current);
     let next = KNOWN_STORES[(idx.map_or(0, |i| i + 1)) % KNOWN_STORES.len()].to_string();
-    let line = match apply_verb(
-        &mut report,
+    let line = match editor.apply(
         key,
         &MissVerb::SetStore {
             store: next.clone(),
         },
     ) {
-        Ok((_, MissChange::StoreSet { guessed })) => {
-            format!("Store set to {next} (daemon guessed {guessed}) - press v to re-verify.")
-        }
+        Ok(Applied {
+            change: MissChange::StoreSet { guessed },
+            ..
+        }) => format!("Store set to {next} (daemon guessed {guessed}) - press v to re-verify."),
         Ok(_) => format!("Store back to the daemon's guess: {next}."),
         Err(line) => return (vec![line], false),
     };
-    report.save();
     (vec![line], true)
 }
 
-/// The TUI's `d`: dismiss the selected entry, or restore it. A dismissed
-/// entry is parked (bottom of the list, greyed, out of every export), not
-/// deleted - a deleted key would be resurrected by the daemon's merge and
-/// re-recorded on the next launch anyway, and "not wanted" is a judgment
-/// worth being able to reverse.
+/// The TUI's `d`: dismiss the selected entry, or restore it. Parked, not
+/// deleted: the daemon's merge would resurrect a deleted key, and "not
+/// wanted" is a judgment worth being able to reverse.
 pub(crate) fn tui_toggle_dismiss(key: &str) -> (Vec<String>, bool) {
-    let mut report = UmuReport::load_for_annotations();
-    if let Some(e) = report.load_error() {
-        return (vec![e.to_string()], false);
-    }
-    let Some(m) = report.entries().get(key) else {
-        return (
-            vec![format!("No stash entry under '{key}' anymore.")],
-            false,
-        );
+    toggle_dismiss(&mut McpEditor, key)
+}
+
+fn toggle_dismiss(editor: &mut impl Editor, key: &str) -> (Vec<String>, bool) {
+    let verb = match editor.get(key) {
+        Ok(m) if m.dismissed.is_some() => MissVerb::Undismiss,
+        Ok(_) => MissVerb::Dismiss,
+        Err(line) => return (vec![line], false),
     };
-    let verb = if m.dismissed.is_some() {
-        MissVerb::Undismiss
-    } else {
-        MissVerb::Dismiss
-    };
-    let line = match apply_verb(&mut report, key, &verb) {
-        Ok((title, MissChange::Restored)) => {
-            format!("{title} restored - back in the list and the exports.")
-        }
-        Ok((title, _)) => {
+    let line = match editor.apply(key, &verb) {
+        Ok(Applied {
+            title,
+            change: MissChange::Restored,
+            ..
+        }) => format!("{title} restored - back in the list and the exports."),
+        Ok(Applied { title, .. }) => {
             format!("{title} dismissed - kept in the stash, out of the exports (d restores).")
         }
         Err(line) => return (vec![line], false),
     };
-    report.save();
     (vec![line], true)
 }
 
 /// The TUI's `u`: promote the selected entry into the umu-database pipeline,
-/// or take the promotion back. Same annotation write path as
-/// [`tui_toggle_dismiss`]; the decision lives in [`toggle_promote`].
+/// or take the promotion back.
 pub(crate) fn tui_toggle_promote(key: &str) -> (Vec<String>, bool) {
-    let mut report = UmuReport::load_for_annotations();
-    if let Some(e) = report.load_error() {
-        return (vec![e.to_string()], false);
-    }
-    let (lines, ok) = toggle_promote(&mut report, key);
-    if ok {
-        report.save();
-    }
-    (lines, ok)
+    toggle_promote(&mut McpEditor, key)
 }
 
-/// Toggle `umu_promoted` (today's date / None) on a umu miss. Promotion is
-/// the opt-in of the owner policy: it makes the entry a umu candidate even
-/// without a protonfix or cross-store match. A launcher launch (empty umu
-/// id) never went through umu, so there is nothing to promote - refused
-/// with a line saying so.
-fn toggle_promote(report: &mut UmuReport, key: &str) -> (Vec<String>, bool) {
-    let promoted = report
-        .entries()
-        .get(key)
-        .is_some_and(|m| m.umu_promoted.is_some());
-    let verb = if promoted {
-        MissVerb::Demote
-    } else {
-        MissVerb::Promote
+/// Promotion is the opt-in of the owner policy: it makes the entry a umu
+/// candidate even without a protonfix or cross-store match. A launcher
+/// launch never went through umu, so it is refused with a line saying so.
+fn toggle_promote(editor: &mut impl Editor, key: &str) -> (Vec<String>, bool) {
+    let verb = match editor.get(key) {
+        Ok(m) if m.umu_promoted.is_some() => MissVerb::Demote,
+        Ok(_) => MissVerb::Promote,
+        Err(line) => return (vec![line], false),
     };
-    let line = match apply_verb(report, key, &verb) {
-        Ok((title, MissChange::Demoted)) => format!("{title} no longer promoted - a umu candidate only if a protonfix or cross-store match suggests it."),
-        Ok((title, _)) => format!("{title} promoted - in the umu exports even without a protonfix or cross-store match (u reverts)."),
+    let line = match editor.apply(key, &verb) {
+        Ok(Applied { title, change: MissChange::Demoted, .. }) => format!("{title} no longer promoted - a umu candidate only if a protonfix or cross-store match suggests it."),
+        Ok(Applied { title, .. }) => format!("{title} promoted - in the umu exports even without a protonfix or cross-store match (u reverts)."),
         Err(line) => return (vec![line], false),
     };
     (vec![line], true)

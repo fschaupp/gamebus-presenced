@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::super::auth::{describe, ClientStatus, Entry, Origin, OwnerOp, Registration, Strategy};
-use super::{field, App};
+use super::{field, App, PromptOp};
 
 fn short(hash: &str) -> &str {
     &hash[..hash.len().min(12)]
@@ -22,7 +22,7 @@ fn short(hash: &str) -> &str {
 fn state_line(app: &App) -> Line<'static> {
     match &app.auth.state {
         None => Line::from(Span::styled(
-            "Not initialised: MCP clients can read but not edit. Run `gamebus-setup auth init` in a terminal.",
+            "Not initialised: nothing can edit over MCP, this TUI included. Press i to set it up.",
             Style::default().fg(Color::Yellow),
         )),
         Some(Err(e)) => Line::from(Span::styled(
@@ -38,6 +38,16 @@ fn state_line(app: &App) -> Line<'static> {
                 app.auth.entries.len()
             )),
         ]),
+    }
+}
+
+fn describe_prompt(op: &PromptOp) -> String {
+    match op {
+        PromptOp::Owner(op) => format!("Passphrase to {}", describe_op(op)),
+        PromptOp::NewPassphrase => {
+            "New owner passphrase (at least 8 characters, never stored)".into()
+        }
+        PromptOp::ConfirmPassphrase(_) => "The same passphrase again".into(),
     }
 }
 
@@ -182,7 +192,7 @@ pub(super) fn render_auth(f: &mut Frame, area: Rect, app: &mut App) {
 
     if let Some(p) = &app.pass_input {
         let text = Line::from(vec![
-            Span::raw(format!("Passphrase to {}: ", describe_op(&p.op))),
+            Span::raw(format!("{}: ", describe_prompt(&p.op))),
             Span::styled(
                 "•".repeat(p.buffer.chars().count()),
                 Style::default().fg(Color::Cyan),

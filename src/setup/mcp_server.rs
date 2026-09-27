@@ -558,11 +558,13 @@ impl Server {
                 format!("no identity miss under {key}"),
             )
         })?;
-        if let MissVerb::AssignId { id } = &verb {
-            let id = id.trim().to_lowercase();
-            super::umu_misses::check_id(prior.effective_title(), &id)
-                .map_err(|e| ToolError::new(ErrorReason::Refused, e))?;
-        }
+        let note = match &verb {
+            MissVerb::AssignId { id } => Some(
+                super::umu_misses::check_id(prior.effective_title(), &id.trim().to_lowercase())
+                    .map_err(|e| ToolError::new(ErrorReason::Refused, e))?,
+            ),
+            _ => None,
+        };
         let mut edited = prior.clone();
         let change = apply_miss(&mut edited, &verb, &today()).map_err(refused)?;
         let action = Action::EditMiss {
@@ -573,7 +575,7 @@ impl Server {
         self.record(&ledger, actor, action, json!(prior))?;
         report.update(&key, |m| *m = edited.clone());
         report.save();
-        Ok(json!({"change": change, "row": miss_row(&key, &edited)}))
+        Ok(json!({"change": change, "row": miss_row(&key, &edited), "note": note}))
     }
 
     fn apply_finding(&self, args: &Value) -> Result<Value, ToolError> {
