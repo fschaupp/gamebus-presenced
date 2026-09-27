@@ -555,3 +555,36 @@ fn a_data_set_that_does_not_validate_builds_nothing() {
     );
     assert!(!scratch.join("out").join("identities.json").exists());
 }
+
+#[test]
+fn an_invalid_store_list_builds_nothing_even_with_the_lint_skipped() {
+    let scratch = common::Scratch::new("stores-gate");
+    let data = scratch.join("data");
+    std::fs::create_dir_all(data.join("games")).unwrap();
+    let source = common::data_set();
+    for entry in std::fs::read_dir(source.join("games")).unwrap().flatten() {
+        std::fs::copy(entry.path(), data.join("games").join(entry.file_name())).unwrap();
+    }
+    std::fs::copy(source.join("helpers.toml"), data.join("helpers.toml")).unwrap();
+    // One spelling naming two stores: gamebus's build would refuse this list.
+    let stores = std::fs::read_to_string(source.join("stores.toml"))
+        .unwrap()
+        .replace("aliases = [\"epic\"]", "aliases = [\"epic\", \"gog\"]");
+    std::fs::write(data.join("stores.toml"), stores).unwrap();
+
+    let error = build::run(&Options {
+        data,
+        out: scratch.join("out"),
+        commit: "deadbeef".into(),
+        skip_lint: true,
+        schema_dir: Some(common::schema_dir()),
+    })
+    .expect_err("an invalid store list must not build, lint or no lint");
+    let message = error.to_string();
+    assert!(
+        message.contains("stores.toml does not validate"),
+        "{message}"
+    );
+    assert!(message.contains("\"gog\" names two stores"), "{message}");
+    assert!(!scratch.join("out").join("identities.json").exists());
+}

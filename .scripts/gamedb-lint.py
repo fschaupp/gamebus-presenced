@@ -60,15 +60,38 @@ base = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "gamedb")
 schemas = base/"schema" if (base/"schema").is_dir() else pathlib.Path("gamedb/schema")
 gs = json.loads((schemas/"game.schema.json").read_text())
 hs = json.loads((schemas/"helpers.schema.json").read_text())
+ss = json.loads((schemas/"stores.schema.json").read_text())
+stores = tomllib.loads((base/"stores.toml").read_text())
 errs = []
 for f in sorted((base/"games").glob("*.toml")):
     check(gs, gs, tomllib.loads(f.read_text()), f.name, errs)
 check(hs, hs, tomllib.loads((base/"helpers.toml").read_text()), "helpers.toml", errs)
+check(ss, ss, stores, "stores.toml", errs)
+
+# stores.toml is the one list of stores: the page schema's store keys must be
+# exactly its ids, less the standalone one, and the id precedence names only those.
+listed = {s["id"] for s in stores.get("store", []) if not s.get("standalone")}
+keys = set(gs["properties"]["stores"]["propertyNames"]["enum"])
+if listed != keys:
+    errs.append(f"game.schema.json: its store keys must match stores.toml (missing {sorted(listed - keys)}, not in stores.toml {sorted(keys - listed)})")
+for p in stores.get("id_precedence", []):
+    if p not in listed:
+        errs.append(f"stores.toml: id_precedence names {p!r}, which is not a store it lists")
+# what the schema cannot say, and gamebus's build refuses
+seen = set()
+for s in stores.get("store", []):
+    for spelling in [s.get("id")] + s.get("aliases", []):
+        if spelling in seen:
+            errs.append(f"stores.toml: {json.dumps(spelling)} names two stores")
+        seen.add(spelling)
+standalone = sum(1 for s in stores.get("store", []) if s.get("standalone"))
+if standalone != 1:
+    errs.append(f'stores.toml: {standalone} standalone entries; exactly one says "no store"')
 
 # canonical id: derived where an authority names the game, minted only when none does.
 # the prefix names the namespace and the tail is never parsed, so gog-1660194629
 # is a perfectly good id and needs no special handling.
-STORE_PRECEDENCE = ["gog", "egs", "ubisoft", "ea", "battlenet", "amazon", "humble", "itchio", "zoomplatform"]
+STORE_PRECEDENCE = stores.get("id_precedence", [])
 
 def candidates(d):
     """Every id this page's own data could justify, best first.

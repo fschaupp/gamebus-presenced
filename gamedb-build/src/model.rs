@@ -9,24 +9,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Stores whose STORE_PRECEDENCE position lends a page its canonical id,
-/// best first. `steam` and `umu` are handled separately in
-/// [`Page::candidates`], one rung above this list: `[ids]` outranks a store
-/// entry naming the same authority, but a `[[stores.steam]]` or
-/// `[[stores.umu]]` codename justifies the id just the same when `[ids]`
-/// never recorded it.
-pub const STORE_PRECEDENCE: [&str; 9] = [
-    "gog",
-    "egs",
-    "ubisoft",
-    "ea",
-    "battlenet",
-    "amazon",
-    "humble",
-    "itchio",
-    "zoomplatform",
-];
-
 /// Anything that stopped the run before a report could be produced. A finding
 /// about the data is not one of these - that is a line in the report.
 #[derive(Debug)]
@@ -90,6 +72,13 @@ pub struct Page {
     pub slug: String,
     pub path: PathBuf,
     pub doc: toml::Value,
+    /// The stores whose codename lends a page its canonical id, best first:
+    /// the data set's own `stores.toml` `id_precedence`. `steam` and `umu`
+    /// rank above all of them and are handled in [`Page::candidates`]:
+    /// `[ids]` outranks a store entry naming the same authority, but a
+    /// `[[stores.steam]]` or `[[stores.umu]]` codename justifies the id just
+    /// the same when `[ids]` never recorded it.
+    pub precedence: std::sync::Arc<[String]>,
 }
 
 impl Page {
@@ -158,7 +147,7 @@ impl Page {
     /// `[ids].steam` outranks `[ids].umu`, which outranks a `stores.steam`
     /// or `stores.umu` entry naming the same authority (a steam store
     /// codename IS a steam appid), which outranks the stores in
-    /// [`STORE_PRECEDENCE`] order.
+    /// the data set's id precedence.
     pub fn candidates(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(steam) = self.id_field("steam") {
@@ -188,7 +177,7 @@ impl Page {
                 }
             }
         }
-        for wanted in STORE_PRECEDENCE {
+        for wanted in self.precedence.iter() {
             for (store, entries) in &stores {
                 if *store != wanted {
                     continue;
@@ -249,11 +238,14 @@ pub struct DataSet {
     pub pages: Vec<Page>,
     pub helpers: toml::Value,
     pub helpers_path: PathBuf,
+    /// `stores.toml`: the stores the data set knows, and the id precedence.
+    pub stores: toml::Value,
     pub schema_dir: PathBuf,
 }
 
 impl DataSet {
-    /// Load `<base>/games/*.toml` and `<base>/helpers.toml`.
+    /// Load `<base>/games/*.toml`, `<base>/helpers.toml` and
+    /// `<base>/stores.toml`.
     ///
     /// Schemas come from `<base>/schema` when that exists and from
     /// `gamedb/schema` relative to the working directory otherwise, which is
@@ -285,6 +277,18 @@ impl DataSet {
         // that the same as comparing file names.
         paths.sort();
 
+        let stores = read_toml(&base.join("stores.toml"))?;
+        let precedence: std::sync::Arc<[String]> = stores
+            .get("id_precedence")
+            .and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut pages = Vec::with_capacity(paths.len());
         for path in paths {
             let file = path
@@ -303,6 +307,7 @@ impl DataSet {
                 slug,
                 path,
                 doc,
+                precedence: precedence.clone(),
             });
         }
 
@@ -313,6 +318,7 @@ impl DataSet {
             pages,
             helpers,
             helpers_path,
+            stores,
             schema_dir,
         })
     }
@@ -337,6 +343,19 @@ mod tests {
             slug: "x".into(),
             path: PathBuf::from("x.toml"),
             doc: doc.parse().expect("fixture parses"),
+            precedence: [
+                "gog",
+                "egs",
+                "ubisoft",
+                "ea",
+                "battlenet",
+                "amazon",
+                "humble",
+                "itchio",
+                "zoomplatform",
+            ]
+            .map(String::from)
+            .into(),
         }
     }
 

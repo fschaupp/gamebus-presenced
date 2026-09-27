@@ -137,6 +137,16 @@ pub const MANIFEST: &str = "manifest.toml";
 pub fn run(options: &Options) -> Result<Outcome> {
     let data = DataSet::load(&options.data, options.schema_dir.as_deref())?;
 
+    // Unconditional, unlike the lint below: consumers compile this list in,
+    // and an invalid one must never reach an artifact.
+    let store_errs = crate::lint::store_problems(&data).map_err(Error::Data)?;
+    if !store_errs.is_empty() {
+        return Err(Error::Data(format!(
+            "stores.toml does not validate, so there is nothing to build:\n{}",
+            store_errs.join("\n")
+        )));
+    }
+
     let mut warnings = Vec::new();
     if !options.skip_lint {
         let report = crate::lint::check(&data);
