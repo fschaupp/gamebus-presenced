@@ -43,9 +43,15 @@ can supply.
 ## Install
 
 ```sh
+git clone --recursive https://github.com/fschaupp/gamebus-presenced.git
+cd gamebus-presenced
 cargo build --release
 ./target/release/gamebus-setup
 ```
+
+`--recursive` fetches the `gamedb` submodule, which carries the list of stores
+the build compiles in; in an existing clone, `git submodule update --init`
+does the same. GitHub's "Source code" archives leave it out and do not build.
 
 `gamebus-setup` is a small terminal tool: it reports what is and is not working,
 installs the daemon, and fixes the usual problems (autostart disabled, naming

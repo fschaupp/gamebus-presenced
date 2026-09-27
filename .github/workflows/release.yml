@@ -18,7 +18,10 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # The store list the coupler compiles in lives in the gamedb submodule.
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       # rustup picks up the repo's rust-toolchain pin (channel + components).
       - name: Install toolchain
